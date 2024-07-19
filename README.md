@@ -1,0 +1,1 @@
+<img src="figs/logo.png" alt="SpecDecodes" width="220" align="left"><div align="center"><h1>&nbsp;SpecDecodes</h1></div>
