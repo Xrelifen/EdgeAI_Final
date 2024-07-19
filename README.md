@@ -1,1 +1,1 @@
-<img src="assets/logo.png" alt="Medusa" width="100" align="left"><div align="center"><h1>&nbsp;SpecDecodes: An Experimental Library for Speculative Decoding Methods</h1></div>
+# <img src="assets/logo.png" alt="Medusa" width="100" align="left"><i>SpecDecodes:</i> A Library for Speculative Decoding
