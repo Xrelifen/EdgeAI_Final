@@ -1,23 +1,25 @@
 import argparse
+import math
 import os
 import json
-import numpy as np
 
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
+from transformers import LlamaForCausalLM
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
-from typing import Any, Dict, List
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from typing import Any, Dict, List
 
-from ..model.configuration_eagle import EagleConfig
-from ..model.ea_model import DraftModel
-from ..model.modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from ..model.modeling_llama_kv import LlamaModel
 from tqdm import tqdm
 from copy import deepcopy
 import wandb
+
+from ..model.configuration_eagle import EagleConfig
+from ..model.ea_model import DraftModel
+from ..model.modeling_llama_no_init_weights import LlamaModel
+
 
 class AddGaussianNoise:
     def __init__(self, mean=0.0, std=0.0):
@@ -145,11 +147,11 @@ def top_accuracy(output, target, topk=(1,)):
         return res
 
 @torch.no_grad()
-def getkacc(model, data, head, max_length=5, dtype=torch.float32):
-    hidden_states = data["hidden_states"].to(dtype)
+def getkacc(model, data, head, max_length=5):
+    hidden_states = data["hidden_states"]
     input_ids = data["input_ids"]
     loss_mask = data["loss_mask"]
-    target = data["target"].to(dtype)
+    target = data["target"]
     total = [0 for _ in range(max_length)]
     correct = [0 for _ in range(max_length)]
     bs, sl = hidden_states.shape[0], hidden_states.shape[1]
@@ -177,7 +179,7 @@ def getkacc(model, data, head, max_length=5, dtype=torch.float32):
                     break
                 out_hidden = model(single_hidden_states, input_ids=single_input_ids)[0]
                 last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden.to(dtype))
+                last_headout = head(last_hidden)
                 token = torch.argmax(last_headout)
                 total[k] += 1
                 if token == target_out_token:
@@ -195,10 +197,11 @@ def getkacc(model, data, head, max_length=5, dtype=torch.float32):
     return acc
 
 def calculate_loss(predict, target, out_head, target_head, loss_mask, criterion, train_config):
-    target_logp = nn.Softmax(dim=2)(target_head).detach()
+    with torch.no_grad():
+        target_p = nn.Softmax(dim=2)(target_head).detach()
     out_logp = nn.LogSoftmax(dim=2)(out_head)
 
-    plogp = target_logp * out_logp
+    plogp = target_p * out_logp
     ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
     vloss = criterion(predict, target)
     vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
@@ -231,34 +234,29 @@ def gather_metrics(correct, total, topk_acc, accelerator):
     topk_acc = accelerator.gather_for_metrics(topk_acc)
     return correct, total, topk_acc
 
-
-def train_one_epoch(model, train_loader, optimizer, scheduler, criterion, train_config, epoch, num_epochs, accelerator):
+def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, criterion, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
 
-    for batch_idx, data in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")):
+    for idx, data in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
-
-            lm_head = model.module.lm_head
             predict = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
             target = data["target"]
 
-            with torch.no_grad():
-                target_head = lm_head(target.to(lm_head.weight.dtype))
+            target_head = lm_head(target.to(lm_head.weight.dtype))
             out_head = lm_head(predict)
 
             loss, ploss, vloss = calculate_loss(predict, target, out_head, target_head, data["loss_mask"][:, :, None], criterion, train_config)
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
-            # accelerator.clip_grad_norm_(model.parameters(), train_config["grad_clip"])
             optimizer.step()
             scheduler.step()
 
         prev_total = total
         correct, total = update_metrics(out_head, target_head, data["loss_mask"][:, :, None], correct, topk_acc, total)
-        if accelerator.is_main_process and total > prev_total:
+        if accelerator.is_main_process and (idx % train_config["log_freq"] == 0) and total > prev_total and run:
             logdict = {
                 "train/lr": optimizer.optimizer.param_groups[0]["lr"], 
                 "train/vloss": vloss.item(),
@@ -268,14 +266,14 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, criterion, train_
             }
             for id, acc in enumerate(topk_acc):
                 logdict[f'train/top_{id + 1}_acc'] = acc.item() / total
-            wandb.log(logdict)
+            run.log(logdict)
         epoch_loss += loss.item()
         num_batches += 1
 
     correct, total, topk_acc = gather_metrics(correct, total, topk_acc, accelerator)
     epoch_loss /= num_batches
 
-    if accelerator.is_local_main_process:
+    if accelerator.is_local_main_process and run:
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}')
         print(f'Train Accuracy: {100 * correct / total:.2f}%')
         logdict = {
@@ -284,11 +282,11 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, criterion, train_
         }
         for id, acc in enumerate(topk_acc):
             logdict[f'train/epochtop_{id + 1}_acc'] = acc.sum().item() / total
-        wandb.log(logdict)
+        run.log(logdict)
 
 
 @torch.no_grad()
-def validate(model, test_loader, criterion, train_config, epoch, num_epochs, save_dir, accelerator):
+def validate(model, lm_head, embed_tokens, test_loader, criterion, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
@@ -296,15 +294,15 @@ def validate(model, test_loader, criterion, train_config, epoch, num_epochs, sav
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
         if batch_idx < 10:
-            acces = getkacc(model, data, model.module.lm_head, max_length=5, dtype=model.module.lm_head.weight.dtype)
+            acces = getkacc(model, data, lm_head, max_length=5)
             for i in range(len(acces)):
                 k_acc[i].append(acces[i])
 
         predict = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
         target = data["target"]
 
-        target_head = model.module.lm_head(target.to(model.module.lm_head.weight.dtype))
-        out_head = model.module.lm_head(predict)
+        target_head = lm_head(target.to(lm_head.weight.dtype))
+        out_head = lm_head(predict)
 
         loss, ploss, vloss = calculate_loss(predict, target, out_head, target_head, data["loss_mask"][:, :, None], criterion, train_config)
 
@@ -317,7 +315,7 @@ def validate(model, test_loader, criterion, train_config, epoch, num_epochs, sav
     correct, total, topk_acc = gather_metrics(correct, total, topk_acc, accelerator)
     epoch_loss /= num_batches
 
-    if accelerator.is_local_main_process:
+    if accelerator.is_local_main_process and run:
         print(f'Test Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}')
         print(f'Test Accuracy: {100 * correct / total:.2f}%')
         logdict = {
@@ -328,58 +326,50 @@ def validate(model, test_loader, criterion, train_config, epoch, num_epochs, sav
             logdict[f'test/{id}_acc'] = acc.mean().item()
         for id, acc in enumerate(topk_acc):
             logdict[f'test/top_{id + 1}_acc'] = acc.sum().item() / total
-        wandb.log(logdict)
+        run.log(logdict)
 
         # save model
-        lm_head, embed_tokens = model.module.discard_head_and_embed()
+        del model.module.lm_head
+        del model.module.embed_tokens
         accelerator.save_model(model, f"{save_dir}/model_{epoch}")
-        model.module.set_head_and_embed(lm_head, embed_tokens)
-
+        model.module.lm_head = lm_head
+        model.module.embed_tokens = embed_tokens
 
 def main(args):
     set_seed(0) # fix seed
 
-    # HUGE speedup, especially on A100 abocve
+    # HUGE speedup, especially on A100 or above
     torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
     train_config = {
-        "lr": args.lr,
-        "bs": args.bs,
-        "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "datapath": f"{args.datadir}",
-        "num_epochs": 20,
-        # Depending on your data and model size, the larger the model, the higher the sample efficiency. We recommend setting it between 20-40.
-        "num_warmup_steps": 2000,
-        "total_steps": 800000,
         "p_w": 0.1,
         "v_w": 1.0,
         "head_w": 0.1,
-        "num_workers": 2,
-        "embeding": True,
-        "act": "No",
+        "num_workers": 16,
         "data_noise": True,
         "noise": "uniform",
         "mean": 0.0,
         "std": 0.2,
         "residual": "true,norm",
-        "max_len": 2048,
         # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
-        "config_path": args.configpath,
-        "b1": 0.9,
-        "b2": 0.95,
-        "grad_clip": 0.5,
-        "save_freq": 5
+        "max_len": 2048,
+        "grad_clip": 1.0, #0.5
+        "save_freq": 5,
+        "log_freq": 1#10,
     }
 
     # Init Accelerator
-    accelerator = Accelerator(gradient_accumulation_steps=train_config["gradient_accumulation_steps"])
+    accelerator = Accelerator()
     
     # wandb
+    run = None
     if accelerator.is_main_process:
         if not args.wandb:
             os.environ['WANDB_DISABLED'] = 'true'
-        wandb.init(project="eagle", config=train_config)
+
+        # Add requirement for wandb core
+        wandb.require("core")
+        run = wandb.init(project="eagle", config=train_config)
 
     # NEFTune
     if train_config["data_noise"]:
@@ -391,7 +381,7 @@ def main(args):
         aug = None
 
     # Load dataset
-    datapath = list_files(train_config["datapath"])
+    datapath = list_files(args.datadir)
     datapath = datapath[:int(len(datapath) * args.data_ratio)]
     print('Total data:',len(datapath))
 
@@ -401,10 +391,10 @@ def main(args):
     traindataset = CustomDataset(traindatapath, transform=aug, max_len=train_config["max_len"])
     testdataset = CustomDataset(testdatapath)
 
-    train_loader = DataLoader(traindataset, batch_size=train_config["bs"], shuffle=True,
+    train_loader = DataLoader(traindataset, batch_size=args.bs, shuffle=True,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
                             pin_memory=True)
-    test_loader = DataLoader(testdataset, batch_size=train_config["bs"], shuffle=False,
+    test_loader = DataLoader(testdataset, batch_size=args.bs, shuffle=False,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"], pin_memory=True)
     
     if accelerator.is_main_process:
@@ -413,16 +403,22 @@ def main(args):
 
 
     # Load model configs.
-    config = EagleConfig.from_pretrained(train_config["config_path"])
+    config = EagleConfig.from_pretrained(args.configpath)
 
     print("Lodaing head and embed_tokens...")
     base_model_name_or_path = config.base_model_name_or_path
-    big_model = KVLlamaForCausalLM.from_pretrained(base_model_name_or_path)
+    big_model = LlamaForCausalLM.from_pretrained(base_model_name_or_path)
     # create new head and embed_tokens
-    head = torch.nn.Linear(big_model.config.hidden_size, big_model.config.vocab_size, bias=False)
+    lm_head = torch.nn.Linear(big_model.config.hidden_size, big_model.config.vocab_size, bias=False)
     embed_tokens = nn.Embedding(big_model.config.vocab_size,big_model.config.hidden_size, big_model.config.pad_token_id)
+    lm_head.weight.data = big_model.lm_head.weight.data
+    embed_tokens.weight.data = big_model.get_input_embeddings().weight.data
+    # convert to fp32
+    lm_head = lm_head.to(torch.float32)
+    embed_tokens = embed_tokens.to(torch.float32)
+    
     # not traininable
-    for param in head.parameters():
+    for param in lm_head.parameters():
         param.requires_grad = False
     for param in embed_tokens.parameters():
         param.requires_grad = False
@@ -432,58 +428,84 @@ def main(args):
     print("Loading draft model...")
     draft_config = deepcopy(config)
     draft_config.num_hidden_layers = 1
+    draft_config.use_cache = False
+    draft_config._attn_implementation = "sdpa"
     tiny_model = LlamaModel(draft_config)
-    model = DraftModel(draft_config)
-    model.model = tiny_model
-    model.lm_head = head
+    del tiny_model.embed_tokens
+    
+    model = DraftModel(draft_config, tiny_model)
+    model.lm_head = lm_head
     model.embed_tokens = embed_tokens
+    
+    # config = EConfig.from_pretrained(train_config["config_path"])
+    # config._attn_implementation = "sdpa"
+    # config.use_cache = False
+    # model = Model(config, load_emb=False)
+    # model.lm_head = lm_head
+    # model.embed_tokens = embed_tokens
+    print("Model Loaded.")
+    
+    #print each layer's dtype
+    # for name, param in model.named_parameters():
+    #     print(name, param.dtype)
+    
+    # exit(1)
 
-    print("Loaded.")
 
-
+    print("Setting up training...")
     criterion = nn.SmoothL1Loss(reduction="none")
-    optimizer = optim.AdamW(model.parameters(), lr=train_config["lr"], betas=(train_config["b1"], train_config["b2"]))
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
 
-    num_epochs = train_config["num_epochs"]
-    num_warmup_steps = train_config["num_warmup_steps"]
-    total_steps = train_config["total_steps"]
-
-    # get_linear_schedule_with_warmup
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
-                                                num_training_steps=total_steps)
+    # https://github.com/huggingface/diffusers/pull/6143/files
+    num_update_steps_per_epoch = math.ceil(len(train_loader) / accelerator.num_processes / accelerator.gradient_accumulation_steps)
+    max_train_steps = args.epochs * num_update_steps_per_epoch
+    
+    num_warmup_steps = max_train_steps * args.warmup_ratio * accelerator.num_processes
+    num_training_steps = max_train_steps * accelerator.num_processes
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
+    
     model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, test_loader, scheduler
     )
+    print("Model loaded to accelerator.")
+    
         
     print("Start training...")
-    for epoch in range(num_epochs):
+    for epoch in range(args.epochs):
         train_one_epoch(
-            model, train_loader, 
-            optimizer, scheduler, criterion, train_config, 
-            epoch, num_epochs, accelerator
+            model, lm_head, embed_tokens,
+            train_loader, optimizer, scheduler, criterion, train_config, 
+            epoch, args.epochs, accelerator, run
         )
         
-        if (epoch == num_epochs-1) or (epoch % train_config["save_freq"] == 0):
+        if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
             validate(
-                model, test_loader, 
-                criterion, train_config, 
-                epoch, num_epochs, args.savedir, accelerator
+                model, lm_head, embed_tokens,
+                test_loader, criterion, train_config, 
+                epoch, args.epochs, args.savedir, accelerator, run
             )
+
+    if accelerator.is_main_process:
+        run.finish()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='sp')
     parser.add_argument('--configpath', type=str, default="config.json")
-    parser.add_argument('--lr', type=float, default=3e-5)
-    parser.add_argument('--bs', type=int, default=4)
-    parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
     parser.add_argument('--datadir', type=str, default='0')
     parser.add_argument('--outdir', type=str, default='0')
     parser.add_argument('--savedir', type=str, default='0')
     parser.add_argument('--data-ratio', type=float, default=1)
-    # set to true without having to pass a true argument
+    
+    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--warmup-ratio', type=int, default=0.05)
+    parser.add_argument('--bs', type=int, default=4)
+    # https://github.com/NVIDIA/NeMo/blob/876c8511e579c1c343b52bdd96ebe2296608434c/tutorials/asr/ASR_CTC_Language_Finetuning.ipynb
+    parser.add_argument('--lr', type=float, default=1e-4) #1e-2 too large, loss becomes nan when lr>3e-4
+    parser.add_argument('--weight-decay', type=float, default=1e-3)
+    parser.add_argument('--betas', type=float, default=(0.95, 0.5))  # from paper
+    
+    # logging
     parser.add_argument('--wandb', action='store_true')
     args = parser.parse_args()
     main(args)
-
-    

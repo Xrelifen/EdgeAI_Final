@@ -1,8 +1,15 @@
 import torch
-from eagle.model.ea_model import EagleModelLlama
+from transformers import LlamaForCausalLM
+
 from fastchat.model import get_conversation_template
+from copy import deepcopy
 import argparse
 import time
+
+from specdecodes.models.sdmodel import NaiveWrapper, SpecDecodesWrapper
+from specdecodes.models.ssm.eagle import DraftModel
+
+
 
 
 def main(args):
@@ -28,16 +35,34 @@ def main(args):
         _ = model.eagle_generate(input_ids)
 
     print("Loading model...")
-    eagle_conf_path = '/home/nctu/scott306lr/LREAGLE/eagle/eagle-llama2-7b'
-    model = EagleModelLlama.from_pretrained(
-        eagle_conf_path,
+    # load LLM
+    llm_path = "meta-llama/Llama-2-7b-chat-hf"
+    llm = LlamaForCausalLM.from_pretrained(
+        llm_path, 
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        device_map="auto",
-        load_draft_weight=True,#False
-        total_tokens=60
+        device_map="auto"
     )
+    
+    # load SSM
+    draft_config = deepcopy(llm.config)
+    draft_config.num_hidden_layers = 1
+    ssm_path = '/home/nctu/scott306lr/LREAGLE/eagle/eagle-llama2-7b'
+    ssm = DraftModel.from_pretrained(
+        ssm_path, 
+        config=draft_config,
+        torch_dtype=torch.float16,
+    )
+    
+    # model = NaiveWrapper()
+    model = SpecDecodesWrapper()
+    model.set_llm(llm)
+    print("device:", llm.model.layers[-1].self_attn.q_proj.weight.device)
+    ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+    model.set_ssm(ssm)
+    model.load_tokenizer(llm_path)
     print("Loaded.")
+
     # input("enter to exit...")
     # for n, m in model.named_parameters():
     #     print(f"{n}: {m.device}")
@@ -75,7 +100,7 @@ def main(args):
     # generate response
     print("Generating response...")
     start_time = time.time()
-    output_ids = model.eagle_generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_token)
+    output_ids = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=False)
     # for output_ids in model.eagle_generate_generator(input_ids, temperature=args.temp, max_new_tokens=args.max_new_token):
     #     print(output_ids, end='')
     end_time = time.time()
@@ -103,13 +128,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-new-token",
         type=int,
-        default=512,
+        default=1024,
         help="The maximum number of new generated tokens.",
     )
     parser.add_argument(
         "--temp",
         type=float,
-        default=0.0, #0.5,
+        default=0.5,
         help="The temperature for sampling.",
     )
     parser.add_argument(
