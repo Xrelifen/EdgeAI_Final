@@ -1,5 +1,5 @@
 import torch
-from transformers import LlamaForCausalLM
+from transformers import LlamaForCausalLM, AutoTokenizer
 
 from fastchat.model import get_conversation_template
 from copy import deepcopy
@@ -8,8 +8,6 @@ import time
 
 from specdecodes.models.sdmodel import NaiveWrapper, SpecDecodesWrapper
 from specdecodes.models.ssm.eagle import DraftModel
-
-
 
 
 def main(args):
@@ -30,9 +28,7 @@ def main(args):
             prompt += " "
         input_ids = model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
-        # for output_ids in model.ea_generate(input_ids):
-        #     ol=output_ids.shape[1]
-        _ = model.eagle_generate(input_ids)
+        _ = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=False)
 
     print("Loading model...")
     # load LLM
@@ -52,31 +48,22 @@ def main(args):
         ssm_path, 
         config=draft_config,
         torch_dtype=torch.float16,
-    )
+    ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+    
+    # load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # model = NaiveWrapper()
     model = SpecDecodesWrapper()
     model.set_llm(llm)
-    print("device:", llm.model.layers[-1].self_attn.q_proj.weight.device)
-    ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
     model.set_ssm(ssm)
-    model.load_tokenizer(llm_path)
+    model.set_tokenizer(tokenizer)
     print("Loaded.")
 
-    # input("enter to exit...")
-    # for n, m in model.named_parameters():
-    #     print(f"{n}: {m.device}")
-    # exit(0)
-
-
     # set model to eval mode, and warmup the model
+    print("Warming up...")
     model.eval()
-    # warmup(model)
-
-    #test device
-    # for n, m in model.named_parameters():
-    #     print(f"{n}: {m.device}")
-    # exit(0)
+    warmup(model)
 
     # input message
     your_message="What's the best way to start learning a new language?"
@@ -94,21 +81,16 @@ def main(args):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-    input_ids=model.tokenizer([prompt]).input_ids
+    input_ids = model.tokenizer([prompt]).input_ids
     input_ids = torch.as_tensor(input_ids).cuda()
 
     # generate response
     print("Generating response...")
     start_time = time.time()
     output_ids = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=False)
-    # for output_ids in model.eagle_generate_generator(input_ids, temperature=args.temp, max_new_tokens=args.max_new_token):
-    #     print(output_ids, end='')
     end_time = time.time()
     
-    output=model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
-    # output=model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
-    # output = model.tokenizer.decode(output_ids[0], skip_special_tokens=True, spaces_between_special_tokens=False,
-    #                                       clean_up_tokenization_spaces=True, )
+    output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
     if not args.no_print_message:
         print("\nPrompt:")

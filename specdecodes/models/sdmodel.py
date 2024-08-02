@@ -15,9 +15,8 @@ class SimpleWrapper(nn.Module):
     def set_llm(self, llm):
         self.llm = llm
         
-    def load_tokenizer(self, base_model_name_or_path):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            base_model_name_or_path, use_fast=False)
+    def set_tokenizer(self, tokenizer):
+        self.tokenizer = tokenizer
         
     def _get_logits_warper(
         self,
@@ -136,6 +135,8 @@ class NaiveWrapper(SimpleWrapper):
         *args, 
         **kwargs
     ):
+        assert self.llm is not None, "LLM model must be provided"
+        
         return self.llm.generate(
             input_ids=input_ids,
             temperature=temperature,
@@ -273,10 +274,9 @@ class SpecDecodesWrapper(SimpleWrapper):
         Returns:
             input_ids (torch.LongTensor): The generated token IDs.
         """
-
         assert self.llm is not None, "LLM model must be provided"
         assert self.ssm is not None, "SSM model must be provided"
-        assert stopping_criteria is not None, "Stopping criteria must be provided"
+        assert self.tokenizer is not None, "Tokenizer must be provided"
 
         # * clone input_ids 
         input_ids = input_ids.clone()
