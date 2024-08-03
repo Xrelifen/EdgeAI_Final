@@ -49,7 +49,7 @@ def main(args):
     ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
     
     # load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.llm_path, use_fast=False)
     
     # model = NaiveWrapper()
     model = SDWrapper()

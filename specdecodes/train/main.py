@@ -472,7 +472,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='sp')
-    parser.add_argument('--configpath', type=str, default="config.json")
+    parser.add_argument('--llm-path', '-llm', type=str, default="meta-llama/Llama-2-7b-chat-hf")
     parser.add_argument('--datadir', type=str, default='0')
     parser.add_argument('--outdir', type=str, default='0')
     parser.add_argument('--savedir', type=str, default='0')
