@@ -35,7 +35,7 @@ class DraftModel(nn.Module):
         **model_kwargs
     ):
         draft_model_path = os.path.join(
-            pretrained_model_name_or_path, "full20.saftetensors")
+            pretrained_model_name_or_path, "model.saftetensors")
         
         model = cls(config, *model_args, **model_kwargs)
         load_model(model, draft_model_path, strict=True)

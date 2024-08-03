@@ -28,7 +28,7 @@ def main(args):
             prompt += " "
         input_ids = model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
-        _ = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=False)
+        _ = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=args.do_sample)
 
     print("Loading model...")
     # load LLM
@@ -86,7 +86,7 @@ def main(args):
     # generate response
     print("Generating response...")
     start_time = time.time()
-    output_ids = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=False)
+    output_ids = model.generate(input_ids, temperature=args.temp, max_length=args.max_new_token, do_sample=args.do_sample)
     end_time = time.time()
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
@@ -111,6 +111,12 @@ if __name__ == "__main__":
         type=int,
         default=1024,
         help="The maximum number of new generated tokens.",
+    )
+    parser.add_argument(
+        "--do-sample",
+        type=bool,
+        default=False,
+        help="Whether to do sampling. (Default is False)",
     )
     parser.add_argument(
         "--temp",
