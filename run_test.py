@@ -34,7 +34,7 @@ def main(args):
     # load LLM
     llm_path = "meta-llama/Llama-2-7b-chat-hf"
     llm = LlamaForCausalLM.from_pretrained(
-        llm_path, 
+        args.llm_path, 
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         device_map="auto"
@@ -43,9 +43,8 @@ def main(args):
     # load SSM
     draft_config = deepcopy(llm.config)
     draft_config.num_hidden_layers = 1
-    ssm_path = '/home/nctu/scott306lr/LREAGLE/eagle/eagle-llama2-7b'
     ssm = DraftModel.from_pretrained(
-        ssm_path, 
+        args.ssm_path, 
         config=draft_config,
         torch_dtype=torch.float16,
     ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
@@ -120,16 +119,18 @@ if __name__ == "__main__":
         help="The temperature for sampling.",
     )
     parser.add_argument(
-        "--base-model-path",
+        "--llm-path",
+        "-llm",
         type=str,
         default="meta-llama/Llama-2-7b-chat-hf",
-        help="The base model path.",
+        help="LLM model path.",
     )
     parser.add_argument(
-        "--EAGLE-model-path",
+        "--ssm-path",
+        "-ssm",
         type=str,
-        default="yuhuili/EAGLE-llama2-chat-7B",
-        help="The EAGLE model path.",
+        default="/share3/saves/scott306lr/weights/eagle_with_ln",
+        help="SSM model path.",
     )
     parser.add_argument(
         "-nm",
