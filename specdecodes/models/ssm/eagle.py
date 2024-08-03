@@ -35,7 +35,7 @@ class DraftModel(nn.Module):
         **model_kwargs
     ):
         draft_model_path = os.path.join(
-            pretrained_model_name_or_path, "model.saftetensors")
+            pretrained_model_name_or_path, "model.safetensors")
         
         model = cls(config, *model_args, **model_kwargs)
         load_model(model, draft_model_path, strict=True)
@@ -112,6 +112,10 @@ class DraftModel(nn.Module):
                 #TODO: keep used parent indices, don't crop everything
                 # newly generated kv cache not needed
                 past_key_values.crop(org_input_len) 
+
+            # This is needed to properly delete outputs.logits which may be very large for first iteration
+            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+            del outputs
 
             #* Get probabilities of each token
             sampled_probs = nn.functional.softmax(lm_head(out_hidden)[0], dim=-1) # [0] removes batch dimension
