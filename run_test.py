@@ -32,7 +32,6 @@ def main(args):
 
     print("Loading model...")
     # load LLM
-    llm_path = "meta-llama/Llama-2-7b-chat-hf"
     llm = LlamaForCausalLM.from_pretrained(
         args.llm_path, 
         torch_dtype=torch.float16,

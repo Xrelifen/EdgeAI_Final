@@ -1,25 +1,24 @@
 import argparse
 import math
 import os
-import json
+import numpy as np
 
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
+from typing import Any, Dict, List
+
 from transformers import LlamaForCausalLM
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
+
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from typing import Any, Dict, List
 
 from tqdm import tqdm
 from copy import deepcopy
 import wandb
 
-from ..model.configuration_eagle import EagleConfig
-from ..model.ea_model import DraftModel
-from ..model.modeling_llama_no_init_weights import LlamaModel
-
+from ..models.ssm.eagle import DraftModel
 
 class AddGaussianNoise:
     def __init__(self, mean=0.0, std=0.0):
@@ -147,7 +146,7 @@ def top_accuracy(output, target, topk=(1,)):
         return res
 
 @torch.no_grad()
-def getkacc(model, data, head, max_length=5):
+def getkacc(model, data, lm_head, embed_tokens, max_length=5):
     hidden_states = data["hidden_states"]
     input_ids = data["input_ids"]
     loss_mask = data["loss_mask"]
@@ -155,8 +154,8 @@ def getkacc(model, data, head, max_length=5):
     total = [0 for _ in range(max_length)]
     correct = [0 for _ in range(max_length)]
     bs, sl = hidden_states.shape[0], hidden_states.shape[1]
-    target_headout = head(target)
-    hidden_states_headout = head(hidden_states)
+    target_headout = lm_head(target)
+    hidden_states_headout = lm_head(hidden_states)
 
     for i in range(bs):
         for j in range(sl):
@@ -177,9 +176,9 @@ def getkacc(model, data, head, max_length=5):
                 # tmp_sample_mask=sample_mask[i,single_hidden_states.shape[1]-1]
                 if not (target_in_token == tmp_token):
                     break
-                out_hidden = model(single_hidden_states, input_ids=single_input_ids)[0]
+                out_hidden = model(single_hidden_states, input_ids=single_input_ids, embed_tokens=embed_tokens)[0]
                 last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden)
+                last_headout = lm_head(last_hidden)
                 token = torch.argmax(last_headout)
                 total[k] += 1
                 if token == target_out_token:
@@ -242,7 +241,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
     for idx, data in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
-            predict = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
+            predict = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
             target = data["target"]
 
             target_head = lm_head(target.to(lm_head.weight.dtype))
@@ -298,7 +297,7 @@ def validate(model, lm_head, embed_tokens, test_loader, criterion, train_config,
             for i in range(len(acces)):
                 k_acc[i].append(acces[i])
 
-        predict = model(data["hidden_states"], input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
+        predict = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
         target = data["target"]
 
         target_head = lm_head(target.to(lm_head.weight.dtype))
@@ -329,11 +328,7 @@ def validate(model, lm_head, embed_tokens, test_loader, criterion, train_config,
         run.log(logdict)
 
         # save model
-        del model.module.lm_head
-        del model.module.embed_tokens
-        accelerator.save_model(model, f"{save_dir}/model_{epoch}")
-        model.module.lm_head = lm_head
-        model.module.embed_tokens = embed_tokens
+        accelerator.save_model(model, f"{save_dir}/model_{epoch + 1}")
 
 def main(args):
     set_seed(0) # fix seed
@@ -402,17 +397,27 @@ def main(args):
             os.makedirs(args.savedir)
 
 
-    # Load model configs.
-    config = EagleConfig.from_pretrained(args.configpath)
-
     print("Lodaing head and embed_tokens...")
-    base_model_name_or_path = config.base_model_name_or_path
-    big_model = LlamaForCausalLM.from_pretrained(base_model_name_or_path)
+    llm = LlamaForCausalLM.from_pretrained(
+        args.llm_path, 
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        device_map="auto"
+    )
+    
+    draft_config = deepcopy(llm.config)
+    draft_config.num_hidden_layers = 1
+    draft_config.use_cache = False
+    draft_config._attn_implementation = "sdpa"
+    
     # create new head and embed_tokens
-    lm_head = torch.nn.Linear(big_model.config.hidden_size, big_model.config.vocab_size, bias=False)
-    embed_tokens = nn.Embedding(big_model.config.vocab_size,big_model.config.hidden_size, big_model.config.pad_token_id)
-    lm_head.weight.data = big_model.lm_head.weight.data
-    embed_tokens.weight.data = big_model.get_input_embeddings().weight.data
+    lm_head = torch.nn.Linear(draft_config.hidden_size, draft_config.vocab_size, bias=False)
+    embed_tokens = nn.Embedding(draft_config.vocab_size, draft_config.hidden_size, draft_config.pad_token_id)
+   
+    # load weights
+    lm_head.weight.data = llm.lm_head.weight.data
+    embed_tokens.weight.data = llm.get_input_embeddings().weight.data
+    
     # convert to fp32
     lm_head = lm_head.to(torch.float32)
     embed_tokens = embed_tokens.to(torch.float32)
@@ -422,35 +427,12 @@ def main(args):
         param.requires_grad = False
     for param in embed_tokens.parameters():
         param.requires_grad = False
-    # delete big model
-    del big_model
+    
+    # delete llm
+    del llm
 
     print("Loading draft model...")
-    draft_config = deepcopy(config)
-    draft_config.num_hidden_layers = 1
-    draft_config.use_cache = False
-    draft_config._attn_implementation = "sdpa"
-    tiny_model = LlamaModel(draft_config)
-    del tiny_model.embed_tokens
-    
-    model = DraftModel(draft_config, tiny_model)
-    model.lm_head = lm_head
-    model.embed_tokens = embed_tokens
-    
-    # config = EConfig.from_pretrained(train_config["config_path"])
-    # config._attn_implementation = "sdpa"
-    # config.use_cache = False
-    # model = Model(config, load_emb=False)
-    # model.lm_head = lm_head
-    # model.embed_tokens = embed_tokens
-    print("Model Loaded.")
-    
-    #print each layer's dtype
-    # for name, param in model.named_parameters():
-    #     print(name, param.dtype)
-    
-    # exit(1)
-
+    model = DraftModel(draft_config)
 
     print("Setting up training...")
     criterion = nn.SmoothL1Loss(reduction="none")
@@ -464,11 +446,10 @@ def main(args):
     num_training_steps = max_train_steps * accelerator.num_processes
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
     
+    print("Preparing accelerator...")
     model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, test_loader, scheduler
     )
-    print("Model loaded to accelerator.")
-    
         
     print("Start training...")
     for epoch in range(args.epochs):
@@ -509,3 +490,5 @@ if __name__ == '__main__':
     parser.add_argument('--wandb', action='store_true')
     args = parser.parse_args()
     main(args)
+
+    

@@ -164,3 +164,6 @@ wandb/
 
 # experiments
 experiments/
+
+# vscode
+.vscode/

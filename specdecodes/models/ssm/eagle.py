@@ -10,7 +10,7 @@ from ..utils import invert_mask
 from .modeling_llama_no_init_weights import LlamaModel
 
 
-# TODO: Fix the model to use the new tree structure
+# TODO: Rename this to EagleXXX after implementing other models
 class DraftModel(nn.Module):
     def __init__(self, config):
         super().__init__()
