@@ -149,9 +149,9 @@ class NaiveWrapper(SimpleWrapper):
         )
 
 
-class SpecDecodesWrapper(SimpleWrapper):
+class SDWrapper(SimpleWrapper):
     def __init__(self):
-        super(SpecDecodesWrapper, self).__init__()
+        super(SDWrapper, self).__init__()
   
     def set_ssm(self, ssm):
         self.ssm = ssm

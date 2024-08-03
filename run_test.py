@@ -6,7 +6,7 @@ from copy import deepcopy
 import argparse
 import time
 
-from specdecodes.models.sdmodel import NaiveWrapper, SpecDecodesWrapper
+from specdecodes.models.sdmodel import NaiveWrapper, SDWrapper
 from specdecodes.models.ssm.eagle import DraftModel
 
 
@@ -53,7 +53,7 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # model = NaiveWrapper()
-    model = SpecDecodesWrapper()
+    model = SDWrapper()
     model.set_llm(llm)
     model.set_ssm(ssm)
     model.set_tokenizer(tokenizer)
