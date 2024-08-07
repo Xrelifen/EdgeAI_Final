@@ -53,9 +53,9 @@ def main(args):
     
     # model = NaiveWrapper()
     model = SDWrapper()
+    model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.set_ssm(ssm)
-    model.set_tokenizer(tokenizer)
     print("Loaded.")
 
     # set model to eval mode, and warmup the model
