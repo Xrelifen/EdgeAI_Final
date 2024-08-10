@@ -421,7 +421,7 @@ def main(args):
     draft_config._attn_implementation = "sdpa"
     
     # create new head and embed_tokens
-    lm_head = torch.nn.Linear(draft_config.hidden_size, draft_config.vocab_size, bias=False)
+    lm_head = nn.Linear(draft_config.hidden_size, draft_config.vocab_size, bias=False)
     embed_tokens = nn.Embedding(draft_config.vocab_size, draft_config.hidden_size, draft_config.pad_token_id)
    
     # load weights

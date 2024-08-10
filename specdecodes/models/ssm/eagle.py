@@ -25,6 +25,11 @@ class DraftModel(nn.Module):
         self.depth = 3#5
         self.topk_len = 10
     
+    # calling .config is same as calling model.config
+    @property
+    def config(self):
+        return self.model.config
+    
     @classmethod
     def from_pretrained(
         cls, 
