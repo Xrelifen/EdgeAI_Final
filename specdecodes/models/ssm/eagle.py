@@ -7,7 +7,7 @@ from bigtree import Node
 # from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 
 from ..utils import invert_mask
-from .modeling_llama_no_init_weights import LlamaModel
+from ..llm.modeling_llama_no_init_weights import LlamaModel
 
 # TODO: Rename this to EagleXXX after implementing other models
 class DraftModel(nn.Module):
