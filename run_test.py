@@ -9,13 +9,9 @@ from specdecodes.models.sdmodel import HuggingFaceWrapper, NaiveWrapper, SDWrapp
 from specdecodes.models.ssm.eagle import DraftModel
 
 def main(args):
-    
     # deterministic
     torch.manual_seed(0)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
     
-
     print("Loading model...")
     
     # load tokenizer
@@ -135,7 +131,7 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="naive",
-        help="The mode of model generation. (naive, sd)",
+        help="The mode of model generation.",
     )
     parser.add_argument(
         "-nm",
