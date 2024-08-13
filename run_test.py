@@ -5,8 +5,8 @@ from copy import deepcopy
 import argparse
 import time
 
-from specdecodes.models.sdmodel import HuggingFaceWrapper, NaiveWrapper, SDWrapper
-from specdecodes.models.ssm.eagle import DraftModel
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper
+from specdecodes.models import DraftModel
 
 def main(args):
     # deterministic
