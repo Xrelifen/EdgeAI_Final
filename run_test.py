@@ -38,7 +38,7 @@ def main(args):
         model = HuggingFaceWrapper()
         
     elif args.mode == "sd":
-        model = SDWrapper()
+        model = SDWrapper(method=args.sd_method)
         
         # load SSM
         draft_config = deepcopy(llm.config)
@@ -135,6 +135,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
+        type=str,
+        default="naive",
+        help="The mode of model generation.",
+    )
+    parser.add_argument(
+        "--sd-method",
         type=str,
         default="naive",
         help="The mode of model generation.",

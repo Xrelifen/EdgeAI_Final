@@ -1,5 +1,6 @@
 import logging
 import torch
+import torch.nn.functional as F
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
@@ -9,8 +10,9 @@ from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 from ..utils import TreeDynamicCache, build_tree_attention_data 
 
 class SDWrapper(WrapperBase):
-    def __init__(self):
+    def __init__(self, method="naive"):
         super(SDWrapper, self).__init__()
+        self.method = method
   
     def set_ssm(self, ssm):
         self.ssm = ssm
@@ -46,7 +48,7 @@ class SDWrapper(WrapperBase):
     
     #TODO: Implement stochastic method and ensure correctness
     def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="naive"):
-        accept_tokens = []
+        sampled_tokens = []
         hidden_indices = []
         if sampling_method == "naive":
             real_token_ids = self._sample_token(logits, logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
@@ -61,7 +63,7 @@ class SDWrapper(WrapperBase):
                 for child in cur.children:
                     if child.id == llm_token_id:
                         accepts_token = True
-                        accept_tokens.append(child.id) # real_token_ids[cur.ind]
+                        sampled_tokens.append(child.id) # real_token_ids[cur.ind]
                         hidden_indices.append(cur.ind)
                         cur = child
                         break
@@ -69,18 +71,18 @@ class SDWrapper(WrapperBase):
                 # stop loop if no token is accepted
                 if accepts_token == False: break
             
-            if len(accept_tokens) == 0 or accept_tokens[-1] != eos_token_id: # no token matched, accept first token
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # no token matched, accept first token
                 bonus_token = real_token_ids[cur.ind].item()
-                accept_tokens.append(bonus_token)
+                sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
         elif sampling_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
-            global_gtp = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            global_p = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                gtp = global_gtp[cur.ind]
+                p = global_p[cur.ind]
                 
                 accepts_token = False
                 for child in cur.children:
@@ -88,34 +90,81 @@ class SDWrapper(WrapperBase):
                     # px = gtp[child.id]
                     # qx = 1  # in this iteration, only child.id' prob is 1, others are 0.
                     # if r <= px / qx:
-                    if r <= gtp[child.id]: # since qx = 1, we can compare r with px directly
+                    if r <= p[child.id]: # since qx = 1, we can compare r with px directly
                         accepts_token = True
-                        accept_tokens.append(child.id)
+                        sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
                         break
                     else:
-                        # gpt = max(gpt - childprob, 0)
-                        gtp[child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        gtp = gtp / gtp.sum()
-                        # childprob[child.id] = 0
-                        # childprob = childprob / childprob.sum()
+                        # p = torch.clamp(p - q, min=0)
+                        p[child.id] = 0 # only child.id' prob is 1, equivalent to function above
+                        p = F.normalize(p, p=1, dim=0)
+                        # q[child.id] = 0
+                        # q = q / q.sum()
                         
                 # stop loop if no token is accepted
                 if accepts_token == False: break
                 
-            if len(accept_tokens) == 0 or accept_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_gtp[cur.ind], 1).item()
-                accept_tokens.append(bonus_token)
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
+                bonus_token = torch.multinomial(global_p[cur.ind], 1).item()
+                sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
         elif sampling_method == "sequoia":
-            raise NotImplementedError("Sequoia method is not implemented yet")
+            assert do_sample == True, "Sequoia method requires sampling"
+            global_p = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            
+            cur = root
+            while cur.children:
+                p = global_p[cur.ind]
+                
+                # TODO: Optimize tree to have a better structure and speed for operations below
+                # obtain probability distribution for SSM
+                q = torch.zeros_like(p)
+                for node in cur.children:
+                    q[node.id] = node.prob
+                child_ids = torch.tensor([node.id for node in cur.children])
+                child_id_to_node = {node.id: node for node in cur.children}
+                
+                tried_ids = []
+                accepts_token = False
+                for i in range(len(cur.children)):
+                    r = torch.rand(1).item()
+                    sample_id = torch.multinomial(q, 1).item()
+                    if r <= p[sample_id] / q[sample_id]:
+                        accepts_token = True
+                        sampled_tokens.append(sample_id)
+                        hidden_indices.append(cur.ind)
+                        cur = child_id_to_node[sample_id]
+                        break
+                    
+                    else:
+                        p = torch.clamp(p - q, min=0)
+                        p = F.normalize(p, p=1, dim=0)
+                        
+                        q[sample_id] = 0
+                        tried_ids.append(sample_id)
+                        if q.sum() == 0:
+                            # set q[t] = 0 if t in S, else 1
+                            q = torch.zeros_like(q)
+                            q[child_ids] = 1
+                            q[tried_ids] = 0
+                        
+                        q = F.normalize(q, p=1, dim=0)
+                        
+                # stop loop if no token is accepted
+                if accepts_token == False: break
+                
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
+                bonus_token = torch.multinomial(global_p[cur.ind], 1).item()
+                sampled_tokens.append(bonus_token)
+                hidden_indices.append(cur.ind)
         
         else:
             raise ValueError("Invalid method")
         
-        return torch.tensor([accept_tokens]), torch.tensor(hidden_indices) #! add back batch size dim to accept_tokens
+        return torch.tensor([sampled_tokens]), torch.tensor(hidden_indices) #! add back batch size dim to sampled_tokens
 
     def _generate(
         self,
@@ -176,8 +225,8 @@ class SDWrapper(WrapperBase):
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
         finished = False
-        total_accepted = 0
-        total_steps = 0
+        total_sampled = 1
+        total_steps = 1
         while not finished:
             # * speculate
             root = self._speculate(hidden_states, input_ids, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
@@ -195,27 +244,26 @@ class SDWrapper(WrapperBase):
             del outputs
 
             # * verify
-            accept_tokens, hidden_indices = self._verify(
+            sampled_tokens, hidden_indices = self._verify(
                                                 root, next_token_logits, 
                                                 logits_warper, 
                                                 do_sample,
                                                 eos_token_id=self.tokenizer.eos_token_id,
-                                                sampling_method="eagle" if do_sample else "naive",
-                                                # sampling_method="naive",
+                                                sampling_method=self.method,
                                             )
             logging.debug(
                 f"Total: {len(list(preorder_iter(root)))},"\
-                f"\tPredicted: {self.tokenizer.batch_decode(accept_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+                f"\tPredicted: {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
             )
-            total_accepted += len(accept_tokens[0])
+            total_sampled += len(sampled_tokens[0])
             total_steps += 1
             
-            accept_tokens = accept_tokens.to(input_ids.device)
+            sampled_tokens = sampled_tokens.to(input_ids.device)
             hidden_indices = hidden_indices.to(hidden_states.device)
 
             # * update input_ids, hidden_states, and kv-cache
             # llm_past_key_values.crop(input_ids.shape[1])
-            input_ids = torch.cat([input_ids, accept_tokens], dim=-1)
+            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             hidden_states = hidden_states[:, hidden_indices].clone()
             llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
             # ssm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
@@ -227,5 +275,5 @@ class SDWrapper(WrapperBase):
             # used_mem = torch.cuda.max_memory_allocated()
             # print(f'peak mem: {used_mem / 1024 ** 3} GB')
         
-        logging.info(f"Total accepted: {total_accepted}, Total iterations: {total_steps}, Average accepted: {total_accepted/total_steps:.2f}")
+        logging.info(f"Total sampled: {total_sampled}, Total iterations: {total_steps}, Average sampled: {total_sampled/total_steps:.2f}")
         return input_ids
