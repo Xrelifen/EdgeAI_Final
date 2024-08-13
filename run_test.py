@@ -1,5 +1,4 @@
 import torch
-# from transformers import LlamaForCausalLM, AutoTokenizer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from copy import deepcopy
 import argparse
@@ -10,14 +9,15 @@ import logging
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper
 from specdecodes.models import DraftModel
 
+
 # set logging level by environment variable
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(level=LOGLEVEL)
 
+# deterministic
+torch.manual_seed(0)
+
 def main(args):
-    # deterministic
-    torch.manual_seed(0)
-    
     print("Loading model...")
     
     # load tokenizer
@@ -38,6 +38,8 @@ def main(args):
         model = HuggingFaceWrapper()
         
     elif args.mode == "sd":
+        model = SDWrapper()
+        
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
@@ -46,8 +48,6 @@ def main(args):
             config=draft_config,
             torch_dtype=torch.float16,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        
-        model = SDWrapper()
         model.set_ssm(ssm)
     else:
         raise ValueError("Invalid mode.")
