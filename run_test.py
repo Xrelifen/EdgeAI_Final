@@ -5,10 +5,16 @@ from copy import deepcopy
 import argparse
 import time
 
-from specdecodes.models.sdmodel import NaiveWrapper, SDWrapper
+from specdecodes.models.sdmodel import HuggingFaceWrapper, NaiveWrapper, SDWrapper
 from specdecodes.models.ssm.eagle import DraftModel
 
 def main(args):
+    
+    # deterministic
+    torch.manual_seed(0)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    
 
     print("Loading model...")
     
@@ -23,22 +29,30 @@ def main(args):
         device_map="auto"
     )
 
-    # load SSM
-    draft_config = deepcopy(llm.config)
-    draft_config.num_hidden_layers = 1
-    ssm = DraftModel.from_pretrained(
-        args.ssm_path, 
-        config=draft_config,
-        torch_dtype=torch.float16,
-    ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+    if args.mode == "naive":
+        model = NaiveWrapper()
+        
+    elif args.mode == "hf":
+        model = HuggingFaceWrapper()
+        
+    elif args.mode == "sd":
+        # load SSM
+        draft_config = deepcopy(llm.config)
+        draft_config.num_hidden_layers = 1
+        ssm = DraftModel.from_pretrained(
+            args.ssm_path, 
+            config=draft_config,
+            torch_dtype=torch.float16,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        
+        model = SDWrapper()
+        model.set_ssm(ssm)
+    else:
+        raise ValueError("Invalid mode.")
     
-    # model = NaiveWrapper()
-    model = SDWrapper()
+    # set model
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
-    model.set_ssm(ssm)
-    print("Loaded.")
-
     model.eval()
 
     print("Warming up model...")
@@ -116,6 +130,12 @@ if __name__ == "__main__":
         "--do-sample",
         action="store_true",
         help="Whether to do sampling. (Default is False)",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="naive",
+        help="The mode of model generation. (naive, sd)",
     )
     parser.add_argument(
         "-nm",
