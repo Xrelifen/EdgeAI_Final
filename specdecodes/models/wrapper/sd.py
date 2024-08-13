@@ -1,9 +1,11 @@
+import logging
 import torch
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
+from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 from ..utils import TreeDynamicCache, build_tree_attention_data 
 
 class SDWrapper(WrapperBase):
@@ -67,8 +69,8 @@ class SDWrapper(WrapperBase):
                 # stop loop if no token is accepted
                 if accepts_token == False: break
             
-            if cur.id != eos_token_id: # no token matched, accept first token
-                bonus_token = real_token_ids[cur.ind]
+            if len(accept_tokens) == 0 or accept_tokens[-1] != eos_token_id: # no token matched, accept first token
+                bonus_token = real_token_ids[cur.ind].item()
                 accept_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
@@ -102,8 +104,8 @@ class SDWrapper(WrapperBase):
                 # stop loop if no token is accepted
                 if accepts_token == False: break
                 
-            if cur.id != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_gtp[cur.ind], 1)
+            if len(accept_tokens) == 0 or accept_tokens[-1] != eos_token_id: # eos token should be the last token
+                bonus_token = torch.multinomial(global_gtp[cur.ind], 1).item()
                 accept_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
@@ -112,8 +114,8 @@ class SDWrapper(WrapperBase):
         
         else:
             raise ValueError("Invalid method")
-
-        return torch.tensor(accept_tokens)[None], torch.tensor(hidden_indices) #! [None] to add back batch size dim
+        
+        return torch.tensor([accept_tokens]), torch.tensor(hidden_indices) #! add back batch size dim to accept_tokens
 
     def _generate(
         self,
@@ -174,6 +176,8 @@ class SDWrapper(WrapperBase):
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
         finished = False
+        total_accepted = 0
+        total_steps = 0
         while not finished:
             # * speculate
             root = self._speculate(hidden_states, input_ids, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
@@ -196,9 +200,16 @@ class SDWrapper(WrapperBase):
                                                 logits_warper, 
                                                 do_sample,
                                                 eos_token_id=self.tokenizer.eos_token_id,
-                                                sampling_method="eagle",
+                                                sampling_method="eagle" if do_sample else "naive",
                                                 # sampling_method="naive",
                                             )
+            logging.debug(
+                f"Total: {len(list(preorder_iter(root)))},"\
+                f"\tPredicted: {self.tokenizer.batch_decode(accept_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+            )
+            total_accepted += len(accept_tokens[0])
+            total_steps += 1
+            
             accept_tokens = accept_tokens.to(input_ids.device)
             hidden_indices = hidden_indices.to(hidden_states.device)
 
@@ -216,4 +227,5 @@ class SDWrapper(WrapperBase):
             # used_mem = torch.cuda.max_memory_allocated()
             # print(f'peak mem: {used_mem / 1024 ** 3} GB')
         
+        logging.info(f"Total accepted: {total_accepted}, Total iterations: {total_steps}, Average accepted: {total_accepted/total_steps:.2f}")
         return input_ids

@@ -4,9 +4,15 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from copy import deepcopy
 import argparse
 import time
+import os
+import logging
 
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper
 from specdecodes.models import DraftModel
+
+# set logging level by environment variable
+LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
+logging.basicConfig(level=LOGLEVEL)
 
 def main(args):
     # deterministic
