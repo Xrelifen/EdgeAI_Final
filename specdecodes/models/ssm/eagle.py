@@ -3,12 +3,11 @@ import torch.nn as nn
 from safetensors.torch import load_model
 import os
 
-from bigtree import Node, find_attrs,  shift_nodes, yield_tree
-from bigtree import preorder_iter, levelorder_iter
+from bigtree import Node
+# from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 
 from ..utils import invert_mask
 from .modeling_llama_no_init_weights import LlamaModel
-
 
 # TODO: Rename this to EagleXXX after implementing other models
 class DraftModel(nn.Module):
@@ -21,9 +20,10 @@ class DraftModel(nn.Module):
         self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
         self.model = model
 
-        self.max_candidate_tokens = 60
-        self.depth = 3#5
+        self.max_candidate_tokens = 64
+        self.depth = 5
         self.topk_len = 10
+        self.NODE_ID = 1
     
     # calling .config is same as calling model.config
     @property
@@ -46,8 +46,6 @@ class DraftModel(nn.Module):
         load_model(model, draft_model_path, strict=True)
         model.to(dtype=torch_dtype)
         return model
-        
-        
 
     # TODO: embed_tokens is likely to be on a different device in multi-gpu scenario.
     # TODO: Think of an efficient way to handle embed_tokens.
@@ -63,17 +61,17 @@ class DraftModel(nn.Module):
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset):
         device = hidden_states.device 
-        parent_indices = torch.tensor([node.parent_ind for node in nodes])
+        indices = torch.tensor([node.ind for node in nodes])
 
-        input_hidden = hidden_states[:, parent_indices].to(device)
+        input_hidden = hidden_states[:, indices].to(device)
         
         input_ids = torch.tensor([node.id for node in nodes])[None].to(device)
         
         position_ids = torch.zeros(len(nodes), device=device)[None] + (position_offset + depth)
         
         # Generating tree masks for the new nodes, don't have to consider the old nodes
-        if parent_indices[0] != -1: # if not root
-            tree_mask = tree_mask[:, :, parent_indices]
+        if indices[0] != -1: # if not root
+            tree_mask = tree_mask[:, :, indices]
         tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
 
         return input_hidden, input_ids, position_ids, tree_mask
@@ -87,17 +85,18 @@ class DraftModel(nn.Module):
         sample_token = input_ids[:, -1:]
         input_ids = input_ids[:, 1:]
         
-        # get original length of input_ids and kv_len
+        # get original length of input_ids
         org_input_len = input_ids.shape[1] # offset of positon_id
-        kv_len = past_key_values.get_seq_length()
         
         # initialize tree and tree_mask
         tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        root = Node(str(sample_token[0][0].item()), id=sample_token[0][0].item(), prob=1, global_prob=1, parent_ind=-1)
+        root = Node(str(sample_token[0][0].item()), id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
         depth = 1 # depth starts from 1 in tree library
+        prev_sample_nodes = [root]
         
         while depth < self.depth:
             if depth == 1: # first iteration
+                kv_len = past_key_values.get_seq_length()
                 outputs = self(
                     hidden_states, input_ids[:, kv_len:], 
                     embed_tokens=embed_tokens, 
@@ -114,9 +113,6 @@ class DraftModel(nn.Module):
                     attention_mask=invert_mask(tree_mask, dtype=hidden_states.dtype)
                 )
                 out_hidden = outputs.last_hidden_state
-                #TODO: keep used parent indices, don't crop everything
-                # newly generated kv cache not needed
-                past_key_values.crop(org_input_len) 
 
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
@@ -137,17 +133,18 @@ class DraftModel(nn.Module):
             # Fast append nodes to tree, keeping their node_id, prob, global_prob, parent_ind
             # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
             #* Append nodes ready for next iteration
-            prev_nodes = list(find_attrs(root, "depth", depth))
-            prev_nodes = [node for node in prev_nodes if node.prob > 1e-2 and node.id != eos_token_id]
-            for idx, node in enumerate(prev_nodes):
+            next_nodes = []
+            for idx, node in enumerate(prev_sample_nodes):
                 for i in range(self.topk_len):
                     token_id = topk_index[idx][i].item()
                     prob = topk_prob[idx][i].item()
                     global_prob = prob * node.prob
-                    if global_prob > 1e-2:
-                        new_node = Node(str(token_id), id=token_id, prob=prob, global_prob=global_prob, parent_ind=idx)
+                    if global_prob > 0.02:
+                        new_node = Node(str(self.NODE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=idx)
+                        self.NODE_ID += 1 # increment node id, make sure it is unique
                         node.append(new_node)
-
+                        next_nodes.append(new_node)
+            
             #* depth increment
             depth += 1
             
@@ -157,17 +154,26 @@ class DraftModel(nn.Module):
             # remove_nodes = sorted(added_nodes, key=lambda x: x.global_prob)[:-self.topk_len]
             # shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes))
  
+            # * Update past_key_values (remove unused key_values, according to pruning logic above)
+            # Yet to implement after tree pruning logic is implemented
+ 
             #* Get the nodes as input for next iteration
-            next_nodes = list(find_attrs(root, "depth", depth))
-            next_nodes = [node for node in next_nodes if node.prob > 1e-2 and node.id != eos_token_id] # to follow prev_nodes logic above
-
+            # next_nodes = list(find_attrs(root, "depth", depth))
+            next_nodes = [node for node in next_nodes if node.prob > 0.02 and node.id != eos_token_id] # to follow prev_nodes logic above
+            prev_sample_nodes = next_nodes
+            
             #* Early stop if no nodes for next iteration
             # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
             if len(next_nodes) == 0:
                 break
         
-        #* Keep only the top_k_len nodes with the highest global_probs
-        remove_nodes = sorted(preorder_iter(root), key=lambda x: x.global_prob)[:-self.max_candidate_tokens]
-        shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes))#, delete_children=True, skippable=True)
-
+        #* Keep only the top_k_len nodes with the highest global_probs (pruning is so slow using this library, need optimization)
+        # remove_nodes = sorted(preorder_iter(root), key=lambda x: x.global_prob)[:-self.max_candidate_tokens]
+        # shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes), delete_children=True, skippable=True)
+        
+        #TODO: Remove past_key_values.crop() and replace with ssm_past_key_values.reordering in model._generate()
+        #* Crop the tree to the max_candidate_tokens
+        past_key_values.crop(org_input_len)
+        
+        # print("Total nodes:", len(list(preorder_iter(root))))
         return root
