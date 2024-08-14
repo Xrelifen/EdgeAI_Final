@@ -4,10 +4,10 @@ from safetensors.torch import load_model
 import os
 
 from bigtree import Node
-# from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
+from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 
 from ..utils import invert_mask
-from ..llm.modeling_llama_no_init_weights import LlamaModel
+from ..llm.modeling_llama_no_layernorm import LlamaModel
 
 # TODO: Rename this to EagleXXX after implementing other models
 class DraftModel(nn.Module):
@@ -20,10 +20,11 @@ class DraftModel(nn.Module):
         self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
         self.model = model
 
-        self.max_candidate_tokens = 64
-        self.depth = 5
-        self.topk_len = 10
-        self.NODE_ID = 1
+        self.max_candidate_tokens = 64 #! Currently not used
+        self.depth = 6
+        self.topk_len = 15
+        
+        self.UNIQUE_ID = 1
     
     # calling .config is same as calling model.config
     @property
@@ -132,34 +133,33 @@ class DraftModel(nn.Module):
             # Tree can easily prune nodes with lowest global_prob
             # Fast append nodes to tree, keeping their node_id, prob, global_prob, parent_ind
             # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
-            #* Append nodes ready for next iteration
+            #* Create nodes
             next_nodes = []
             for idx, node in enumerate(prev_sample_nodes):
                 for i in range(self.topk_len):
                     token_id = topk_index[idx][i].item()
                     prob = topk_prob[idx][i].item()
                     global_prob = prob * node.prob
-                    if global_prob > 0.02:
-                        new_node = Node(str(self.NODE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=idx)
-                        self.NODE_ID += 1 # increment node id, make sure it is unique
-                        node.append(new_node)
-                        next_nodes.append(new_node)
+                    
+                    new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=idx)
+                    self.UNIQUE_ID += 1 # increment node id, make sure it is unique
+                    next_nodes.append(new_node)
             
             #* depth increment
             depth += 1
             
             #* Some tree pruning logic
-            # keep the top_k_len nodes with the highest global_probs
-            # added_nodes = list(find_attrs(root, "depth", depth))
-            # remove_nodes = sorted(added_nodes, key=lambda x: x.global_prob)[:-self.topk_len]
-            # shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes))
+            next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+            
+            #* Append nodes to their parent nodes
+            for node in next_nodes:
+                prev_sample_nodes[node.ind].append(node)
  
             # * Update past_key_values (remove unused key_values, according to pruning logic above)
             # Yet to implement after tree pruning logic is implemented
  
             #* Get the nodes as input for next iteration
-            # next_nodes = list(find_attrs(root, "depth", depth))
-            next_nodes = [node for node in next_nodes if node.prob > 0.02 and node.id != eos_token_id] # to follow prev_nodes logic above
+            next_nodes = [node for node in next_nodes if node.id != eos_token_id] # to follow prev_nodes logic above
             prev_sample_nodes = next_nodes
             
             #* Early stop if no nodes for next iteration
