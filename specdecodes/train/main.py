@@ -511,8 +511,8 @@ if __name__ == '__main__':
     parser.add_argument('--bs', type=int, default=4)
     # https://github.com/NVIDIA/NeMo/blob/876c8511e579c1c343b52bdd96ebe2296608434c/tutorials/asr/ASR_CTC_Language_Finetuning.ipynb
     parser.add_argument('--lr', type=float, default=1e-4) #1e-2 too large, loss becomes nan when lr>3e-4
-    parser.add_argument('--weight-decay', type=float, default=1e-3)
-    parser.add_argument('--betas', type=float, default=(0.95, 0.5))  # from paper
+    parser.add_argument('--weight-decay', type=float, default=1e-2) # from paper: 1e-3
+    parser.add_argument('--betas', type=float, default=(0.9, 0.95))  # from paper: (0.95, 0.5)
     
     # logging
     parser.add_argument('--wandb', action='store_true')
