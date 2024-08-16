@@ -1,12 +1,13 @@
 import torch
+import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.cache_utils import DynamicCache
 
 import numpy as np
 import matplotlib.pyplot as plt
-
-import time
+import argparse
 import logging
+import os
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -76,42 +77,53 @@ def benchmark_tpot(model, past_key_values, tokens, repetitions=100):
     torch.cuda.synchronize()
     
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    latency = sum(times) / len(times)
+    latency = np.median(times) # median is more robust to outliers
     
     return latency
 
 
-def main():
+def main(args):
     # Set seed
     torch.manual_seed(0)
     
-    # Parameters
-    llm_path = "meta-llama/Llama-2-7b-chat-hf"
-    dtype = torch.float16
-    device = "cuda"
+    # dtype
+    if args.dtype == "float16":
+        dtype = torch.float16
+    elif args.dtype == "float32":
+        dtype = torch.float32
+    else:
+        raise ValueError(f"Invalid dtype: {args.dtype}")
     
-    # Parameters
-    batch_size = 1
-    repetitions = 10#100
-    prev_tokens = 512#4096#2048#1024
-    max_new_tokens = 512
-    latencies = []
+    # Load model
+    model = load_model(args.llm_path, dtype=dtype)
     
-    # Load model and prepare data
-    model = load_model(llm_path, dtype=dtype)
-    for i in range(1, max_new_tokens+1):
-        past_key_values, tokens = prepare_data(model.config, batch_size, prev_tokens, i, dtype=dtype, device=device) 
-        latency = benchmark_tpot(model, past_key_values, tokens, repetitions=repetitions)
+    # Test for number of new tokens from 1 to max_new_tokens
+    for prev_tokens in args.prev_tokens:
+        latencies = []
+        for i in range(1, args.max_new_tokens+1):
+            past_key_values, tokens = prepare_data(model.config, args.batch_size, prev_tokens, i, dtype=dtype, device=args.device) 
+            latency = benchmark_tpot(model, past_key_values, tokens, repetitions=args.repetitions)
+            
+            logging.info(f"Finished. \nprevious_tokens: {prev_tokens} \nnew_tokens: {i} \nlatency: {latency:.2f} milliseconds")
+            latencies.append(latency)
         
-        logging.info(f"Finished. \nprevious_tokens: {prev_tokens} \nnew_tokens: {i} \nlatency: {latency:.2f} milliseconds")
-        latencies.append(latency)
-    
-    # convert to numpy array, plot and save
-    latencies = np.array(latencies)
+        # convert to numpy array, plot and save
+        latencies = np.array(latencies)
 
-    # save latencies
-    np.save(f"llm_prev_{prev_tokens}.npy", latencies)
+        # save latencies
+        np.save(os.path.join(args.save_folder, f"llm_prev_{prev_tokens}.npy"), latencies)
 
 
 if __name__ == "__main__":
-    main()
+    args = argparse.ArgumentParser()
+    args.add_argument("--prev_tokens", type=int, nargs="+", default=[128,256,512,1024,2048,4096])
+    args.add_argument("--dtype", type=str, default="float16")
+    args.add_argument("--device", type=str, default="cuda")
+    args.add_argument("--llm-path", "-llm", type=str, default="meta-llama/Llama-2-7b-chat-hf")
+    args.add_argument("--repetitions", "-rep", type=int, default=10)
+    args.add_argument("--max_new_tokens", type=int, default=512)
+    args.add_argument("--batch_size", type=int, default=1)
+    args.add_argument("--save-folder", "-save", type=str, default="speedtest")
+    args = args.parse_args()
+    
+    main(args)
