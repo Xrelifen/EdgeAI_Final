@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 from transformers import LlamaForCausalLM, AutoConfig
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
+from transformers.cache_utils import StaticCache, DynamicCache
 
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -56,7 +57,7 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, index):
         # try:
-        data = torch.load(self.data[index])
+        data = torch.load(self.data[index], weights_only=False)
         new_data = {}
         hidden_state = data['hidden_state'][:self.max_len][None, :]
         input_ids = data['input_ids'][:self.max_len][None, :]
@@ -149,65 +150,78 @@ def top_accuracy(output, target, topk=(1,)):
 
 @torch.no_grad()
 def getkacc(model, data, lm_head, embed_tokens, max_length=5):
+    # generate future tokens
+    def generate(hidden_states, input_ids, lm_head, embed_tokens, max_length):
+        past_key_values = DynamicCache()
+        for i in range(max_length):
+            outputs = model(
+                hidden_states, 
+                input_ids=input_ids if i == 0 else token,
+                embed_tokens=embed_tokens, 
+                past_key_values=past_key_values, 
+                use_cache=True
+            )
+            hidden_states = outputs.last_hidden_state[:, -1:].clone()
+            del outputs
+            
+            token = torch.argmax(lm_head(hidden_states), dim=-1)
+            input_ids = torch.cat((input_ids, token), dim=-1)
+        return input_ids
+    
+    # get data
     hidden_states = data["hidden_states"]
     input_ids = data["input_ids"]
     loss_mask = data["loss_mask"]
     target = data["target"]
-    total = [0 for _ in range(max_length)]
-    correct = [0 for _ in range(max_length)]
-    bs, sl = hidden_states.shape[0], hidden_states.shape[1]
-    target_headout = lm_head(target)
-    hidden_states_headout = lm_head(hidden_states)
+    
+    # get batch size and sequence length
+    bs, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+    
+    # generate target ids
+    target_ids = lm_head(target).argmax(dim=2)
+    
+    # for calculating accuracy
+    total = torch.zeros(max_length, dtype=torch.int32)
+    correct = torch.zeros(max_length, dtype=torch.int32)
 
-    for i in range(bs):
-        for j in range(sl):
-
-            single_hidden_states = hidden_states[i, :j]
-            single_input_ids = input_ids[i, :j]
-
-            single_hidden_states = single_hidden_states[None, :, :]
-            single_input_ids = single_input_ids[None, :]
+    # iterate through each prefix length
+    for pre_len in range(1, seq_len):
+        if loss_mask[:, pre_len].sum().item() == 0:
+            continue
+        
+        # generate future tokens
+        pre_hidden_states = hidden_states[:, :pre_len]
+        pre_input_ids = input_ids[:, :pre_len]
+        out_ids = generate(pre_hidden_states, pre_input_ids, lm_head, embed_tokens, max_length=max_length)
+        generate_ids = out_ids[:, pre_len:]
+        
+        # calculate accuracy
+        for bid in range(bs):
             for k in range(max_length):
-                if loss_mask[i, single_hidden_states.shape[1] - 1] == 0:
+                if (loss_mask[bid, pre_len + k] == 0) or (pre_len + k >= seq_len):
                     break
-                tmp_in_target_headout = hidden_states_headout[i, single_hidden_states.shape[1] - 1]
-                tmp_out_target_headout = target_headout[i, single_hidden_states.shape[1] - 1]
-                target_in_token = torch.argmax(tmp_in_target_headout)
-                target_out_token = torch.argmax(tmp_out_target_headout)
-                tmp_token = input_ids[i, single_hidden_states.shape[1] - 1]
-                # tmp_sample_mask=sample_mask[i,single_hidden_states.shape[1]-1]
-                if not (target_in_token == tmp_token):
-                    break
-                out_hidden = model(single_hidden_states, input_ids=single_input_ids, embed_tokens=embed_tokens)[0]
-                last_hidden = out_hidden[:, -1]
-                last_headout = lm_head(last_hidden)
-                token = torch.argmax(last_headout)
+                
                 total[k] += 1
-                if token == target_out_token:
+                if generate_ids[bid, k] == target_ids[bid, pre_len + k - 1]:
                     correct[k] += 1
                 else:
-                    for kk in range(k + 1, max_length):
-                        total[kk] += 1
+                    total[k+1:max_length] += 1
                     break
 
-                single_hidden_states = torch.cat((single_hidden_states, out_hidden[:, -1:]), dim=1)
-                single_input_ids = torch.cat((single_input_ids, torch.tensor([[token]]).to(single_input_ids.device)),
-                                             dim=1)
+    acc = correct.float() / total.float()
+    return acc.cpu().tolist()
 
-    acc = [correct[i] / total[i] for i in range(len(correct))]
-    return acc
-
-def calculate_loss(predict, target, predict_head, target_head, loss_mask, criterion, train_config):
+def calculate_loss(predict, target, predict_head, target_head, loss_mask, train_config):
     with torch.no_grad():
         target_head_p = F.softmax(target_head, dim=2).detach()
-    out_head_logp = F.log_softmax(predict_head, dim=2)
-    plogp = target_head_p * out_head_logp
-    ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-    # ploss = F.kl_div(out_head_logp, target_head_p, reduction="none")
-    # ploss = torch.sum(torch.sum(loss_mask * ploss, dim=2)) / (loss_mask.sum()+1e-5)
+    # predict_head_logp = F.log_softmax(predict_head, dim=2)
+    # plogp = target_head_p * predict_head_logp
+    predict_head_p = F.softmax(predict_head, dim=2)
+    ploss = F.l1_loss(predict_head_p, target_head_p, reduction="none")
+    ploss = (torch.sum(torch.sum(loss_mask * ploss, 2)) / (loss_mask.sum()+1e-5)) * 0.5 # equivalent to TVD
     
-    vloss = criterion(predict, target)
-    vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
+    vloss = F.l1_loss(predict, target, reduction="none")
+    vloss = (torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)) * 0.5 # equivalent to TVD
     loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
     return loss, ploss, vloss
 
@@ -231,13 +245,14 @@ def update_metrics(predict_head, target_head, loss_mask, correct, topk_acc, tota
 
 @torch.no_grad()
 def gather_metrics(correct, total, topk_acc, accelerator):
-    correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
+    device = accelerator.device
+    correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
     correct, total = accelerator.gather_for_metrics((correct, total))
     correct, total = correct.sum().item(), total.sum().item()
     topk_acc = accelerator.gather_for_metrics(topk_acc)
     return correct, total, topk_acc
 
-def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, criterion, train_config, epoch, num_epochs, accelerator, run=None):
+def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
@@ -251,7 +266,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
             target_head = lm_head(target.to(lm_head.weight.dtype))
             predict_head = lm_head(predict)
 
-            loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterion, train_config)
+            loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], train_config)
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
             optimizer.step()
@@ -289,41 +304,54 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
 
 
 @torch.no_grad()
-def validate(model, lm_head, embed_tokens, test_loader, criterion, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
+def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
+    device = accelerator.device
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
-    k_acc = [[] for _ in range(5)]
+    k_acc_max_length = 5
+    k_acc = [[] for _ in range(k_acc_max_length)]
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
+        # Calculate k-accuracy for the first 10 batches
         if batch_idx < 10:
-            acces = getkacc(model, data, lm_head, embed_tokens, max_length=5)
+            acces = getkacc(model, data, lm_head, embed_tokens, max_length=k_acc_max_length)
             for i in range(len(acces)):
                 k_acc[i].append(acces[i])
 
+        # Forward pass
         predict = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
         target = data["target"]
 
+        # Head computation
         target_head = lm_head(target.to(lm_head.weight.dtype))
         predict_head = lm_head(predict)
 
-        loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterion, train_config)
+        # Calculate loss
+        loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], train_config)
 
+        # Update metrics
         correct, total = update_metrics(predict_head, target_head, data["loss_mask"][:, :, None], correct, topk_acc, total)
         epoch_loss += loss.item()
         num_batches += 1
 
-    mean_acces = [torch.tensor(np.array(i).mean()).cuda() for i in k_acc]
+    # Compute mean accuracy
+    mean_acces = [torch.tensor(np.array(i).mean(), device=device) for i in k_acc]
     mean_acces = accelerator.gather_for_metrics(mean_acces)
+    
+    # gather metrics
     correct, total, topk_acc = gather_metrics(correct, total, topk_acc, accelerator)
     epoch_loss /= num_batches
 
+    # Log and save model
     if accelerator.is_local_main_process and run:
         print(f'Test Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}')
         print(f'Test Accuracy: {100 * correct / total:.2f}%')
         logdict = {
             "test/epochacc": correct / total, 
-            "test/epochloss": epoch_loss
+            "test/epochloss": epoch_loss,
+            "test/ploss": ploss.item(),
+            "test/vloss": vloss.item(),
         }
         for id, acc in enumerate(mean_acces):
             logdict[f'test/{id}_acc'] = acc.mean().item()
@@ -348,7 +376,6 @@ def main(args):
         "noise": "uniform",
         "mean": 0.0,
         "std": 0.2,
-        "residual": "true,norm",
         # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
         "max_len": 2048,
         "grad_clip": 1.0, #0.5
@@ -402,16 +429,11 @@ def main(args):
 
     print("Lodaing head and embed_tokens...")
     config = AutoConfig.from_pretrained(args.llm_path)
-    # llm = LlamaForCausalLM.from_pretrained(
-    #     args.llm_path, 
-    #     torch_dtype=torch.float32,
-    #     low_cpu_mem_usage=True,
-    #     device_map="auto"
-    # )
     llm = LlamaForCausalLM.from_pretrained(
         config=config,
         pretrained_model_name_or_path=args.llm_path,
         torch_dtype=torch.float32,
+        # low_cpu_mem_usage=True,
         device_map="auto"
     )
     
@@ -437,10 +459,20 @@ def main(args):
         param.requires_grad = False
     for param in embed_tokens.parameters():
         param.requires_grad = False
-        
+
+
+    print("Loading draft model...")
+    model = DraftModel(draft_config)
+    
+    # load llm's last attention layer's data to draft model
+    # model.model.layers[0].self_attn = llm.model.layers[-1].self_attn
+    # for (draft_param, llm_param) in zip(model.model.layers[0].self_attn.parameters(), llm.model.layers[-1].self_attn.parameters()):
+    #     print(draft_param.data.shape, llm_param.data.shape)
+    #     draft_param.data = llm_param.data
+    
     # Before freeing up memory
     used_mem = torch.cuda.memory_allocated()
-    print(f'peak mem: {used_mem / 1024 ** 3} GB')
+    print(f'Before freeing llm - peak mem: {used_mem / 1024 ** 3} GB')
     
     # Manually free up memory
     llm.lm_head = None
@@ -452,26 +484,25 @@ def main(args):
     
     # After freeing up memory
     used_mem = torch.cuda.memory_allocated()
-    print(f'peak mem: {used_mem / 1024 ** 3} GB')
-    # exit(1)
+    print(f'After freeing llm - peak mem: {used_mem / 1024 ** 3} GB')
 
-
-    print("Loading draft model...")
-    model = DraftModel(draft_config)
 
     print("Setting up training...")
-    criterion = nn.SmoothL1Loss(reduction="none")
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
 
-    # https://github.com/huggingface/diffusers/pull/6143/files
+    # Calculate the number of update steps per epoch  https://github.com/huggingface/diffusers/pull/6143/files
     num_update_steps_per_epoch = math.ceil(len(train_loader) / accelerator.num_processes / accelerator.gradient_accumulation_steps)
     max_train_steps = args.epochs * num_update_steps_per_epoch
     
     num_warmup_steps = max_train_steps * args.warmup_ratio * accelerator.num_processes
     num_training_steps = max_train_steps * accelerator.num_processes
+    
+    # Optimizer and scheduler
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
     
     print("Preparing accelerator...")
+    
+    # Prepare accelerator
     model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, test_loader, scheduler
     )
@@ -480,20 +511,25 @@ def main(args):
     embed_tokens = embed_tokens.to(accelerator.device)
         
     print("Start training...")
+    
+    # Training loop
     for epoch in range(args.epochs):
+        # Train
         train_one_epoch(
             model, lm_head, embed_tokens,
-            train_loader, optimizer, scheduler, criterion, train_config, 
+            train_loader, optimizer, scheduler, train_config, 
             epoch, args.epochs, accelerator, run
         )
         
+        # Validate
         if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
             validate(
                 model, lm_head, embed_tokens,
-                test_loader, criterion, train_config, 
+                test_loader, train_config, 
                 epoch, args.epochs, args.savedir, accelerator, run
             )
 
+    # Finish
     if accelerator.is_main_process:
         run.finish()
 
