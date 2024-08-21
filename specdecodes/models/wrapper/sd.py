@@ -1,4 +1,7 @@
+import json
 import logging
+import os
+import time
 import torch
 import torch.nn.functional as F
 from .base import WrapperBase
@@ -7,6 +10,7 @@ from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
 from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
+from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data 
 
 class SDWrapper(WrapperBase):
@@ -204,7 +208,7 @@ class SDWrapper(WrapperBase):
 
         # * clone input_ids 
         input_ids = input_ids.clone()
-        org_input_len = input_ids.shape[1]
+        # org_input_len = input_ids.shape[1]
 
         # * prepare kv-cache
         llm_past_key_values = TreeDynamicCache()
@@ -225,8 +229,6 @@ class SDWrapper(WrapperBase):
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
         finished = False
-        total_sampled = 1
-        total_steps = 1
         while not finished:
             # * speculate
             root = self._speculate(hidden_states, input_ids, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
@@ -251,12 +253,6 @@ class SDWrapper(WrapperBase):
                                                 eos_token_id=self.tokenizer.eos_token_id,
                                                 sampling_method=self.method,
                                             )
-            logging.debug(
-                f"Total: {len(list(preorder_iter(root)))},"\
-                f"\tPredicted: {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
-            )
-            total_sampled += len(sampled_tokens[0])
-            total_steps += 1
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
             hidden_indices = hidden_indices.to(hidden_states.device)
@@ -271,9 +267,69 @@ class SDWrapper(WrapperBase):
             # * check stopping criteria
             finished = stopping_criteria(input_ids, None)
             
-            # print(f'used time: {(time.time() - st) / num_repeats * 1000} ms')
-            # used_mem = torch.cuda.max_memory_allocated()
-            # print(f'peak mem: {used_mem / 1024 ** 3} GB')
-        
-        logging.info(f"Total sampled: {total_sampled}, Total iterations: {total_steps}, Average sampled: {total_sampled/total_steps:.2f}")
         return input_ids
+    
+
+class ProfileSDWrapper(SDWrapper):
+    def __init__(self, method="naive", write_path='./experiments/profile_data'):
+        super(ProfileSDWrapper, self).__init__(method)
+        self.profile_data = {}
+        self.sampled_count = 1 # assume first token is sampled (prefill stage)
+        self.iter_count = 1 # assume first step is done (prefill stage)
+        
+        if write_path is not None:
+            os.makedirs(write_path, exist_ok=True)
+        self.write_path = write_path
+        
+    
+    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="naive"):
+        sampled_tokens, hidden_indices = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, sampling_method)
+        
+        # tokenize ids
+        nodes = list(preorder_iter(root))
+        for node in nodes:
+            node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
+        
+        # profile data
+        json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
+        sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
+        self.profile_data[self.iter_count] = {}
+        self.profile_data[self.iter_count]["draft_tree"] = json_graph
+        self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
+        
+        # logging
+        logging.debug(
+            f"Total: {len(list(preorder_iter(root)))},"\
+            f"\tPredicted: {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+        )
+        
+        # update stats
+        self.sampled_count += len(sampled_tokens[0])
+        self.iter_count += 1
+        
+        return sampled_tokens, hidden_indices
+    
+    
+    def _generate(
+        self,
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+    ):
+        input_ids = super(ProfileSDWrapper, self)._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        
+        # logging
+        logging.info(
+            f"Total sampled: {self.sampled_count},"\
+            f"\tTotal iterations: {self.iter_count},"\
+            f"\tAverage sampled: {self.sampled_count/self.iter_count:.2f}"
+        )
+        
+        # write profile data
+        if self.write_path is not None:
+            with open(os.path.join(self.write_path, f"profile_data.json"), "w") as f:
+                json.dump(self.profile_data, f)
+        
+        return input_ids
+        
