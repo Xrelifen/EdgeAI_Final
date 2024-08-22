@@ -211,20 +211,6 @@ def getkacc(model, data, lm_head, embed_tokens, max_length=5):
     acc = correct.float() / total.float()
     return acc.cpu().tolist()
 
-def calculate_loss(predict, target, predict_head, target_head, loss_mask, train_config):
-    with torch.no_grad():
-        target_head_p = F.softmax(target_head, dim=2).detach()
-    # predict_head_logp = F.log_softmax(predict_head, dim=2)
-    # plogp = target_head_p * predict_head_logp
-    predict_head_p = F.softmax(predict_head, dim=2)
-    ploss = F.l1_loss(predict_head_p, target_head_p, reduction="none")
-    ploss = (torch.sum(torch.sum(loss_mask * ploss, 2)) / (loss_mask.sum()+1e-5)) * 0.5 # equivalent to TVD
-    
-    vloss = F.l1_loss(predict, target, reduction="none")
-    vloss = (torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)) * 0.5 # equivalent to TVD
-    loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
-    return loss, ploss, vloss
-
 @torch.no_grad()
 def update_metrics(predict_head, target_head, loss_mask, correct, topk_acc, total):
     _, predicted = torch.max(predict_head, 2)
@@ -252,7 +238,23 @@ def gather_metrics(correct, total, topk_acc, accelerator):
     topk_acc = accelerator.gather_for_metrics(topk_acc)
     return correct, total, topk_acc
 
-def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
+def calculate_loss(predict, target, predict_head, target_head, loss_mask, criterions, train_config):
+    with torch.no_grad():
+        target_head_p = F.softmax(target_head, dim=2).detach()
+    # predict_head_logp = F.log_softmax(predict_head, dim=2)
+    # plogp = target_head_p * predict_head_logp
+    predict_head_p = F.softmax(predict_head, dim=2)
+    # ploss = F.l1_loss(predict_head_p, target_head_p, reduction="none")
+    ploss = criterions[1](predict_head_p, target_head_p)
+    ploss = torch.sum(torch.sum(loss_mask * ploss, 2)) / (loss_mask.sum() + 1e-5)
+    
+    # vloss = F.l1_loss(predict, target, reduction="none")
+    vloss = criterions[0](predict, target)
+    vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum() + 1e-5)
+    loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
+    return loss, ploss, vloss
+
+def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, criterions, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
@@ -266,7 +268,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
             target_head = lm_head(target.to(lm_head.weight.dtype))
             predict_head = lm_head(predict)
 
-            loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], train_config)
+            loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterions, train_config)
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
             optimizer.step()
@@ -304,7 +306,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
 
 
 @torch.no_grad()
-def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
+def validate(model, lm_head, embed_tokens, test_loader, criterions, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
     device = accelerator.device
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
@@ -328,7 +330,7 @@ def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num
         predict_head = lm_head(predict)
 
         # Calculate loss
-        loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], train_config)
+        loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterions, train_config)
 
         # Update metrics
         correct, total = update_metrics(predict_head, target_head, data["loss_mask"][:, :, None], correct, topk_acc, total)
@@ -352,6 +354,7 @@ def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num
             "test/epochloss": epoch_loss,
             "test/ploss": ploss.item(),
             "test/vloss": vloss.item(),
+            "test/TVD": ploss.item()*0.5,
         }
         for id, acc in enumerate(mean_acces):
             logdict[f'test/{id}_acc'] = acc.mean().item()
@@ -500,6 +503,12 @@ def main(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
     
+    # criterions
+    criterions = [
+        nn.L1Loss(reduction="none"), # value loss
+        nn.L1Loss(reduction="none"), # policy loss
+    ]
+    
     print("Preparing accelerator...")
     
     # Prepare accelerator
@@ -517,7 +526,7 @@ def main(args):
         # Train
         train_one_epoch(
             model, lm_head, embed_tokens,
-            train_loader, optimizer, scheduler, train_config, 
+            train_loader, optimizer, scheduler, criterions, train_config, 
             epoch, args.epochs, accelerator, run
         )
         
@@ -525,7 +534,7 @@ def main(args):
         if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
             validate(
                 model, lm_head, embed_tokens,
-                test_loader, train_config, 
+                test_loader, criterions, train_config, 
                 epoch, args.epochs, args.savedir, accelerator, run
             )
 
@@ -538,7 +547,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='sp')
     parser.add_argument('--llm-path', '-llm', type=str, default="meta-llama/Llama-2-7b-chat-hf")
     parser.add_argument('--datadir', type=str, default='0')
-    parser.add_argument('--outdir', type=str, default='0')
     parser.add_argument('--savedir', type=str, default='0')
     parser.add_argument('--data-ratio', type=float, default=1)
     
