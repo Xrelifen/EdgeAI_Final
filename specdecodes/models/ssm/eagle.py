@@ -78,7 +78,7 @@ class DraftModel(nn.Module):
         return input_hidden, input_ids, position_ids, tree_mask
 
     @torch.no_grad()
-    def speculate(self, hidden_states, input_ids, embed_tokens, lm_head, past_key_values, eos_token_id=None):
+    def speculate(self, hidden_states, input_ids, embed_tokens, lm_head, logits_warper, past_key_values, eos_token_id=None):
         device = hidden_states.device
         
         # take out last token
@@ -120,7 +120,9 @@ class DraftModel(nn.Module):
             del outputs
 
             #* Get probabilities of each token
-            sampled_probs = nn.functional.softmax(lm_head(out_hidden)[0], dim=-1) # [0] removes batch dimension
+            # sampled_probs = nn.functional.softmax(lm_head(out_hidden)[0], dim=-1) # [0] removes batch dimension
+            next_token_scores = logits_warper(None, lm_head(out_hidden)[0])
+            sampled_probs = nn.functional.softmax(next_token_scores, dim=-1)
             
             # sample top_k tokens, and their probabilities
             topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
@@ -135,13 +137,13 @@ class DraftModel(nn.Module):
             # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
             #* Create nodes
             next_nodes = []
-            for idx, node in enumerate(prev_sample_nodes):
+            for prev_ind, prev_node in enumerate(prev_sample_nodes):
                 for i in range(self.topk_len):
-                    token_id = topk_index[idx][i].item()
-                    prob = topk_prob[idx][i].item()
-                    global_prob = prob * node.prob
+                    token_id = topk_index[prev_ind][i].item()
+                    prob = topk_prob[prev_ind][i].item()
+                    global_prob = prob * prev_node.prob
                     
-                    new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=idx)
+                    new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
                     self.UNIQUE_ID += 1 # increment node id, make sure it is unique
                     next_nodes.append(new_node)
             

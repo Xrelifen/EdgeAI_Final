@@ -21,12 +21,13 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, hidden_states, input_ids, past_key_values, eos_token_id=None):
+    def _speculate(self, hidden_states, input_ids, logits_warper, past_key_values, eos_token_id=None):
         return self.ssm.speculate(
             hidden_states,
             input_ids,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=self.llm.lm_head,
+            logits_warper=logits_warper,
             past_key_values=past_key_values,
             eos_token_id=eos_token_id,
         )
@@ -128,6 +129,7 @@ class SDWrapper(WrapperBase):
                 q = torch.zeros_like(p)
                 for node in cur.children:
                     q[node.id] = node.prob
+
                 child_ids = torch.tensor([node.id for node in cur.children])
                 child_id_to_node = {node.id: node for node in cur.children}
                 
@@ -231,7 +233,7 @@ class SDWrapper(WrapperBase):
         finished = False
         while not finished:
             # * speculate
-            root = self._speculate(hidden_states, input_ids, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
+            root = self._speculate(hidden_states, input_ids, logits_warper, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()
@@ -266,12 +268,12 @@ class SDWrapper(WrapperBase):
             
             # * check stopping criteria
             finished = stopping_criteria(input_ids, None)
-            
+        
         return input_ids
     
 
 class ProfileSDWrapper(SDWrapper):
-    def __init__(self, method="naive", write_path='./experiments/profile_data'):
+    def __init__(self, method="naive", write_path='specdecodes/experiments/profile_data'):
         super(ProfileSDWrapper, self).__init__(method)
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
@@ -289,6 +291,9 @@ class ProfileSDWrapper(SDWrapper):
         nodes = list(preorder_iter(root))
         for node in nodes:
             node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
+        
+        # to compute TVD between p and q
+        # tvd = 0.5 * torch.sum(torch.abs(p - q))
         
         # profile data
         json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
@@ -332,4 +337,3 @@ class ProfileSDWrapper(SDWrapper):
                 json.dump(self.profile_data, f)
         
         return input_ids
-        
