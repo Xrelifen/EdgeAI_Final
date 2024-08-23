@@ -26,6 +26,23 @@ class DraftModel(nn.Module):
         
         self.UNIQUE_ID = 1
     
+    def _sample_probs(
+        self,
+        logits: torch.FloatTensor,
+        logits_warper,
+        do_sample: bool,
+    ):
+        if do_sample:
+            batch, seq_len, vocab_size = logits.shape
+            
+            logits = logits.view(-1, vocab_size)
+            next_token_scores = logits_warper(None, logits)
+            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            return probs.view(batch, seq_len, vocab_size) # preserve shape
+        
+        else:
+            return torch.softmax(logits, dim=-1)
+    
     # calling .config is same as calling model.config
     @property
     def config(self):
@@ -66,19 +83,18 @@ class DraftModel(nn.Module):
 
         input_hidden = hidden_states[:, indices].to(device)
         
-        input_ids = torch.tensor([node.id for node in nodes])[None].to(device)
+        input_ids = torch.tensor([node.id for node in nodes], device=device)[None]
         
         position_ids = torch.zeros(len(nodes), device=device)[None] + (position_offset + depth)
         
         # Generating tree masks for the new nodes, don't have to consider the old nodes
-        if indices[0] != -1: # if not root
-            tree_mask = tree_mask[:, :, indices]
+        tree_mask = tree_mask[:, :, indices]
         tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
 
         return input_hidden, input_ids, position_ids, tree_mask
 
     @torch.no_grad()
-    def speculate(self, hidden_states, input_ids, embed_tokens, lm_head, logits_warper, past_key_values, eos_token_id=None):
+    def speculate(self, hidden_states, input_ids, embed_tokens, lm_head, logits_warper, do_sample, past_key_values, eos_token_id=None):
         device = hidden_states.device
         
         # take out last token
@@ -99,31 +115,30 @@ class DraftModel(nn.Module):
             if depth == 1: # first iteration
                 kv_len = past_key_values.get_seq_length()
                 outputs = self(
-                    hidden_states, input_ids[:, kv_len:], 
+                    hidden_states, input_ids[:, kv_len:],
                     embed_tokens=embed_tokens, 
                     past_key_values=past_key_values
                 )
-                out_hidden = outputs.last_hidden_state[:, -1:].clone() # Only the last token's hidden state is needed.
+                hidden_states = outputs.last_hidden_state[:, -1:].clone() # Only the last token's hidden state is needed.
             else:
                 hidden_states, input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, next_nodes, hidden_states, tree_mask, org_input_len)
                 outputs = self(
-                    hidden_states, input_ids, 
+                    hidden_states, input_ids,
                     embed_tokens=embed_tokens, 
-                    past_key_values=past_key_values, 
+                    past_key_values=past_key_values,
                     position_ids=position_ids, 
                     attention_mask=invert_mask(tree_mask, dtype=hidden_states.dtype)
                 )
-                out_hidden = outputs.last_hidden_state
+                hidden_states = outputs.last_hidden_state
 
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
 
             #* Get probabilities of each token
-            # sampled_probs = nn.functional.softmax(lm_head(out_hidden)[0], dim=-1) # [0] removes batch dimension
-            next_token_scores = logits_warper(None, lm_head(out_hidden)[0])
-            sampled_probs = nn.functional.softmax(next_token_scores, dim=-1)
-            
+            # sampled_probs = nn.functional.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
+            sampled_probs = self._sample_probs(lm_head(hidden_states), logits_warper, do_sample=do_sample).squeeze(0)
+
             # sample top_k tokens, and their probabilities
             topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
             topk_index, topk_prob = topk_tokens.indices, topk_tokens.values
