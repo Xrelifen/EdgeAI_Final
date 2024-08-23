@@ -136,8 +136,8 @@ class DraftModel(nn.Module):
             del outputs
 
             #* Get probabilities of each token
-            # sampled_probs = nn.functional.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
-            sampled_probs = self._sample_probs(lm_head(hidden_states), logits_warper, do_sample=do_sample).squeeze(0)
+            sampled_probs = nn.functional.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
+            # sampled_probs = self._sample_probs(lm_head(hidden_states), logits_warper, do_sample=do_sample).squeeze(0)
 
             # sample top_k tokens, and their probabilities
             topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
