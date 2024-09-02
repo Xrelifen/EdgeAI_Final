@@ -7,13 +7,14 @@ from bigtree import Node
 from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 
 from ..utils import invert_mask
-from ..llm.modeling_llama_no_layernorm import LlamaModel
+from ..llm import modeling_llama_no_layernorm as modeling_llama
 
 # TODO: Rename this to EagleXXX after implementing other models
 class DraftModel(nn.Module):
     def __init__(self, config):
         super().__init__()
-        model = LlamaModel(config)
+
+        model = modeling_llama.LlamaModel(config)
         if hasattr(model, "embed_tokens"):
             del model.embed_tokens
 
@@ -21,7 +22,7 @@ class DraftModel(nn.Module):
         self.model = model
 
         self.max_candidate_tokens = 64 #! Currently not used
-        self.depth = 6
+        self.depth = 10
         self.topk_len = 15
         
         self.UNIQUE_ID = 1
@@ -158,6 +159,9 @@ class DraftModel(nn.Module):
                     prob = topk_prob[prev_ind][i].item()
                     global_prob = prob * prev_node.prob
                     
+                    # if prob < 1e-3:# or global_prob < 1e-6:
+                    #     continue
+                    
                     new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
                     self.UNIQUE_ID += 1 # increment node id, make sure it is unique
                     next_nodes.append(new_node)
@@ -172,9 +176,6 @@ class DraftModel(nn.Module):
             for node in next_nodes:
                 prev_sample_nodes[node.ind].append(node)
  
-            # * Update past_key_values (remove unused key_values, according to pruning logic above)
-            # Yet to implement after tree pruning logic is implemented
- 
             #* Get the nodes as input for next iteration
             next_nodes = [node for node in next_nodes if node.id != eos_token_id] # to follow prev_nodes logic above
             prev_sample_nodes = next_nodes
@@ -188,9 +189,7 @@ class DraftModel(nn.Module):
         # remove_nodes = sorted(preorder_iter(root), key=lambda x: x.global_prob)[:-self.max_candidate_tokens]
         # shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes), delete_children=True, skippable=True)
         
-        #TODO: Remove past_key_values.crop() and replace with ssm_past_key_values.reordering in model._generate()
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
         
-        # print("Total nodes:", len(list(preorder_iter(root))))
         return root
