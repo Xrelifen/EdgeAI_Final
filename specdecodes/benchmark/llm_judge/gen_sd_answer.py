@@ -28,6 +28,7 @@ def load_model(
     ssm_path: str,
     mode: str,
     sd_method: str,
+    out_dir: str = None,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     ):
@@ -42,15 +43,17 @@ def load_model(
         device_map=device
     )
 
-    if args.mode == "naive":
+    if mode == "naive":
         model = NaiveWrapper()
         
-    elif args.mode == "hf":
+    elif mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif args.mode == "sd":
-        # model = SDWrapper(method=args.sd_method)
-        model = ProfileSDWrapper(method=sd_method)
+    elif mode == "sd":
+        # model = SDWrapper(method=sd_method)
+        unique_id = random.randint(1, 1000000-1)
+        model = ProfileSDWrapper(method=sd_method, out_dir=out_dir)
+        print(f"Output to {out_dir}")
         
         # load SSM
         draft_config = deepcopy(llm.config)
@@ -77,6 +80,7 @@ def run_eval(
     ssm_path,
     mode,
     sd_method,
+    out_dir,
     model_id,
     question_file,
     question_begin,
@@ -114,6 +118,7 @@ def run_eval(
                 ssm_path,
                 mode,
                 sd_method,
+                out_dir,
                 model_id,
                 questions[i : i + chunk_size],
                 answer_file,
@@ -136,6 +141,7 @@ def get_model_answers(
     ssm_path,
     mode,
     sd_method,
+    out_dir,
     model_id,
     questions,
     answer_file,
@@ -157,7 +163,7 @@ def get_model_answers(
     #     cpu_offloading=False,
     #     debug=False,
     # )
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, dtype=dtype, device="cuda")
+    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, out_dir, dtype=dtype, device="cuda")
 
     for question in tqdm(questions):
         if question["category"] in temperature_config:
@@ -285,9 +291,6 @@ if __name__ == "__main__":
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(
-        "--model-id", type=str, required=True, help="A custom name for the model."
-    )
-    parser.add_argument(
         "--mode",
         type=str,
         default="naive",
@@ -298,6 +301,16 @@ if __name__ == "__main__":
         type=str,
         default="naive",
         help="The mode of model generation.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="specdecodes/experiments/mt_bench/",
+        help="The output directory for sd profiling.",
+    )
+    
+    parser.add_argument(
+        "--model-id", type=str, required=True, help="A custom name for the model."
     )
     parser.add_argument(
         "--bench-name",
@@ -373,14 +386,13 @@ if __name__ == "__main__":
     print(f"Output to {answer_file}")
 
     
-    
-    
-    
+    # out_dir = f"specdecodes/experiments/mt_bench-{args.sd_method}-{unique_id:04d}"
     run_eval(
         llm_path=args.llm_path,
         ssm_path=args.ssm_path,
         mode=args.mode,
         sd_method=args.sd_method,
+        out_dir=args.out_dir,
         
         model_id=args.model_id,
         question_file=question_file,

@@ -5,6 +5,7 @@ python3 qa_browser.py --share
 
 import argparse
 from collections import defaultdict
+import os
 import re
 
 import gradio as gr
@@ -416,13 +417,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    question_file = f"data/{args.bench_name}/question.jsonl"
-    answer_dir = f"data/{args.bench_name}/model_answer"
+    parent_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f"Parent dir: {parent_dir}")
+    
+    question_file = f"{parent_dir}/data/{args.bench_name}/question.jsonl"
+    answer_dir = f"{parent_dir}/data/{args.bench_name}/model_answer"
     pairwise_model_judgment_file = (
-        f"data/{args.bench_name}/model_judgment/gpt-4_pair.jsonl"
+        f"{parent_dir}/data/{args.bench_name}/model_judgment/gpt-4_pair.jsonl"
     )
     single_model_judgment_file = (
-        f"data/{args.bench_name}/model_judgment/gpt-4_single.jsonl"
+        f"{parent_dir}/data/{args.bench_name}/model_judgment/gpt-4_single.jsonl"
     )
 
     # Load questions
