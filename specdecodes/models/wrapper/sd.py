@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import time
 import torch
 import torch.nn.functional as F
@@ -88,52 +89,54 @@ class SDWrapper(WrapperBase):
 
         elif sampling_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
-            global_p = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            global_q = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                p = global_p[cur.ind]
+                q = global_q[cur.ind]
                 
                 accepts_token = False
                 for child in cur.children:
-                    r = torch.rand(1).item()
-                    # px = gtp[child.id]
-                    # qx = 1  # in this iteration, only child.id' prob is 1, others are 0.
-                    # if r <= px / qx:
-                    if r <= p[child.id]: # since qx = 1, we can compare r with px directly
+                    r = random.random()
+                    # qx = gtp[child.id]
+                    # px = 1  # in this iteration, only child.id' prob is 1, others are 0.
+                    # if r <= qx / px:
+                    if r <= q[child.id]: # since px = 1, we can compare r with qx directly
                         accepts_token = True
                         sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
                         break
                     else:
-                        # p = torch.clamp(p - q, min=0)
-                        p[child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        p = F.normalize(p, p=1, dim=0)
-                        # q[child.id] = 0
+                        # q = torch.clamp(q - p, min=0)
+                        q[child.id] = 0 # only child.id' prob is 1, equivalent to function above
+                        q = F.normalize(q, p=1, dim=0)
                         # q = q / q.sum()
+                        # p[child.id] = 0
+                        # p = p / p.sum()
                         
                 # stop loop if no token is accepted
                 if accepts_token == False: break
                 
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_p[cur.ind], 1).item()
+                bonus_token = torch.multinomial(global_q[cur.ind], 1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
         elif sampling_method == "sequoia":
             assert do_sample == True, "Sequoia method requires sampling"
-            global_p = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            global_q = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                p = global_p[cur.ind]
+                q = global_q[cur.ind]
                 
                 # TODO: Optimize tree to have a better structure and speed for operations below
                 # obtain probability distribution for SSM
-                q = torch.zeros_like(p)
+                p = torch.zeros_like(q)
                 for node in cur.children:
-                    q[node.id] = node.prob
+                    p[node.id] = node.prob
+                p = F.normalize(p, p=1, dim=0)
 
                 child_ids = torch.tensor([node.id for node in cur.children])
                 child_id_to_node = {node.id: node for node in cur.children}
@@ -141,9 +144,9 @@ class SDWrapper(WrapperBase):
                 tried_ids = []
                 accepts_token = False
                 for i in range(len(cur.children)):
-                    r = torch.rand(1).item()
-                    sample_id = torch.multinomial(q, 1).item()
-                    if r <= p[sample_id] / q[sample_id]:
+                    r = random.random()
+                    sample_id = torch.multinomial(p, 1).item()
+                    if r <= q[sample_id] / p[sample_id]:
                         accepts_token = True
                         sampled_tokens.append(sample_id)
                         hidden_indices.append(cur.ind)
@@ -151,24 +154,24 @@ class SDWrapper(WrapperBase):
                         break
                     
                     else:
-                        p = torch.clamp(p - q, min=0)
-                        p = F.normalize(p, p=1, dim=0)
-                        
-                        q[sample_id] = 0
-                        tried_ids.append(sample_id)
-                        if q.sum() == 0:
-                            # set q[t] = 0 if t in S, else 1
-                            q = torch.zeros_like(q)
-                            q[child_ids] = 1
-                            q[tried_ids] = 0
-                        
+                        q = torch.clamp(q - p, min=0)
                         q = F.normalize(q, p=1, dim=0)
+                        
+                        p[sample_id] = 0
+                        tried_ids.append(sample_id)
+                        if p.sum() == 0:
+                            # set p[t] = 0 if t in S, else 1
+                            p = torch.zeros_like(p)
+                            p[child_ids] = 1
+                            p[tried_ids] = 0
+                        
+                        p = F.normalize(p, p=1, dim=0)
                         
                 # stop loop if no token is accepted
                 if accepts_token == False: break
                 
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_p[cur.ind], 1).item()
+                bonus_token = torch.multinomial(global_q[cur.ind], 1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         

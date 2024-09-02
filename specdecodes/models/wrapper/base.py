@@ -91,12 +91,12 @@ class WrapperBase(nn.Module):
             
             logits = logits.view(-1, vocab_size)
             next_token_scores = logits_warper(None, logits)
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            probs = torch.softmax(next_token_scores, dim=-1)
             
             if return_probs:
                 return probs.view(batch, seq_len, vocab_size) # preserve shape
             else:
-                token = torch.multinomial(probs, 1)
+                token = torch.multinomial(probs, num_samples=1)
                 return token.view(batch, seq_len) # preserve shape
         else:
             if return_probs:
