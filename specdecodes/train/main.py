@@ -21,7 +21,9 @@ from tqdm import tqdm
 from copy import deepcopy
 import wandb
 
+from ..models.llm import modeling_llama_no_layernorm as modeling_llama
 from ..models.ssm.eagle import DraftModel
+
 
 class AddGaussianNoise:
     def __init__(self, mean=0.0, std=0.0):
@@ -59,31 +61,29 @@ class CustomDataset(Dataset):
         # try:
         data = torch.load(self.data[index], weights_only=False)
         new_data = {}
-        hidden_state = data['hidden_state'][:self.max_len][None, :]
-        input_ids = data['input_ids'][:self.max_len][None, :]
-        loss_mask = data["loss_mask"][:self.max_len][None, :]
+        
+        hidden_state = data['hidden_state'][:self.max_len].unsqueeze(0)
+        input_ids = data['input_ids'][:self.max_len].unsqueeze(0)
+        loss_mask = data["loss_mask"][:self.max_len].to(dtype=torch.bool).unsqueeze(0)
 
         length = hidden_state.shape[1]
-        attention_mask = [1] * length
-        loss_mask = loss_mask[0].tolist()
-        loss_mask[-1] = 0
+        attention_mask = torch.ones(1, length, dtype=torch.bool)
+        loss_mask[0, -1] = 0
 
         input_ids_target = input_ids[:, 1:]
-        zeropadding = torch.tensor([[0]])
+        zeropadding = torch.zeros(1, 1, dtype=input_ids.dtype)
         input_ids_target = torch.cat((input_ids_target, zeropadding), dim=1)
 
         target = hidden_state[:, 1:, :]
         zeropadding = torch.zeros(1, 1, target.shape[2])
         target = torch.cat((target, zeropadding), dim=1)
-        loss_mask[-1] = 0
+        
         new_data["attention_mask"] = attention_mask
         new_data["loss_mask"] = loss_mask
         new_data["target"] = target
         new_data["hidden_state_big"] = hidden_state
         new_data["input_ids"] = input_ids_target
-        # sample = torch.cat((data['xs'],data['xb']))
-        # sample=torch.cat((self.data[index]['x'],self.data[index]['logits']))
-        # label = data['y']
+        
         if self.transform:
             new_data = self.transform(new_data)
 
@@ -107,13 +107,11 @@ class DataCollatorWithPadding:
         max_length = max(item['hidden_state_big'].shape[1] for item in features)
         batch_input_ids = torch.cat([self.paddingtensor2D(item['input_ids'], max_length) for item in features])
         batch_hidden_states = torch.cat([self.paddingtensor(item['hidden_state_big'], max_length) for item in features])
-        batch_target = torch.cat([self.paddingtensor(item['target'], max_length) for item in features])
-        batch_loss_mask = torch.tensor(
-            [item['loss_mask'] + [0] * (max_length - len(item['loss_mask'])) for item in features])
-        batch_attention_mask = torch.tensor(
-            [item['attention_mask'] + [0] * (max_length - len(item['attention_mask'])) for item in features])
-        # batch_loss_mask = torch.ones_like(batch_loss_mask)
-        # batch_attention_mask=torch.ones_like(batch_attention_mask)
+        batch_target = torch.cat([self.paddingtensor(item['target'], max_length) for item in features])        
+        batch_loss_mask = torch.cat([self.paddingtensor2D(item['loss_mask'], max_length) for item in features])
+        batch_attention_mask = torch.cat([self.paddingtensor2D(item['attention_mask'], max_length) for item in features])
+        
+        
         batch = {
             "input_ids": batch_input_ids,
             "hidden_states": batch_hidden_states,
@@ -212,22 +210,20 @@ def getkacc(model, data, lm_head, embed_tokens, max_length=5):
     return acc.cpu().tolist()
 
 @torch.no_grad()
-def update_metrics(predict_head, target_head, loss_mask, correct, topk_acc, total):
-    _, predicted = torch.max(predict_head, 2)
-    _, targeted = torch.max(target_head, 2)
-    ct = loss_mask.sum().item()
-    cc = ((predicted == targeted) * loss_mask.squeeze()).sum().item()
+def update_metrics(loss_mask, s_out, t_out, correct, total, topk_acc):
+    _, predicted = torch.max(s_out, 2)
+    _, targeted = torch.max(t_out, 2)
+    correct += ((predicted == targeted) * loss_mask).sum().item()
+    total += loss_mask.sum().item()
     
-    predict_head = predict_head.view(-1, target_head.shape[-1])[loss_mask.view(-1) == 1]
-    targeted = targeted.view(-1)[loss_mask.view(-1) == 1]
-
-    temp_top_acc = top_accuracy(predict_head, targeted, (1, 2, 3))
+    s_out = s_out.view(-1, t_out.shape[-1])[loss_mask.view(-1)]
+    targeted = targeted.view(-1)[loss_mask.view(-1)]
+    temp_top_acc = top_accuracy(s_out, targeted, (1, 2, 3))
     for idx, top_i in enumerate(temp_top_acc):
         topk_acc[idx] += top_i
 
-    total += ct
-    correct += cc
     return correct, total
+
 
 @torch.no_grad()
 def gather_metrics(correct, total, topk_acc, accelerator):
@@ -238,23 +234,68 @@ def gather_metrics(correct, total, topk_acc, accelerator):
     topk_acc = accelerator.gather_for_metrics(topk_acc)
     return correct, total, topk_acc
 
-def calculate_loss(predict, target, predict_head, target_head, loss_mask, criterions, train_config):
+def aggr_mean_loss(mask, loss):
+    return torch.sum(torch.mean(mask.unsqueeze(-1) * loss, 2)) / (mask.sum() + 1e-5)
+
+def aggr_sum_loss(mask, loss):
+    return torch.sum(torch.sum(mask.unsqueeze(-1) * loss, 2)) / (mask.sum() + 1e-5)
+
+def calc_kl_loss(mask, s_logits, t_logits):
     with torch.no_grad():
-        target_head_p = F.softmax(target_head, dim=2).detach()
-    # predict_head_logp = F.log_softmax(predict_head, dim=2)
-    # plogp = target_head_p * predict_head_logp
-    predict_head_p = F.softmax(predict_head, dim=2)
-    # ploss = F.l1_loss(predict_head_p, target_head_p, reduction="none")
-    ploss = criterions[1](predict_head_p, target_head_p)
-    ploss = torch.sum(torch.sum(loss_mask * ploss, 2)) / (loss_mask.sum() + 1e-5)
+        t_logits = F.softmax(t_logits, dim=-1)
+    s_logits = F.log_softmax(s_logits, dim=-1)
+    loss = F.kl_div(s_logits, t_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss)
+    return loss
+
+def calc_tvdpp_loss(mask, s_logits, t_logits):
+    # sel_mask = mask[:, :, None].expand_as(s_logits)
+    # vocab_size = s_logits.size(-1)
+    # s_logits = torch.masked_select(s_logits, sel_mask).view(-1, vocab_size)
+    # t_logits = torch.masked_select(t_logits, sel_mask).view(-1, vocab_size)
     
-    # vloss = F.l1_loss(predict, target, reduction="none")
-    vloss = criterions[0](predict, target)
-    vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum() + 1e-5)
+    s_logits = F.softmax(s_logits, dim=-1)
+    with torch.no_grad():
+        t_logits = F.softmax(t_logits, dim=-1)
+        reward = torch.as_tensor((t_logits-s_logits) > 0, dtype=torch.float32)
+        std = torch.std(reward, dim=-1, keepdim=True)
+        mean = torch.mean(reward, dim=-1, keepdim=True)
+        reward = (reward - mean) / (std + 1e-5)
+    
+    policy_loss = torch.log(s_logits) * -reward
+    # policy_loss = policy_loss.mean(dim=-1).mean(dim=-1)
+    policy_loss = aggr_mean_loss(mask, policy_loss)
+    
+    return policy_loss
+
+
+def calc_tvd_loss(mask, s_logits, t_logits):
+    with torch.no_grad():
+        t_logits = F.softmax(t_logits, dim=-1)
+    s_logits = F.softmax(s_logits, dim=-1)
+    
+    loss = F.l1_loss(s_logits, t_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss) * 0.5
+    return loss
+
+def calc_l1_loss(mask, s_logits, t_logits):
+    loss = F.l1_loss(s_logits, t_logits, reduction='none')
+    loss = aggr_mean_loss(mask, loss)
+    return loss
+
+def calculate_loss(loss_mask, s_logits, t_logits, s_out, t_out, train_config):
+    ploss = calc_kl_loss(loss_mask, s_out, t_out)
+    # ploss = calc_tvd_loss(loss_mask, s_out, t_out)
+    # ploss = calc_tvdpp_loss(loss_mask, s_out, t_out)
+    
+    vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
+    # vloss = calc_kl_loss(loss_mask, s_logits, t_logits)
+    
     loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
+    
     return loss, ploss, vloss
 
-def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, criterions, train_config, epoch, num_epochs, accelerator, run=None):
+def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
@@ -262,20 +303,20 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
     for idx, data in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")):
         with accelerator.accumulate(model):
             optimizer.zero_grad()
-            predict = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
-            target = data["target"]
-
-            target_head = lm_head(target.to(lm_head.weight.dtype))
-            predict_head = lm_head(predict)
-
-            loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterions, train_config)
+            with torch.no_grad():
+                t_logits = data["target"]
+                t_out = lm_head(t_logits.to(lm_head.weight.dtype))
+            s_logits = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+            s_out = lm_head(s_logits)
+            
+            loss, ploss, vloss = calculate_loss(data["loss_mask"], s_logits, t_logits, s_out, t_out, train_config)
             accelerator.backward(loss)
             accelerator.clip_grad_value_(model.parameters(), train_config["grad_clip"])
             optimizer.step()
             scheduler.step()
 
         prev_total = total
-        correct, total = update_metrics(predict_head, target_head, data["loss_mask"][:, :, None], correct, topk_acc, total)
+        correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
         if accelerator.is_main_process and (idx % train_config["log_freq"] == 0) and total > prev_total and run:
             logdict = {
                 "train/lr": optimizer.optimizer.param_groups[0]["lr"], 
@@ -306,7 +347,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
 
 
 @torch.no_grad()
-def validate(model, lm_head, embed_tokens, test_loader, criterions, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
+def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
     device = accelerator.device
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
@@ -322,18 +363,18 @@ def validate(model, lm_head, embed_tokens, test_loader, criterions, train_config
                 k_acc[i].append(acces[i])
 
         # Forward pass
-        predict = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
-        target = data["target"]
+        s_logit = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+        t_logit = data["target"]
 
         # Head computation
-        target_head = lm_head(target.to(lm_head.weight.dtype))
-        predict_head = lm_head(predict)
+        t_out = lm_head(t_logit.to(lm_head.weight.dtype))
+        s_out = lm_head(s_logit)
 
         # Calculate loss
-        loss, ploss, vloss = calculate_loss(predict, target, predict_head, target_head, data["loss_mask"][:, :, None], criterions, train_config)
+        loss, ploss, vloss = calculate_loss(s_logit, t_logit, s_out, t_out, data["loss_mask"], train_config)
 
         # Update metrics
-        correct, total = update_metrics(predict_head, target_head, data["loss_mask"][:, :, None], correct, topk_acc, total)
+        correct, total = update_metrics(s_out, t_out, data["loss_mask"], correct, total, topk_acc)
         epoch_loss += loss.item()
         num_batches += 1
 
@@ -354,7 +395,6 @@ def validate(model, lm_head, embed_tokens, test_loader, criterions, train_config
             "test/epochloss": epoch_loss,
             "test/ploss": ploss.item(),
             "test/vloss": vloss.item(),
-            "test/TVD": ploss.item()*0.5,
         }
         for id, acc in enumerate(mean_acces):
             logdict[f'test/{id}_acc'] = acc.mean().item()
@@ -364,6 +404,7 @@ def validate(model, lm_head, embed_tokens, test_loader, criterions, train_config
 
         # save model
         accelerator.save_model(model, f"{save_dir}/model_{epoch + 1}")
+        
 
 def main(args):
     set_seed(0) # fix seed
@@ -374,19 +415,19 @@ def main(args):
     train_config = {
         "p_w": 0.1,
         "v_w": 1.0,
-        "num_workers": 16,
+        "num_workers": 4,
         "data_noise": True,
         "noise": "uniform",
         "mean": 0.0,
         "std": 0.2,
         # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
         "max_len": 2048,
-        "grad_clip": 1.0, #0.5
+        "grad_clip": 1.0,
         "save_freq": 5,
-        "log_freq": 1#10,
+        "log_freq": 10,
     }
 
-    # Init Accelerator
+    # init Accelerator
     accelerator = Accelerator()
     
     # wandb
@@ -417,19 +458,21 @@ def main(args):
     testdatapath = datapath[int(len(datapath) * 0.95):]
 
     traindataset = CustomDataset(traindatapath, transform=aug, max_len=train_config["max_len"])
-    testdataset = CustomDataset(testdatapath)
+    testdataset = CustomDataset(testdatapath, max_len=train_config["max_len"])
 
     train_loader = DataLoader(traindataset, batch_size=args.bs, shuffle=True,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"],
-                            pin_memory=True)
+                            pin_memory=True, drop_last=True)
     test_loader = DataLoader(testdataset, batch_size=args.bs, shuffle=False,
                             collate_fn=DataCollatorWithPadding(), num_workers=train_config["num_workers"], pin_memory=True)
     
+    # create folder for saving model
     if accelerator.is_main_process:
         if not os.path.exists(args.savedir):
             os.makedirs(args.savedir)
 
 
+    # load head and embed_tokens
     print("Lodaing head and embed_tokens...")
     config = AutoConfig.from_pretrained(args.llm_path)
     llm = LlamaForCausalLM.from_pretrained(
@@ -440,93 +483,83 @@ def main(args):
         device_map="auto"
     )
     
-    draft_config = config
+    draft_config = deepcopy(llm.config)
     draft_config.num_hidden_layers = 1
     draft_config.use_cache = False
     draft_config._attn_implementation = "sdpa"
     
-    # create new head and embed_tokens
+    # create new head and embed_tokens for draft model
     lm_head = nn.Linear(draft_config.hidden_size, draft_config.vocab_size, bias=False)
     embed_tokens = nn.Embedding(draft_config.vocab_size, draft_config.hidden_size, draft_config.pad_token_id)
    
-    # load weights
+    # load weights from llm
     lm_head.weight.data = llm.lm_head.weight.data
     embed_tokens.weight.data = llm.get_input_embeddings().weight.data
-    
-    # convert to fp32
-    lm_head = lm_head.to(torch.float32)
-    embed_tokens = embed_tokens.to(torch.float32)
     
     # not traininable
     for param in lm_head.parameters():
         param.requires_grad = False
     for param in embed_tokens.parameters():
         param.requires_grad = False
-
-
-    print("Loading draft model...")
-    model = DraftModel(draft_config)
     
-    # load llm's last attention layer's data to draft model
-    # model.model.layers[0].self_attn = llm.model.layers[-1].self_attn
-    # for (draft_param, llm_param) in zip(model.model.layers[0].self_attn.parameters(), llm.model.layers[-1].self_attn.parameters()):
-    #     print(draft_param.data.shape, llm_param.data.shape)
-    #     draft_param.data = llm_param.data
+    # convert to fp32
+    lm_head = lm_head.to(torch.float32)
+    embed_tokens = embed_tokens.to(torch.float32)
     
-    # Before freeing up memory
-    used_mem = torch.cuda.memory_allocated()
-    print(f'Before freeing llm - peak mem: {used_mem / 1024 ** 3} GB')
-    
-    # Manually free up memory
+    # Manually free up memory before loading pretrained model
+    print(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
     llm.lm_head = None
     llm.set_input_embeddings(None)
     llm.model = None
     del llm
     gc.collect()
     torch.cuda.empty_cache()
+    print(f'GPU memory after freeing llm: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
     
-    # After freeing up memory
-    used_mem = torch.cuda.memory_allocated()
-    print(f'After freeing llm - peak mem: {used_mem / 1024 ** 3} GB')
-
-
-    print("Setting up training...")
+    # load weights from pretrained model if specified
+    if args.pretrained is not None:
+        print("Loading pretrained model...")
+        model = DraftModel.from_pretrained(args.pretrained, config=draft_config)
+    else:
+        print("Loading draft model...")
+        model = DraftModel(draft_config)
+    
+    # load llm's last attention layer's data to draft model
+    # model.model.layers[0].self_attn = llm.model.layers[-1].self_attn
+    # for (draft_param, llm_param) in zip(model.model.layers[0].self_attn.parameters(), llm.model.layers[-1].self_attn.parameters()):
+    #     print(draft_param.data.shape, llm_param.data.shape)
+    #     draft_param.data = llm_param.data
 
     # Calculate the number of update steps per epoch  https://github.com/huggingface/diffusers/pull/6143/files
+    print("Setting up training...")
     num_update_steps_per_epoch = math.ceil(len(train_loader) / accelerator.num_processes / accelerator.gradient_accumulation_steps)
     max_train_steps = args.epochs * num_update_steps_per_epoch
-    
     num_warmup_steps = max_train_steps * args.warmup_ratio * accelerator.num_processes
     num_training_steps = max_train_steps * accelerator.num_processes
+    print(f'warmup steps: {num_warmup_steps}, training steps: {num_training_steps}')
     
     # Optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
     
-    # criterions
-    criterions = [
-        nn.L1Loss(reduction="none"), # value loss
-        nn.L1Loss(reduction="none"), # policy loss
-    ]
-    
-    print("Preparing accelerator...")
-    
     # Prepare accelerator
+    print("Preparing accelerator...")
     model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, test_loader, scheduler
     )
     
+    # move to device
     lm_head = lm_head.to(accelerator.device)
     embed_tokens = embed_tokens.to(accelerator.device)
         
-    print("Start training...")
-    
+ 
     # Training loop
+    print("Start training...")
     for epoch in range(args.epochs):
         # Train
         train_one_epoch(
             model, lm_head, embed_tokens,
-            train_loader, optimizer, scheduler, criterions, train_config, 
+            train_loader, optimizer, scheduler, train_config, 
             epoch, args.epochs, accelerator, run
         )
         
@@ -534,7 +567,7 @@ def main(args):
         if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
             validate(
                 model, lm_head, embed_tokens,
-                test_loader, criterions, train_config, 
+                test_loader, train_config, 
                 epoch, args.epochs, args.savedir, accelerator, run
             )
 
@@ -549,6 +582,7 @@ if __name__ == '__main__':
     parser.add_argument('--datadir', type=str, default='0')
     parser.add_argument('--savedir', type=str, default='0')
     parser.add_argument('--data-ratio', type=float, default=1)
+    parser.add_argument('--pretrained', type=str, default=None)
     
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--warmup-ratio', type=int, default=0.05)
