@@ -14,6 +14,7 @@ from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data 
 
+
 class SDWrapper(WrapperBase):
     def __init__(self, method="naive"):
         super(SDWrapper, self).__init__()
@@ -35,7 +36,7 @@ class SDWrapper(WrapperBase):
         )
         
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
-        # Preparing llm's tree decoding data
+        # Preparing llm's tree decoding data, also updates each node's index (node.ind).
         tree_input_ids, tree_position_ids, tree_mask = build_tree_attention_data(root, position_offset=position_offset, dtype=dtype)
         
         # Move to device
@@ -51,6 +52,7 @@ class SDWrapper(WrapperBase):
             position_ids=tree_position_ids,
             output_hidden_states=True,
         )
+        
         return outputs
     
     #TODO: Implement stochastic method and ensure correctness
@@ -89,11 +91,10 @@ class SDWrapper(WrapperBase):
 
         elif sampling_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
-            global_q = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                q = global_q[cur.ind]
                 
                 accepts_token = False
                 for child in cur.children:
@@ -101,17 +102,16 @@ class SDWrapper(WrapperBase):
                     # qx = gtp[child.id]
                     # px = 1  # in this iteration, only child.id' prob is 1, others are 0.
                     # if r <= qx / px:
-                    if r <= q[child.id]: # since px = 1, we can compare r with qx directly
+                    if r <= global_q[cur.ind][child.id]: # since px = 1, we can compare r with qx directly
                         accepts_token = True
                         sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
                         break
                     else:
-                        # q = torch.clamp(q - p, min=0)
-                        q[child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        q = F.normalize(q, p=1, dim=0)
-                        # q = q / q.sum()
+                        # global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
+                        global_q[cur.ind][child.id] = 0 # only child.id' prob is 1, equivalent to function above
+                        global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
                         # p[child.id] = 0
                         # p = p / p.sum()
                         
@@ -125,15 +125,14 @@ class SDWrapper(WrapperBase):
         
         elif sampling_method == "sequoia":
             assert do_sample == True, "Sequoia method requires sampling"
-            global_q = self._sample_token(logits, logits_warper, do_sample=True, return_probs=True).squeeze(0) # remove batch dim
+            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                q = global_q[cur.ind]
                 
                 # TODO: Optimize tree to have a better structure and speed for operations below
                 # obtain probability distribution for SSM
-                p = torch.zeros_like(q)
+                p = torch.zeros_like(global_q[cur.ind])
                 for node in cur.children:
                     p[node.id] = node.prob
                 p = F.normalize(p, p=1, dim=0)
@@ -146,7 +145,7 @@ class SDWrapper(WrapperBase):
                 for i in range(len(cur.children)):
                     r = random.random()
                     sample_id = torch.multinomial(p, 1).item()
-                    if r <= q[sample_id] / p[sample_id]:
+                    if r <= global_q[cur.ind][sample_id] / p[sample_id]:
                         accepts_token = True
                         sampled_tokens.append(sample_id)
                         hidden_indices.append(cur.ind)
@@ -154,8 +153,8 @@ class SDWrapper(WrapperBase):
                         break
                     
                     else:
-                        q = torch.clamp(q - p, min=0)
-                        q = F.normalize(q, p=1, dim=0)
+                        global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
+                        global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
                         
                         p[sample_id] = 0
                         tried_ids.append(sample_id)
@@ -175,10 +174,23 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
+        elif sampling_method == "accept1":
+            real_token_ids = self._sample_token(logits[:, :1, :], logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
+
+            cur = root
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # no token matched, accept first token
+                bonus_token = real_token_ids[cur.ind].item()
+                sampled_tokens.append(bonus_token)
+                hidden_indices.append(cur.ind)
+        
         else:
             raise ValueError("Invalid method")
         
-        return torch.tensor([sampled_tokens]), torch.tensor(hidden_indices) #! add back batch size dim to sampled_tokens
+        # Convert the sampled tokens and hidden indices to tensors
+        sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
+        hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
+        
+        return sampled_tokens, hidden_indices
 
     def _generate(
         self,
@@ -198,16 +210,16 @@ class SDWrapper(WrapperBase):
 
         Decode Stage (with speculative decoding):
         - Iterate through the following steps:
-            1. Perform speculative sampling with the SSM.
-            2. Conduct tree decoding with the language model (LLM).
-            3. Verify the candidates by accepting or rejecting them.
+            1. Perform SSM speculative sampling, returns sampled tokens in tree form.
+            2. Decode the sampled tokens in parallel with the language model (LLM), generating probabilities for each token.
+            3. Verify the sampled tokens by accepting or rejecting them, corresponding to the probabilities.
             4. Update the key-value cache, input_ids, and hidden_states accordingly.
 
         Args:
-            input_ids (torch.LongTensor): The input token IDs.
+            input_ids (torch.LongTensor): The input token IDs. 
             stopping_criteria (StoppingCriteria): The criteria to stop the generation.
             logits_warper (LogitsWarper): The warper to modify the logits.
-            do_sample (bool): Whether to sample tokens during generation.
+            do_sample (bool): Whether to sample tokens during generation. If False, the generation will be deterministic.
 
         Returns:
             input_ids (torch.LongTensor): The generated token IDs.
@@ -218,7 +230,6 @@ class SDWrapper(WrapperBase):
 
         # * clone input_ids 
         input_ids = input_ids.clone()
-        # org_input_len = input_ids.shape[1]
 
         # * prepare kv-cache
         llm_past_key_values = TreeDynamicCache()
@@ -228,7 +239,7 @@ class SDWrapper(WrapperBase):
         outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
-        next_token_logits = outputs.logits[:, -1:].clone() #TODO: check shape, hf uses outputs.logits[:, -1, :].clone()
+        next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :] instead
         hidden_states = outputs.hidden_states[-1].clone()
 
         # This is needed to properly delete outputs.logits which may be very large for first iteration
@@ -245,7 +256,7 @@ class SDWrapper(WrapperBase):
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()
-            outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=input_ids.device, dtype=hidden_states.dtype)
+            outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # (the clone itself is always small)
             next_token_logits = outputs.logits
@@ -268,11 +279,10 @@ class SDWrapper(WrapperBase):
             hidden_indices = hidden_indices.to(hidden_states.device)
 
             # * update input_ids, hidden_states, and kv-cache
-            # llm_past_key_values.crop(input_ids.shape[1])
+            # llm_past_key_values.crop(prev_kv_len)
             input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             hidden_states = hidden_states[:, hidden_indices].clone()
             llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
-            # ssm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
             
             # * check stopping criteria
             finished = stopping_criteria(input_ids, None)
