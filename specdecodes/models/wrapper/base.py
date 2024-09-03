@@ -89,19 +89,25 @@ class WrapperBase(nn.Module):
         if do_sample:
             batch, seq_len, vocab_size = logits.shape
             
+            # Flatten logits for sampling
             logits = logits.view(-1, vocab_size)
+            
+            # Apply logits warper
             next_token_scores = logits_warper(None, logits)
+            
+            # Apply softmax to get probabilities
             probs = torch.softmax(next_token_scores, dim=-1)
             
-            if return_probs:
+            if return_probs: # return sample prob
                 return probs.view(batch, seq_len, vocab_size) # preserve shape
-            else:
+            else: # return sampled token
                 token = torch.multinomial(probs, num_samples=1)
                 return token.view(batch, seq_len) # preserve shape
         else:
-            if return_probs:
+            
+            if return_probs: # return sample prob
                 return torch.softmax(logits, dim=-1)
-            else:
+            else: # return sampled token
                 return torch.argmax(logits, dim=-1)
 
     def _generate(
