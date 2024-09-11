@@ -89,6 +89,30 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
+        elif sampling_method == "fast": # should be equivalent to eagle method
+            assert do_sample == True, "Fast method requires sampling"
+            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            
+            cur = root
+            while cur.children:
+                sampled_token = global_q[cur.ind].multinomial(num_samples=1).item()
+                cur_children_ids = [child.id for child in cur.children]
+                if sampled_token in cur_children_ids:
+                    sampled_tokens.append(sampled_token)
+                    hidden_indices.append(cur.ind)
+                    cur = cur.children[cur_children_ids.index(sampled_token)]
+                else:
+                    for child_id in cur_children_ids:
+                        global_q[cur.ind][child_id] = 0
+                    global_q[cur.ind] = global_q[cur.ind] / global_q[cur.ind].sum()
+                    break
+            
+            # generate bonus token, don't generate if eos token is already the last token
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id:
+                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
+                sampled_tokens.append(bonus_token)
+                hidden_indices.append(cur.ind)
+                
         elif sampling_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
             global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
@@ -111,7 +135,7 @@ class SDWrapper(WrapperBase):
                     else:
                         # global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
                         global_q[cur.ind][child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
+                        global_q[cur.ind] = global_q[cur.ind] / global_q[cur.ind].sum()
                         # p[child.id] = 0
                         # p = p / p.sum()
                         
