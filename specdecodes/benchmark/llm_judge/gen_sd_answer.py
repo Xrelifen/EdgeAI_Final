@@ -20,7 +20,7 @@ from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from ...models import DraftModel
+from ...models import SSM_Sequoia, SSM_Eagle
 
 
 def load_model(
@@ -58,7 +58,8 @@ def load_model(
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
-        ssm = DraftModel.from_pretrained(
+        # ssm = SSM_Sequoia.from_pretrained(
+        ssm = SSM_Eagle.from_pretrained(
             ssm_path, 
             config=draft_config,
             torch_dtype=dtype,

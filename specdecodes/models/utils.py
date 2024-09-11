@@ -48,6 +48,95 @@ def build_tree_attention_data(root, position_offset, dtype):
     
     return tree_input_ids, tree_position_ids, tree_mask
 
+
+# Modified from https://github.com/Infini-AI-Lab/Sequoia/blob/main/utils.py
+
+def make_tree_attention_mask(
+        prefix_len :int,
+        gen_len :int,
+        ancestors :list[list[int]],
+        device ="cpu",
+        dtype = torch.float32
+    ) -> torch.FloatTensor:
+    tree_mask = torch.full((gen_len, gen_len + prefix_len), torch.finfo(dtype).min, dtype=dtype).to(device=device)
+    for idx, ancestor in enumerate(ancestors):
+        if len(ancestor) > 0:
+            tree_mask[idx][ancestor] = 0.0
+    return tree_mask[None, None, :, :]
+
+
+def get_residual(p: torch.Tensor, q:torch.Tensor):
+    residual = (p - q).relu_()
+    residual = residual / (residual.sum(dim=-1).unsqueeze(-1))
+    return residual
+
+
+def sampling_without_replacement(
+        sampling_logits: torch.Tensor, 
+        rand: torch.Tensor,  
+        num_samples: int,
+        temperature :float = 1.0
+    ):
+    if temperature == 1.0:
+        sampling_q = torch.softmax(sampling_logits, dim=-1)
+    else:
+        sampling_q = torch.softmax(sampling_logits / temperature, dim=-1)
+
+    sampled_indices = (rand.log()/sampling_q).topk(k=num_samples).indices
+    sampled_probs = torch.gather(sampling_q, 1, sampled_indices)
+    
+    return sampled_probs, sampled_indices
+
+
+def cuda_graph_for_sampling_without_replacement(
+        device="cuda:0", dtype=torch.float16, 
+        dim=32000,
+        n_warmups=3, mempool=None,
+        idx_len = 8, num_samples = 16,
+        temperature = 0.6,
+    ):
+    
+    # static_sampling_logits = torch.full((idx_len, dim), 1, dtype=dtype, device=device)
+    # static_rand = torch.empty((idx_len, dim), dtype=dtype, device=device).uniform_()
+    static_sampling_logits = torch.full((idx_len, dim), 1, dtype=dtype, device=device)
+    static_rand = torch.empty((idx_len, dim), dtype=dtype, device=device).uniform_()
+
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(n_warmups):
+            static_probs, static_indices = sampling_without_replacement(
+                 static_sampling_logits,
+                 static_rand,
+                 num_samples,
+                 temperature
+            )
+        s.synchronize()
+    torch.cuda.current_stream().wait_stream(s)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, pool=mempool):
+        static_probs, static_indices = sampling_without_replacement(
+                 static_sampling_logits,
+                 static_rand,
+                 num_samples,
+                 temperature
+            )
+        
+    def run(draft_logits, rand_vector):
+        # static_sampling_logits.copy_(draft_logits)
+        # static_rand.copy_(rand_vector)
+        # graph.replay()
+        # return static_position.clone()
+        
+        static_sampling_logits.copy_(draft_logits)
+        static_rand.copy_(rand_vector)
+        graph.replay()
+        return static_probs.clone(), static_indices.clone()
+    
+    return run
+
+
 class TreeDynamicCache(DynamicCache):
     def reorder_cache(self, beam_idx: torch.LongTensor, dim=0):
         """Reorders the cache for beam search, given the selected beam indices."""

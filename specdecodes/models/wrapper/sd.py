@@ -12,7 +12,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 
 from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 from bigtree import tree_to_nested_dict
-from ..utils import TreeDynamicCache, build_tree_attention_data 
+from ..utils import TreeDynamicCache, build_tree_attention_data, get_residual
 
 
 class SDWrapper(WrapperBase):
@@ -119,7 +119,7 @@ class SDWrapper(WrapperBase):
                 if accepts_token == False: break
                 
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_q[cur.ind], 1).item()
+                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
@@ -144,7 +144,7 @@ class SDWrapper(WrapperBase):
                 accepts_token = False
                 for i in range(len(cur.children)):
                     r = random.random()
-                    sample_id = torch.multinomial(p, 1).item()
+                    sample_id = p.multinomial(num_samples=1).item()
                     if r <= global_q[cur.ind][sample_id] / p[sample_id]:
                         accepts_token = True
                         sampled_tokens.append(sample_id)
@@ -153,8 +153,9 @@ class SDWrapper(WrapperBase):
                         break
                     
                     else:
-                        global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
-                        global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
+                        # global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
+                        # global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
+                        global_q[cur.ind] = get_residual(global_q[cur.ind], p)
                         
                         p[sample_id] = 0
                         tried_ids.append(sample_id)
@@ -170,7 +171,7 @@ class SDWrapper(WrapperBase):
                 if accepts_token == False: break
                 
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = torch.multinomial(global_q[cur.ind], 1).item()
+                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
@@ -344,11 +345,14 @@ class ProfileSDWrapper(SDWrapper):
         logits_warper: LogitsWarper,
         do_sample: bool,
     ):
+        cur_time = time.strftime("%Y%m%d-%H%M%S")
+        
         # prepare output directory
         if self.out_dir is not None:
             os.makedirs(self.out_dir, exist_ok=True)
-        cur_time = time.strftime("%Y%m%d-%H%M%S")
-        out_path = os.path.join(self.out_dir, f"{self.prefix}_{cur_time}.json")
+            out_path = os.path.join(self.out_dir, f"{self.prefix}_{cur_time}.json")
+        else:
+            out_path = None
         
         # run generation
         input_ids = super(ProfileSDWrapper, self)._generate(input_ids, stopping_criteria, logits_warper, do_sample)

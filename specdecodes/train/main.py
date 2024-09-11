@@ -22,7 +22,7 @@ from copy import deepcopy
 import wandb
 
 from ..models.llm import modeling_llama_no_layernorm as modeling_llama
-from ..models.ssm.eagle import DraftModel
+from ..models.ssm.eagle import SSM_Eagle
 
 
 class AddGaussianNoise:
@@ -240,6 +240,50 @@ def aggr_mean_loss(mask, loss):
 def aggr_sum_loss(mask, loss):
     return torch.sum(torch.sum(mask.unsqueeze(-1) * loss, 2)) / (mask.sum() + 1e-5)
 
+# def calc_kl_loss(mask, s_logits, t_logits):
+#     with torch.no_grad():
+#         t_logits = F.softmax(t_logits[mask], dim=-1)
+#     s_logits = F.log_softmax(s_logits[mask], dim=-1)
+#     loss = F.kl_div(s_logits, t_logits, reduction='batchmean')
+#     return loss
+
+# def calc_skl_loss(mask, s_logits, t_logits, alpha=0.1):
+#     with torch.no_grad():
+#         t_logits = F.softmax(t_logits[mask], dim=-1)
+#     s_logits = s_logits[mask]
+#     t_logits = alpha * t_logits + (1 - alpha) * F.softmax(s_logits, dim=-1)
+#     s_logits = F.log_softmax(s_logits, dim=-1)
+#     loss = F.kl_div(s_logits, t_logits, reduction='batchmean')
+#     return loss
+
+# def calc_tvdpp_loss(mask, s_logits, t_logits):
+#     s_logits = F.softmax(s_logits[mask], dim=-1)
+#     with torch.no_grad():
+#         t_logits = F.softmax(t_logits[mask], dim=-1)
+#         reward = torch.as_tensor((t_logits-s_logits) > 0, dtype=torch.float32)
+#         std = torch.std(reward, dim=-1, keepdim=True)
+#         mean = torch.mean(reward, dim=-1, keepdim=True)
+#         reward = (reward - mean) / (std + 1e-5)
+    
+#     policy_loss = torch.log(s_logits) * -reward
+#     policy_loss = policy_loss.mean(dim=-1).mean(dim=-1)
+#     return policy_loss
+
+# def calc_tvd_loss(mask, s_logits, t_logits):
+#     with torch.no_grad():
+#         t_logits = t_logits[mask]
+#         t_logits = F.softmax(t_logits, dim=-1)
+#     s_logits = s_logits[mask]
+#     s_logits = F.softmax(s_logits, dim=-1)
+    
+#     loss = F.l1_loss(s_logits, t_logits, reduction='batchmean') * 0.5
+#     return loss
+
+# def calc_l1_loss(mask, s_logits, t_logits):
+#     loss = F.l1_loss(s_logits[mask], t_logits[mask], reduction='mean')
+#     loss = aggr_mean_loss(mask, loss)
+#     return loss
+
 def calc_kl_loss(mask, s_logits, t_logits):
     with torch.no_grad():
         t_logits = F.softmax(t_logits, dim=-1)
@@ -248,12 +292,25 @@ def calc_kl_loss(mask, s_logits, t_logits):
     loss = aggr_sum_loss(mask, loss)
     return loss
 
-def calc_tvdpp_loss(mask, s_logits, t_logits):
-    # sel_mask = mask[:, :, None].expand_as(s_logits)
-    # vocab_size = s_logits.size(-1)
-    # s_logits = torch.masked_select(s_logits, sel_mask).view(-1, vocab_size)
-    # t_logits = torch.masked_select(t_logits, sel_mask).view(-1, vocab_size)
+def calc_kl_loss_with_temp(mask, s_logits, t_logits, temp=2.5):
+    with torch.no_grad():
+        t_logits = F.softmax(t_logits/temp, dim=-1)
+    s_logits = F.log_softmax(s_logits/temp, dim=-1)
+    loss = F.kl_div(s_logits, t_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss)
+    return loss * (temp ** 2)
+
+def calc_skl_loss(mask, s_logits, t_logits, alpha=0.1):
+    with torch.no_grad():
+        t_logits = F.softmax(t_logits, dim=-1)
+    t_logits = alpha * t_logits + (1 - alpha) * F.softmax(s_logits, dim=-1)
+    s_logits = F.log_softmax(s_logits, dim=-1)
     
+    loss = F.kl_div(s_logits, t_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss)
+    return loss
+
+def calc_tvdpp_loss(mask, s_logits, t_logits):
     s_logits = F.softmax(s_logits, dim=-1)
     with torch.no_grad():
         t_logits = F.softmax(t_logits, dim=-1)
@@ -268,8 +325,7 @@ def calc_tvdpp_loss(mask, s_logits, t_logits):
     
     return policy_loss
 
-
-def calc_tvd_loss(mask, s_logits, t_logits):
+def calc_tv_loss(mask, s_logits, t_logits):
     with torch.no_grad():
         t_logits = F.softmax(t_logits, dim=-1)
     s_logits = F.softmax(s_logits, dim=-1)
@@ -278,18 +334,27 @@ def calc_tvd_loss(mask, s_logits, t_logits):
     loss = aggr_sum_loss(mask, loss) * 0.5
     return loss
 
+def calc_tv_loss_with_temp(mask, s_logits, t_logits, temp=2.5):
+    with torch.no_grad():
+        t_logits = F.softmax(t_logits/temp, dim=-1)
+    s_logits = F.softmax(s_logits/temp, dim=-1)
+    
+    loss = F.l1_loss(s_logits, t_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss) * 0.5
+    return loss * (temp ** 2)
+
 def calc_l1_loss(mask, s_logits, t_logits):
     loss = F.l1_loss(s_logits, t_logits, reduction='none')
     loss = aggr_mean_loss(mask, loss)
     return loss
 
 def calculate_loss(loss_mask, s_logits, t_logits, s_out, t_out, train_config):
-    ploss = calc_kl_loss(loss_mask, s_out, t_out)
-    # ploss = calc_tvd_loss(loss_mask, s_out, t_out)
-    # ploss = calc_tvdpp_loss(loss_mask, s_out, t_out)
+    ploss = calc_kl_loss_with_temp(loss_mask, s_out, t_out, temp=0.8)
+    # ploss = calc_tv_loss_with_temp(loss_mask, s_out, t_out, temp=2.5)
     
     vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
     # vloss = calc_kl_loss(loss_mask, s_logits, t_logits)
+    # vloss = calc_skl_loss(loss_mask, s_out, t_out)
     
     loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
     
@@ -371,10 +436,10 @@ def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num
         s_out = lm_head(s_logit)
 
         # Calculate loss
-        loss, ploss, vloss = calculate_loss(s_logit, t_logit, s_out, t_out, data["loss_mask"], train_config)
+        loss, ploss, vloss = calculate_loss(data["loss_mask"], s_logit, t_logit, s_out, t_out, train_config)
 
         # Update metrics
-        correct, total = update_metrics(s_out, t_out, data["loss_mask"], correct, total, topk_acc)
+        correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
         epoch_loss += loss.item()
         num_batches += 1
 
@@ -424,8 +489,10 @@ def main(args):
         "max_len": 2048,
         "grad_clip": 1.0,
         "save_freq": 5,
-        "log_freq": 10,
+        "log_freq": 1,
     }
+    # merge train_config with args
+    train_config.update(vars(args))
 
     # init Accelerator
     accelerator = Accelerator()
@@ -519,10 +586,10 @@ def main(args):
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         print("Loading pretrained model...")
-        model = DraftModel.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config)
     else:
         print("Loading draft model...")
-        model = DraftModel(draft_config)
+        model = SSM_Eagle(draft_config)
     
     # load llm's last attention layer's data to draft model
     # model.model.layers[0].self_attn = llm.model.layers[-1].self_attn

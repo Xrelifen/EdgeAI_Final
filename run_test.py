@@ -7,7 +7,7 @@ import os
 import logging
 
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import DraftModel
+from specdecodes.models import SSM_Eagle, SSM_Sequoia
 
 
 def load_model(
@@ -23,26 +23,27 @@ def load_model(
     
     # load LLM
     llm = AutoModelForCausalLM.from_pretrained(
-        args.llm_path, 
+        llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         device_map=device
     )
 
-    if args.mode == "naive":
+    if mode == "naive":
         model = NaiveWrapper()
         
-    elif args.mode == "hf":
+    elif mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif args.mode == "sd":
-        # model = SDWrapper(method=args.sd_method)
-        model = ProfileSDWrapper(method=sd_method)
+    elif mode == "sd":
+        # model = SDWrapper(method=sd_method)
+        model = ProfileSDWrapper(method=sd_method, out_dir=None)
         
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
-        ssm = DraftModel.from_pretrained(
+        ssm = SSM_Sequoia.from_pretrained(
+        # ssm = SSM_Eagle.from_pretrained(
             ssm_path, 
             config=draft_config,
             torch_dtype=dtype,

@@ -6,11 +6,11 @@ import os
 from bigtree import Node
 from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
 
-from ..utils import invert_mask
+from ..utils import invert_mask, sampling_without_replacement, cuda_graph_for_sampling_without_replacement
 from ..llm import modeling_llama_no_layernorm as modeling_llama
 
 
-class SSM_Eagle(nn.Module):
+class SSM_Sequoia(nn.Module):
     def __init__(self, config):
         super().__init__()
 
@@ -26,7 +26,7 @@ class SSM_Eagle(nn.Module):
         self.topk_len = 15
         
         self.UNIQUE_ID = 1
-        
+    
     # calling .config is same as calling model.config
     @property
     def config(self):
@@ -59,6 +59,25 @@ class SSM_Eagle(nn.Module):
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         
         return self.model(inputs_embeds=hidden_states, **kwargs)
+    
+    @torch.no_grad()
+    def _sample_probs(
+        self,
+        logits: torch.FloatTensor,
+        logits_warper,
+        do_sample: bool,
+        T=1.0,
+    ):
+        if do_sample:
+            batch, seq_len, vocab_size = logits.shape
+            
+            logits = logits.view(-1, vocab_size)
+            next_token_scores = logits_warper(None, logits)
+            probs = torch.softmax(next_token_scores/T, dim=-1)
+            return probs.view(batch, seq_len, vocab_size) # preserve shape
+        
+        else:
+            return torch.softmax(logits/T, dim=-1)
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset):
@@ -120,12 +139,20 @@ class SSM_Eagle(nn.Module):
             del outputs
 
             #* Get probabilities of each token
-            sampled_probs = nn.functional.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
-
-            # sample top_k tokens, and their probabilities
-            topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
-            topk_index, topk_prob = topk_tokens.indices, topk_tokens.values
-
+            # sample tokens with multinomial sampling
+            # sampled_probs = self._sample_probs(lm_head(hidden_states), logits_warper, do_sample=do_sample).squeeze(0)
+            # sampled_probs = self._sample_probs(lm_head(hidden_states), logits_warper, do_sample=do_sample, T=T).squeeze(0)
+            # sampled_probs = torch.softmax(lm_head(hidden_states)[0]/T, dim=-1)
+            # sampled_indices = torch.multinomial(sampled_probs, self.topk_len)
+            # sampled_probs = torch.gather(sampled_probs, 1, sampled_indices)
+            
+            T = 0.7
+            logits = lm_head(hidden_states)[0]
+            rand = torch.rand(logits.shape, device=logits.device)
+            sampled_probs, sampled_indices = sampling_without_replacement(logits, rand=rand, num_samples=self.topk_len, temperature=T)
+            
+            # sampled_probs, sampled_indices = sampling_callable(logits, rand)
+            
             #! Currently building up the tree is the most time-consuming part, need optimization.
             # TODO: Build a tree with following capabilities:
             # Tree can easily obtain all nodes at a certain depth
@@ -137,8 +164,8 @@ class SSM_Eagle(nn.Module):
             next_nodes = []
             for prev_ind, prev_node in enumerate(prev_sample_nodes):
                 for i in range(self.topk_len):
-                    token_id = topk_index[prev_ind][i].item()
-                    prob = topk_prob[prev_ind][i].item()
+                    token_id = sampled_indices[prev_ind][i].item()
+                    prob = sampled_probs[prev_ind][i].item()
                     global_prob = prob * prev_node.prob
                     
                     # if prob < 1e-3:# or global_prob < 1e-6:
