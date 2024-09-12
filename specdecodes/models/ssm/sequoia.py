@@ -146,10 +146,10 @@ class SSM_Sequoia(nn.Module):
             # sampled_indices = torch.multinomial(sampled_probs, self.topk_len)
             # sampled_probs = torch.gather(sampled_probs, 1, sampled_indices)
             
-            T = 0.7
+            T = 1
             logits = lm_head(hidden_states)[0]
             rand = torch.rand(logits.shape, device=logits.device)
-            sampled_probs, sampled_indices = sampling_without_replacement(logits, rand=rand, num_samples=self.topk_len, temperature=T)
+            all_probs, sampled_probs, sampled_indices = sampling_without_replacement(logits, rand=rand, num_samples=self.topk_len, temperature=T)
             
             # sampled_probs, sampled_indices = sampling_callable(logits, rand)
             
@@ -171,9 +171,12 @@ class SSM_Sequoia(nn.Module):
                     # if prob < 1e-3:# or global_prob < 1e-6:
                     #     continue
                     
-                    new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
+                    new_node = Node(str(self.UNIQUE_ID), order=i, id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
                     self.UNIQUE_ID += 1 # increment node id, make sure it is unique
                     next_nodes.append(new_node)
+                    
+                #! new: store the child_probs in the parent node
+                prev_node.sample_probs = all_probs[prev_ind]
             
             #* depth increment
             depth += 1

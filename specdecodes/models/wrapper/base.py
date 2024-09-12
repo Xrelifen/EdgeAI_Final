@@ -16,6 +16,10 @@ class WrapperBase(nn.Module):
     def config(self):
         return self.llm.config
     
+    @property
+    def dtype(self):
+        return self.llm.dtype
+    
     def set_llm(self, llm):
         self.llm = llm
         

@@ -91,31 +91,32 @@ class SDWrapper(WrapperBase):
 
         elif sampling_method == "fast": # should be equivalent to eagle method
             assert do_sample == True, "Fast method requires sampling"
-            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                sampled_token = global_q[cur.ind].multinomial(num_samples=1).item()
-                cur_children_ids = [child.id for child in cur.children]
-                if sampled_token in cur_children_ids:
-                    sampled_tokens.append(sampled_token)
+                sampled_id = global_p[cur.ind].multinomial(num_samples=1).item()
+                child_ids = [child.id for child in cur.children]
+                child_id_to_node = {node.id: node for node in cur.children}
+                if sampled_id in child_ids:
                     hidden_indices.append(cur.ind)
-                    cur = cur.children[cur_children_ids.index(sampled_token)]
+                    sampled_tokens.append(sampled_id)
+                    cur = cur.children[child_id_to_node[sampled_id]]
                 else:
-                    for child_id in cur_children_ids:
-                        global_q[cur.ind][child_id] = 0
-                    global_q[cur.ind] = global_q[cur.ind] / global_q[cur.ind].sum()
+                    for child_id in child_ids:
+                        global_p[cur.ind][child_id] = 0
+                    global_p[cur.ind] = global_p[cur.ind] / global_p[cur.ind].sum()
                     break
             
             # generate bonus token, don't generate if eos token is already the last token
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id:
-                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
                 
         elif sampling_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
-            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
@@ -126,16 +127,16 @@ class SDWrapper(WrapperBase):
                     # qx = gtp[child.id]
                     # px = 1  # in this iteration, only child.id' prob is 1, others are 0.
                     # if r <= qx / px:
-                    if r <= global_q[cur.ind][child.id]: # since px = 1, we can compare r with qx directly
+                    if r <= global_p[cur.ind][child.id]: # since px = 1, we can compare r with qx directly
                         accepts_token = True
                         sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
                         break
                     else:
-                        # global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
-                        global_q[cur.ind][child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        global_q[cur.ind] = global_q[cur.ind] / global_q[cur.ind].sum()
+                        # global_p[cur.ind] = torch.clamp(global_p[cur.ind] - p, min=0)
+                        global_p[cur.ind][child.id] = 0 # only child.id' prob is 1, equivalent to function above
+                        global_p[cur.ind] = global_p[cur.ind] / global_p[cur.ind].sum()
                         # p[child.id] = 0
                         # p = p / p.sum()
                         
@@ -143,61 +144,54 @@ class SDWrapper(WrapperBase):
                 if accepts_token == False: break
                 
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
         elif sampling_method == "sequoia":
-            assert do_sample == True, "Sequoia method requires sampling"
-            global_q = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            assert do_sample == True, "real_sequoia method requires sampling"
+            global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                
-                # TODO: Optimize tree to have a better structure and speed for operations below
-                # obtain probability distribution for SSM
-                p = torch.zeros_like(global_q[cur.ind])
-                for node in cur.children:
-                    p[node.id] = node.prob
-                p = F.normalize(p, p=1, dim=0)
-
-                child_ids = torch.tensor([node.id for node in cur.children])
-                child_id_to_node = {node.id: node for node in cur.children}
+                q = cur.sample_probs
+                # keep the non-repacement sampling order
+                children = [ child for child in cur.children ]
+                children.sort(key=lambda x: x.order)
                 
                 tried_ids = []
                 accepts_token = False
-                for i in range(len(cur.children)):
+                for child in children:
                     r = random.random()
-                    sample_id = p.multinomial(num_samples=1).item()
-                    if r <= global_q[cur.ind][sample_id] / p[sample_id]:
+                    if r <= global_p[cur.ind][child.id] / q[child.id]:
                         accepts_token = True
-                        sampled_tokens.append(sample_id)
+                        sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
-                        cur = child_id_to_node[sample_id]
+                        cur = child
                         break
-                    
                     else:
-                        # global_q[cur.ind] = torch.clamp(global_q[cur.ind] - p, min=0)
-                        # global_q[cur.ind] = F.normalize(global_q[cur.ind], p=1, dim=0)
-                        global_q[cur.ind] = get_residual(global_q[cur.ind], p)
+                        global_p[cur.ind] = get_residual(global_p[cur.ind], q)
+                        q[child.id] = 0
                         
-                        p[sample_id] = 0
-                        tried_ids.append(sample_id)
-                        if p.sum() == 0:
-                            # set p[t] = 0 if t in S, else 1
-                            p = torch.zeros_like(p)
-                            p[child_ids] = 1
-                            p[tried_ids] = 0
+                        # Below only benefits when sampled ids have prob 0, which is rarely the case.
+                        # set q[t] = 0 if t in S, else 1
+                        tried_ids.append(cur.ind)
+                        if q.sum() == 0:
+                            child_ids = [child.id for child in cur.children]
+                            q = torch.zeros_like(q)
+                            q[child_ids] = 1
+                            q[tried_ids] = 0
                         
-                        p = F.normalize(p, p=1, dim=0)
+                        q = q / q.sum()
                         
                 # stop loop if no token is accepted
                 if accepts_token == False: break
-                
+             
             if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = global_q[cur.ind].multinomial(num_samples=1).item()
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
+        
         
         elif sampling_method == "accept1":
             real_token_ids = self._sample_token(logits[:, :1, :], logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim

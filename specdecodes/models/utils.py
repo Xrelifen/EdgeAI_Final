@@ -85,7 +85,7 @@ def sampling_without_replacement(
     sampled_indices = (rand.log()/sampling_q).topk(k=num_samples).indices
     sampled_probs = torch.gather(sampling_q, 1, sampled_indices)
     
-    return sampled_probs, sampled_indices
+    return sampling_q, sampled_probs, sampled_indices
 
 
 def cuda_graph_for_sampling_without_replacement(
