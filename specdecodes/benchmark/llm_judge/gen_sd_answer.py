@@ -20,7 +20,7 @@ from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from ...models import SSM_Sequoia, SSM_Eagle
+from ...models import SSM_Sequoia, SSM_Eagle, SSM_TreeDy
 
 
 def load_model(
@@ -53,13 +53,19 @@ def load_model(
         # model = SDWrapper(method=sd_method)
         unique_id = random.randint(1, 1000000-1)
         model = ProfileSDWrapper(method=sd_method, out_dir=out_dir)
+        # delete out_dir if it exists
+        if out_dir is not None or out_dir != "":
+            if os.path.exists(out_dir):
+                os.system(f"rm -rf {out_dir}")
+            print(f"Detele old {out_dir}")
         print(f"Output to {out_dir}")
         
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
         # ssm = SSM_Sequoia.from_pretrained(
-        ssm = SSM_Eagle.from_pretrained(
+        # ssm = SSM_Eagle.from_pretrained(
+        ssm = SSM_TreeDy.from_pretrained(
             ssm_path, 
             config=draft_config,
             torch_dtype=dtype,
@@ -300,7 +306,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sd-method",
         type=str,
-        default="naive",
+        default="greedy",
         help="The mode of model generation.",
     )
     parser.add_argument(

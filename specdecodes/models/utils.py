@@ -87,7 +87,25 @@ def sampling_without_replacement(
     
     return sampling_q, sampled_probs, sampled_indices
 
-
+def balls_to_bins(
+        sampling_probs: torch.Tensor,
+        bins: int,
+        num_samples: int,
+        do_sample: bool = True,
+    ):
+    if do_sample:
+        sampled_bin_ids = torch.multinomial(sampling_probs, num_samples, replacement=True)
+        sampled_bin_counts = torch.bincount(sampled_bin_ids, minlength=bins)
+    else:
+        sampled_bin_counts = torch.floor(sampling_probs * num_samples).int()
+        # handle the case where the sum of the counts is more or less than num_samples
+        count_sum = sampled_bin_counts.sum()
+        if count_sum < num_samples:
+            _, top_indices = torch.topk(sampling_probs, num_samples - count_sum)
+            sampled_bin_counts[top_indices] += 1
+    return sampled_bin_counts
+    
+    
 def cuda_graph_for_sampling_without_replacement(
         device="cuda:0", dtype=torch.float16, 
         dim=32000,
@@ -122,7 +140,7 @@ def cuda_graph_for_sampling_without_replacement(
                  num_samples,
                  temperature
             )
-        
+    
     def run(draft_logits, rand_vector):
         # static_sampling_logits.copy_(draft_logits)
         # static_rand.copy_(rand_vector)

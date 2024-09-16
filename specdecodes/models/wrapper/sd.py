@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import random
 import time
 import torch
 import torch.nn.functional as F
@@ -16,7 +15,7 @@ from ..utils import TreeDynamicCache, build_tree_attention_data, get_residual
 
 
 class SDWrapper(WrapperBase):
-    def __init__(self, method="naive"):
+    def __init__(self, method="greedy"):
         super(SDWrapper, self).__init__()
         self.method = method
   
@@ -56,26 +55,31 @@ class SDWrapper(WrapperBase):
         return outputs
     
     #TODO: Implement stochastic method and ensure correctness
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="naive"):
+    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="greedy"):
         sampled_tokens = []
         hidden_indices = []
+        total_len = 0
+        accept_len = 0
         if do_sample == False:
-            logging.debug("'do_sample' is False, sampling_method will be set to 'naive'.")
-            sampling_method = "naive"
+            logging.debug("'do_sample' is False, sampling_method will be set to 'greedy'.")
+            sampling_method = "greedy"
             
-        if sampling_method == "naive":
+        if sampling_method == "greedy":
             real_token_ids = self._sample_token(logits, logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
 
             # for each depth, find token that matches the predicted token
             # if all tokens are matched, then the last token is the bonus token
             cur = root
             while cur.children:
-                llm_token_id = real_token_ids[cur.ind]
+                total_len += 1
                 
+                llm_token_id = real_token_ids[cur.ind]
+
                 accepts_token = False
                 for child in cur.children:
                     if child.id == llm_token_id:
                         accepts_token = True
+                        accept_len += 1
                         sampled_tokens.append(child.id) # real_token_ids[cur.ind]
                         hidden_indices.append(cur.ind)
                         cur = child
@@ -95,10 +99,13 @@ class SDWrapper(WrapperBase):
             
             cur = root
             while cur.children:
+                total_len += 1
+                
                 sampled_id = global_p[cur.ind].multinomial(num_samples=1).item()
                 child_ids = [child.id for child in cur.children]
                 child_id_to_node = {node.id: node for node in cur.children}
                 if sampled_id in child_ids:
+                    accept_len += 1
                     hidden_indices.append(cur.ind)
                     sampled_tokens.append(sampled_id)
                     cur = cur.children[child_id_to_node[sampled_id]]
@@ -120,15 +127,17 @@ class SDWrapper(WrapperBase):
             
             cur = root
             while cur.children:
+                total_len += 1
                 
                 accepts_token = False
                 for child in cur.children:
-                    r = random.random()
+                    r = torch.rand(1).item()
                     # qx = gtp[child.id]
                     # px = 1  # in this iteration, only child.id' prob is 1, others are 0.
                     # if r <= qx / px:
                     if r <= global_p[cur.ind][child.id]: # since px = 1, we can compare r with qx directly
                         accepts_token = True
+                        accept_len += 1
                         sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
@@ -149,22 +158,68 @@ class SDWrapper(WrapperBase):
                 hidden_indices.append(cur.ind)
         
         elif sampling_method == "sequoia":
-            assert do_sample == True, "real_sequoia method requires sampling"
+            assert do_sample == True, "sequoia method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
             cur = root
             while cur.children:
-                q = cur.sample_probs
+                total_len += 1
+                
                 # keep the non-repacement sampling order
                 children = [ child for child in cur.children ]
                 children.sort(key=lambda x: x.order)
                 
+                q = cur.sample_probs
                 tried_ids = []
                 accepts_token = False
                 for child in children:
-                    r = random.random()
+                    r = torch.rand(1).item()
                     if r <= global_p[cur.ind][child.id] / q[child.id]:
                         accepts_token = True
+                        accept_len += 1
+                        sampled_tokens.append(child.id)
+                        hidden_indices.append(cur.ind)
+                        cur = child
+                        break
+                    else:
+                        global_p[cur.ind] = get_residual(global_p[cur.ind], q)
+                        q[child.id] = 0
+                        
+                        # Below only benefits when sampled ids have prob 0, which is rarely the case.
+                        # set q[t] = 0 if t in S, else 1
+                        tried_ids.append(cur.ind)
+                        if q.sum() == 0:
+                            child_ids = [child.id for child in cur.children]
+                            q = torch.zeros_like(q)
+                            q[child_ids] = 1
+                            q[tried_ids] = 0
+                        
+                        q = q / q.sum()
+                       
+                # stop loop if no token is accepted
+                if accepts_token == False: break
+             
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
+                sampled_tokens.append(bonus_token)
+                hidden_indices.append(cur.ind)
+        
+        elif sampling_method == "treedy":
+            assert do_sample == True, "treedy method requires sampling"
+            global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            
+            cur = root
+            while cur.children:
+                total_len += 1
+
+                q = cur.sample_probs
+                tried_ids = []
+                accepts_token = False
+                for child in cur.children:
+                    r = torch.rand(1).item()
+                    if r <= global_p[cur.ind][child.id] / q[child.id]:
+                        accepts_token = True
+                        accept_len += 1
                         sampled_tokens.append(child.id)
                         hidden_indices.append(cur.ind)
                         cur = child
@@ -192,8 +247,8 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
-        
-        elif sampling_method == "accept1":
+        elif sampling_method == "debug":
+            total_len += 1
             real_token_ids = self._sample_token(logits[:, :1, :], logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
 
             cur = root
@@ -209,7 +264,7 @@ class SDWrapper(WrapperBase):
         sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
         hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
         
-        return sampled_tokens, hidden_indices
+        return sampled_tokens, hidden_indices, (total_len, accept_len)
 
     def _generate(
         self,
@@ -286,7 +341,7 @@ class SDWrapper(WrapperBase):
             del outputs
 
             # * verify
-            sampled_tokens, hidden_indices = self._verify(
+            sampled_tokens, hidden_indices, _ = self._verify(
                                                 root, next_token_logits, 
                                                 logits_warper, 
                                                 do_sample,
@@ -310,7 +365,7 @@ class SDWrapper(WrapperBase):
     
 
 class ProfileSDWrapper(SDWrapper):
-    def __init__(self, method="naive", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
+    def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
         super(ProfileSDWrapper, self).__init__(method)
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
@@ -320,8 +375,8 @@ class ProfileSDWrapper(SDWrapper):
         self.prefix = prefix
         
     
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="naive"):
-        sampled_tokens, hidden_indices = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, sampling_method)
+    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="greedy"):
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, sampling_method)
         
         # tokenize ids
         nodes = list(preorder_iter(root))
@@ -339,21 +394,28 @@ class ProfileSDWrapper(SDWrapper):
         # self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
         if self.profile_data.get('iter') is None:
             self.profile_data['iter'] = []
+        
+        if self.profile_data.get('total_len') is None:
+            self.profile_data['total_len'] = []
+        
+        if self.profile_data.get('accept_len') is None:
+            self.profile_data['accept_len'] = []
             
         sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
         self.profile_data['iter'].append(sampled_tokens_list)
-        
+        self.profile_data['total_len'].append(total_len)
+        self.profile_data['accept_len'].append(accept_len)
         # logging
         logging.debug(
             f"Total: {len(list(preorder_iter(root)))},"\
-            f"\tPredicted: {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+            f"\tPredicted ({accept_len}/{total_len}): {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
         )
         
         # update stats
         self.sampled_count += len(sampled_tokens[0])
         self.iter_count += 1
         
-        return sampled_tokens, hidden_indices
+        return sampled_tokens, hidden_indices, (total_len, accept_len)
     
     
     def _generate(
@@ -384,6 +446,39 @@ class ProfileSDWrapper(SDWrapper):
             f"\tTotal iterations: {total_iterations},"\
             f"\tAverage sampled: {avg_sampled:.2f}"
         )
+        
+        max_total_len = max(self.profile_data['total_len']) + 1
+        total_lens = torch.bincount( torch.tensor(self.profile_data['total_len']), minlength=max_total_len)
+        accept_lens = torch.bincount( torch.tensor(self.profile_data['accept_len']), minlength=max_total_len)
+        depth_total_cnt = total_lens + total_lens.sum() - total_lens.cumsum(dim=-1) # reverse cumsum
+        depth_total_cnt = depth_total_cnt[1:] # remove first element
+        depth_accept_cnt = accept_lens + accept_lens.sum() - accept_lens.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_accept_cnt[1:] # remove first element
+        
+        logging.info(
+            f"Depth trials count:\t{depth_total_cnt.tolist()}"
+        )
+        logging.info(
+            f"Depth accept count:\t{depth_accept_cnt.tolist()}"
+        )
+        
+        depth_total_cnt_rate = depth_total_cnt.float() / depth_total_cnt[0]
+        print_ratio_str = "Trials ratio:\t["
+        for i, val in enumerate(depth_total_cnt_rate.tolist()):
+            print_ratio_str += f"{val:.2f}"
+            if i < len(depth_total_cnt_rate) - 1:
+                print_ratio_str += ", "
+        print_ratio_str += "]"
+        logging.info(print_ratio_str)
+        
+        alpha = depth_accept_cnt.float() / depth_total_cnt.float()
+        print_alpha_str = "Alpha:\t["
+        for i, val in enumerate(alpha.tolist()):
+            print_alpha_str += f"{val:.2f}"
+            if i < len(alpha) - 1:
+                print_alpha_str += ", "
+        print_alpha_str += "]"
+        logging.info(print_alpha_str)
         
         # save profile data
         self.profile_data["total_sampled"] = total_sampled

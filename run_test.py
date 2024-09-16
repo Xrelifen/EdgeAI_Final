@@ -7,7 +7,7 @@ import os
 import logging
 
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Eagle, SSM_Sequoia
+from specdecodes.models import SSM_Eagle, SSM_Sequoia, SSM_TreeDy
 
 
 def load_model(
@@ -42,8 +42,9 @@ def load_model(
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
-        ssm = SSM_Sequoia.from_pretrained(
+        # ssm = SSM_Sequoia.from_pretrained(
         # ssm = SSM_Eagle.from_pretrained(
+        ssm = SSM_TreeDy.from_pretrained(
             ssm_path, 
             config=draft_config,
             torch_dtype=dtype,
@@ -66,7 +67,7 @@ def main(args):
     logging.basicConfig(level=LOGLEVEL)
 
     # deterministic
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
 
     # load model
     print("Loading model...")
@@ -165,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sd-method",
         type=str,
-        default="naive",
+        default="greedy",
         help="The mode of model generation.",
     )
     parser.add_argument(
@@ -186,6 +187,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Record the time.",
     )
+    parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed.",
+    )
     args = parser.parse_args()
     
     main(args)
+    
+    
+# # TREE-DY
+# INFO:root:Trials ratio: [1.00, 0.78, 0.49, 0.40, 0.31, 0.18, 0.12, 0.12, 0.07]
+# INFO:root:Alpha:        [0.96, 0.94, 0.94, 0.95, 0.81, 0.89, 1.00, 0.83, 0.86]
+
+# # EAGLE
+# INFO:root:Trials ratio: [1.00, 0.95, 0.81, 0.61, 0.27, 0.20, 0.15, 0.08, 0.04]
+# INFO:root:Alpha:        [0.97, 0.91, 0.83, 0.58, 0.75, 0.73, 0.55, 0.50, 0.67]
