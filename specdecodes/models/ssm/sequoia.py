@@ -182,7 +182,12 @@ class SSM_Sequoia(nn.Module):
             depth += 1
             
             #* Some tree pruning logic
-            next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+            #! Finding top-k actually breaks probability calculation for sequoia. Treedy does not have this issue.
+            # next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+            # get top_k_len nodes with highest global_prob
+            node_probs = torch.tensor([node.global_prob for node in next_nodes], dtype=torch.float16)
+            topk_indices = torch.topk(node_probs, self.topk_len).indices
+            next_nodes = [next_nodes[i] for i in topk_indices]
             
             #* Append nodes to their parent nodes
             for node in next_nodes:

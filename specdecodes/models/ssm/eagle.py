@@ -141,9 +141,6 @@ class SSM_Eagle(nn.Module):
                     prob = topk_prob[prev_ind][i].item()
                     global_prob = prob * prev_node.prob
                     
-                    # if prob < 1e-3:# or global_prob < 1e-6:
-                    #     continue
-                    
                     new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
                     self.UNIQUE_ID += 1 # increment node id, make sure it is unique
                     next_nodes.append(new_node)
@@ -152,7 +149,10 @@ class SSM_Eagle(nn.Module):
             depth += 1
             
             #* Some tree pruning logic
-            next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+            # next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+            node_probs = torch.tensor([node.global_prob for node in next_nodes], dtype=torch.float32)
+            topk_indices = torch.topk(node_probs, self.topk_len).indices
+            next_nodes = [next_nodes[i] for i in topk_indices]
             
             #* Append nodes to their parent nodes
             for node in next_nodes:
@@ -166,10 +166,6 @@ class SSM_Eagle(nn.Module):
             # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
             if len(next_nodes) == 0:
                 break
-        
-        #* Keep only the top_k_len nodes with the highest global_probs (pruning is so slow using this library, need optimization)
-        # remove_nodes = sorted(preorder_iter(root), key=lambda x: x.global_prob)[:-self.max_candidate_tokens]
-        # shift_nodes(root, [node.path_name for node in remove_nodes], [None]*len(remove_nodes), delete_children=True, skippable=True)
         
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
