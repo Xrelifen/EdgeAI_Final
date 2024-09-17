@@ -24,9 +24,10 @@ class SSM_TreeDy(nn.Module):
 
         self.max_candidate_tokens = 64 #! Currently not used
         self.depth = 10
-        self.topk_len = 15#50#30#15
+        self.topk_len = 15
         
         self.UNIQUE_ID = 1
+        self.verify_method = "treedy"
     
     # calling .config is same as calling model.config
     @property
@@ -139,45 +140,77 @@ class SSM_TreeDy(nn.Module):
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
 
-            
-            T = 0.7
-            logits = lm_head(hidden_states)[0]
-            rand = torch.rand(logits.shape, device=logits.device)
-            all_probs, sampled_probs, sampled_indices = sampling_without_replacement(logits, rand=rand, num_samples=self.topk_len, temperature=T)
-            
-            # store the sampled_probs in the parent node
-            parent_probs = torch.tensor([node.global_prob+1e-6 for node in prev_sample_nodes], dtype=torch.float16)
-            parent_probs = parent_probs / parent_probs.sum()
-            parent_probs = torch.pow(parent_probs, T*T)
-            parent_probs = parent_probs / parent_probs.sum()
-            
-            # skew probabilities
-            # parent_probs = torch.pow(parent_probs, math.log(depth))
-            # parent_probs = parent_probs / parent_probs.sum()
+            T = 1.5
+            if depth > 0:
+                logits = lm_head(hidden_states)[0]
+                rand = torch.rand(logits.shape, device=logits.device)
+                all_probs, sampled_probs, sampled_indices = sampling_without_replacement(logits, rand=rand, num_samples=self.topk_len, temperature=T)
+                
+                # store the sampled_probs in the parent node
+                parent_probs = torch.tensor([node.global_prob+1e-6 for node in prev_sample_nodes], dtype=torch.float16)
+                parent_probs = parent_probs / parent_probs.sum()
+                parent_probs = torch.pow(parent_probs, T*T)
+                parent_probs = parent_probs / parent_probs.sum()
 
-            parent_bin_counts = balls_to_bins(parent_probs, bins=len(prev_sample_nodes), num_samples=self.topk_len, do_sample=False)
-            
-            #! Currently building up the tree is the most time-consuming part, need optimization.
-            # TODO: Build a tree with following capabilities:
-            # Tree can easily obtain all nodes at a certain depth
-            # Tree can O(1) access the n'th node of any depth
-            # Tree can easily prune nodes with lowest global_prob
-            # Fast append nodes to tree, keeping their node_id, prob, global_prob, parent_ind
-            # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
-            #* Create nodes
-            next_nodes = []
-            for prev_ind, prev_node in enumerate(prev_sample_nodes):
-                for i in range(parent_bin_counts[prev_ind].item()):
-                    token_id = sampled_indices[prev_ind][i].item()
-                    prob = sampled_probs[prev_ind][i].item()
-                    global_prob = prob * prev_node.prob
-                    new_node = Node(str(self.UNIQUE_ID), order=i, id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
+                parent_bin_counts = balls_to_bins(parent_probs, bins=len(prev_sample_nodes), num_samples=self.topk_len, do_sample=False)
+                
+                #! Currently building up the tree is the most time-consuming part, need optimization.
+                # TODO: Build a tree with following capabilities:
+                # Tree can easily obtain all nodes at a certain depth
+                # Tree can O(1) access the n'th node of any depth
+                # Tree can easily prune nodes with lowest global_prob
+                # Fast append nodes to tree, keeping their node_id, prob, global_prob, parent_ind
+                # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
+                #* Create nodes
+                next_nodes = []
+                for prev_ind, prev_node in enumerate(prev_sample_nodes):
+                    for i in range(parent_bin_counts[prev_ind].item()):
+                        token_id = sampled_indices[prev_ind][i].item()
+                        prob = sampled_probs[prev_ind][i].item()
+                        global_prob = prob * prev_node.prob
+                        new_node = Node(str(self.UNIQUE_ID), order=i, id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
+                        
+                        self.UNIQUE_ID += 1 # increment node id, make sure it is unique
+                        next_nodes.append(new_node)
+                        
+                    #! new: store the child_probs in the parent node
+                    prev_node.sample_probs = all_probs[prev_ind]
                     
-                    self.UNIQUE_ID += 1 # increment node id, make sure it is unique
-                    next_nodes.append(new_node)
-                    
-                #! new: store the child_probs in the parent node
-                prev_node.sample_probs = all_probs[prev_ind]
+            else: # eagle
+                #* Get probabilities of each token
+                sampled_probs = torch.softmax(lm_head(hidden_states)[0]/T, dim=-1) # [0] removes batch dimension
+
+                # sample top_k tokens, and their probabilities
+                topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
+                topk_index, topk_prob = topk_tokens.indices, topk_tokens.values
+
+                #! Currently building up the tree is the most time-consuming part, need optimization.
+                # TODO: Build a tree with following capabilities:
+                # Tree can easily obtain all nodes at a certain depth
+                # Tree can O(1) access the n'th node of any depth
+                # Tree can easily prune nodes with lowest global_prob
+                # Fast append nodes to tree, keeping their node_id, prob, global_prob, parent_ind
+                # TBH if build tree and keep data all using pytorch tensors, it should be very fast.
+                #* Create nodes
+                next_nodes = []
+                for prev_ind, prev_node in enumerate(prev_sample_nodes):
+                    for i in range(self.topk_len):
+                        token_id = topk_index[prev_ind][i].item()
+                        prob = topk_prob[prev_ind][i].item()
+                        global_prob = prob * prev_node.prob
+                        
+                        new_node = Node(str(self.UNIQUE_ID), id=token_id, prob=prob, global_prob=global_prob, ind=prev_ind)
+                        self.UNIQUE_ID += 1 # increment node id, make sure it is unique
+                        next_nodes.append(new_node)
+                        
+                    #! new: store the child_probs in the parent node
+                    prev_node.sample_probs = sampled_probs[prev_ind]
+
+                #* Some tree pruning logic
+                # next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
+                node_probs = torch.tensor([node.global_prob for node in next_nodes])
+                topk_indices = torch.topk(node_probs, self.topk_len).indices
+                next_nodes = [next_nodes[i] for i in topk_indices]
             
             #* depth increment
             depth += 1

@@ -26,6 +26,7 @@ class SSM_Eagle(nn.Module):
         self.topk_len = 15
         
         self.UNIQUE_ID = 1
+        self.verify_method = "eagle"
         
     # calling .config is same as calling model.config
     @property
@@ -120,7 +121,7 @@ class SSM_Eagle(nn.Module):
             del outputs
 
             #* Get probabilities of each token
-            sampled_probs = nn.functional.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
+            sampled_probs = torch.softmax(lm_head(hidden_states)[0], dim=-1) # [0] removes batch dimension
 
             # sample top_k tokens, and their probabilities
             topk_tokens = torch.topk(sampled_probs, self.topk_len, dim=-1)
@@ -150,7 +151,7 @@ class SSM_Eagle(nn.Module):
             
             #* Some tree pruning logic
             # next_nodes = sorted(next_nodes, key=lambda x: x.global_prob, reverse=True)[:self.topk_len]
-            node_probs = torch.tensor([node.global_prob for node in next_nodes], dtype=torch.float32)
+            node_probs = torch.tensor([node.global_prob for node in next_nodes])
             topk_indices = torch.topk(node_probs, self.topk_len).indices
             next_nodes = [next_nodes[i] for i in topk_indices]
             

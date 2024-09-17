@@ -36,19 +36,33 @@ def load_model(
         model = HuggingFaceWrapper()
         
     elif mode == "sd":
-        # model = SDWrapper(method=sd_method)
-        model = ProfileSDWrapper(method=sd_method, out_dir=None)
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
-        # ssm = SSM_Sequoia.from_pretrained(
-        # ssm = SSM_Eagle.from_pretrained(
-        ssm = SSM_TreeDy.from_pretrained(
-            ssm_path, 
-            config=draft_config,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        
+        if sd_method == "eagle":
+            ssm = SSM_Eagle.from_pretrained(
+                ssm_path, 
+                config=draft_config,
+                torch_dtype=dtype,
+            )
+        elif sd_method == "sequoia":
+            ssm = SSM_Sequoia.from_pretrained(
+                ssm_path, 
+                config=draft_config,
+                torch_dtype=dtype,
+            )
+        elif sd_method == "treedy":
+            ssm = SSM_TreeDy.from_pretrained(
+                ssm_path, 
+                config=draft_config,
+                torch_dtype=dtype,
+            )
+            
+        ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
     else:
         raise ValueError("Invalid mode.")

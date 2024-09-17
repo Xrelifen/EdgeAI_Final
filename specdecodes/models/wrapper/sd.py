@@ -18,7 +18,7 @@ class SDWrapper(WrapperBase):
     def __init__(self, method="greedy"):
         super(SDWrapper, self).__init__()
         self.method = method
-  
+    
     def set_ssm(self, ssm):
         self.ssm = ssm
     
@@ -55,16 +55,16 @@ class SDWrapper(WrapperBase):
         return outputs
     
     #TODO: Implement stochastic method and ensure correctness
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="greedy"):
+    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, verify_method="greedy"):
         sampled_tokens = []
         hidden_indices = []
         total_len = 0
         accept_len = 0
         if do_sample == False:
-            logging.debug("'do_sample' is False, sampling_method will be set to 'greedy'.")
-            sampling_method = "greedy"
+            logging.debug("'do_sample' is False, verify_method will be set to 'greedy'.")
+            verify_method = "greedy"
             
-        if sampling_method == "greedy":
+        if verify_method == "greedy":
             real_token_ids = self._sample_token(logits, logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
 
             # for each depth, find token that matches the predicted token
@@ -93,7 +93,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
-        elif sampling_method == "fast": # should be equivalent to eagle method
+        elif verify_method == "fast": # should be equivalent to eagle method
             assert do_sample == True, "Fast method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
@@ -108,7 +108,7 @@ class SDWrapper(WrapperBase):
                     accept_len += 1
                     hidden_indices.append(cur.ind)
                     sampled_tokens.append(sampled_id)
-                    cur = cur.children[child_id_to_node[sampled_id]]
+                    cur = child_id_to_node[sampled_id]
                 else:
                     for child_id in child_ids:
                         global_p[cur.ind][child_id] = 0
@@ -121,7 +121,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
                 
-        elif sampling_method == "eagle":
+        elif verify_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
@@ -157,7 +157,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
-        elif sampling_method == "sequoia":
+        elif verify_method == "sequoia":
             assert do_sample == True, "sequoia method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
@@ -204,7 +204,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
-        elif sampling_method == "treedy":
+        elif verify_method == "treedy":
             assert do_sample == True, "treedy method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             
@@ -247,7 +247,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
-        elif sampling_method == "debug":
+        elif verify_method == "debug":
             total_len += 1
             real_token_ids = self._sample_token(logits[:, :1, :], logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
 
@@ -346,7 +346,7 @@ class SDWrapper(WrapperBase):
                                                 logits_warper, 
                                                 do_sample,
                                                 eos_token_id=self.tokenizer.eos_token_id,
-                                                sampling_method=self.method,
+                                                verify_method=self.ssm.verify_method
                                             )
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
@@ -375,8 +375,8 @@ class ProfileSDWrapper(SDWrapper):
         self.prefix = prefix
         
     
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, sampling_method="greedy"):
-        sampled_tokens, hidden_indices, (total_len, accept_len) = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, sampling_method)
+    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, verify_method="greedy"):
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, verify_method)
         
         # tokenize ids
         nodes = list(preorder_iter(root))

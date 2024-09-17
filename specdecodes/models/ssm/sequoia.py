@@ -26,6 +26,7 @@ class SSM_Sequoia(nn.Module):
         self.topk_len = 15
         
         self.UNIQUE_ID = 1
+        self.verify_method = "sequoia"
     
     # calling .config is same as calling model.config
     @property
