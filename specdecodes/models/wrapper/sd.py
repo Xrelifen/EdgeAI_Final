@@ -471,11 +471,30 @@ class ProfileSDWrapper(SDWrapper):
         print_ratio_str += "]"
         logging.info(print_ratio_str)
         
-        alpha = depth_accept_cnt.float() / depth_total_cnt.float()
-        print_alpha_str = "Alpha:\t["
-        for i, val in enumerate(alpha.tolist()):
+        # alpha_per_node
+        alpha_per_node = depth_accept_cnt.float() / depth_total_cnt.float()
+        print_alpha_str = "Alpha per node:\t["
+        for i, val in enumerate(alpha_per_node.tolist()):
             print_alpha_str += f"{val:.2f}"
-            if i < len(alpha) - 1:
+            if i < len(alpha_per_node) - 1:
+                print_alpha_str += ", "
+        print_alpha_str += "]"
+        logging.info(print_alpha_str)
+        
+        # alpha_per_depth
+        depth = max_total_len
+        sampled_lens = torch.tensor([len(sampled_tokens) for sampled_tokens in self.profile_data["iter"]])
+        sampled_len_bins = torch.bincount(sampled_lens, minlength=depth+1)
+        depth_total_cnt = sampled_len_bins + sampled_len_bins.sum() - sampled_len_bins.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_total_cnt - sampled_len_bins
+        depth_total_cnt = depth_total_cnt[1:depth]
+        depth_accept_cnt = depth_accept_cnt[1:depth]
+            
+        alpha_per_depth = depth_accept_cnt.float() / depth_total_cnt.float()
+        print_alpha_str = "Alpha per depth:\t["
+        for i, val in enumerate(alpha_per_depth.tolist()):
+            print_alpha_str += f"{val:.2f}"
+            if i < len(alpha_per_depth) - 1:
                 print_alpha_str += ", "
         print_alpha_str += "]"
         logging.info(print_alpha_str)
