@@ -110,6 +110,10 @@ def main(args):
         # convert to numpy array, plot and save
         latencies = np.array(latencies)
 
+        # create folder if not exists
+        if not os.path.exists(args.save_folder):
+            os.makedirs(args.save_folder)
+        
         # save latencies
         np.save(os.path.join(args.save_folder, f"llm_prev_{prev_tokens}.npy"), latencies)
 
