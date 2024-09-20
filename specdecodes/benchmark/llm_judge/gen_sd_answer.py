@@ -417,7 +417,7 @@ if __name__ == "__main__":
     if args.out_dir is not None or args.out_dir != "":
         if os.path.exists(args.out_dir):
             os.system(f"rm -rf {args.out_dir}")
-        print(f"Detele old {args.out_dir}")
+            print(f"Detele old {args.out_dir}")
     print(f"Output to {args.out_dir}")
     
     ## Run evaluation
