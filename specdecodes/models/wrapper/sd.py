@@ -9,9 +9,9 @@ from .base import WrapperBase
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from bigtree import preorder_iter, levelorder_iter, shift_nodes, find_attrs
+from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
-from ..utils import TreeDynamicCache, build_tree_attention_data, get_residual
+from ..utils import TreeDynamicCache, build_tree_attention_data, get_residual, verify_topk, verify_k
 
 
 class SDWrapper(WrapperBase):
@@ -22,16 +22,12 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, hidden_states, input_ids, logits_warper, do_sample, past_key_values, eos_token_id=None):
+    def _speculate(self, inputs, past_key_values):
         return self.ssm.speculate(
-            hidden_states,
-            input_ids,
+            inputs,
+            past_key_values=past_key_values,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=self.llm.lm_head,
-            logits_warper=logits_warper,
-            do_sample=do_sample,
-            past_key_values=past_key_values,
-            eos_token_id=eos_token_id,
         )
         
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
@@ -55,7 +51,7 @@ class SDWrapper(WrapperBase):
         return outputs
     
     #TODO: Implement stochastic method and ensure correctness
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, verify_method="greedy"):
+    def _verify(self, root, logits, logits_warper, do_sample, verify_method="greedy"):
         sampled_tokens = []
         hidden_indices = []
         total_len = 0
@@ -88,7 +84,7 @@ class SDWrapper(WrapperBase):
                 # stop loop if no token is accepted
                 if accepts_token == False: break
             
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # no token matched, accept first token
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id: # no token matched, accept first token
                 bonus_token = real_token_ids[cur.ind].item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
@@ -103,7 +99,7 @@ class SDWrapper(WrapperBase):
                 
                 sampled_id = global_p[cur.ind].multinomial(num_samples=1).item()
                 child_ids = [child.id for child in cur.children]
-                child_id_to_node = {node.id: node for node in cur.children}
+                child_id_to_node = {node.id.item(): node for node in cur.children}
                 if sampled_id in child_ids:
                     accept_len += 1
                     hidden_indices.append(cur.ind)
@@ -116,134 +112,92 @@ class SDWrapper(WrapperBase):
                     break
             
             # generate bonus token, don't generate if eos token is already the last token
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id:
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id:
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
-                
+
         elif verify_method == "eagle":
             assert do_sample == True, "Eagle method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            all_accept = True
             
             cur = root
             while cur.children:
                 total_len += 1
+                child_id_to_node = {node.id: node for node in cur.children}
                 
-                accepts_token = False
-                for child in cur.children:
-                    r = torch.rand(1).item()
-                    # qx = gtp[child.id]
-                    # px = 1  # in this iteration, only child.id' prob is 1, others are 0.
-                    # if r <= qx / px:
-                    if r <= global_p[cur.ind][child.id]: # since px = 1, we can compare r with qx directly
-                        accepts_token = True
-                        accept_len += 1
-                        sampled_tokens.append(child.id)
-                        hidden_indices.append(cur.ind)
-                        cur = child
-                        break
-                    else:
-                        # global_p[cur.ind] = torch.clamp(global_p[cur.ind] - p, min=0)
-                        global_p[cur.ind][child.id] = 0 # only child.id' prob is 1, equivalent to function above
-                        global_p[cur.ind] = global_p[cur.ind] / global_p[cur.ind].sum()
-                        # p[child.id] = 0
-                        # p = p / p.sum()
+                accept_draft, token_id = verify_topk(global_p[cur.ind], None, cur)
+                sampled_tokens.append(token_id)
+                hidden_indices.append(cur.ind)
                         
                 # stop loop if no token is accepted
-                if accepts_token == False: break
+                if accept_draft: 
+                    accept_len += 1
+                    cur = child_id_to_node[token_id]
+                else:    
+                    all_accept = False
+                    break
                 
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
+            if all_accept and (len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id): # eos token should be the last token
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
         elif verify_method == "sequoia":
-            assert do_sample == True, "sequoia method requires sampling"
+            assert do_sample == True, "Sequoia method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            all_accept = True
             
             cur = root
             while cur.children:
                 total_len += 1
+                child_id_to_node = {node.id: node for node in cur.children}
                 
-                # keep the non-repacement sampling order
-                children = [ child for child in cur.children ]
-                children.sort(key=lambda x: x.order)
-                
-                q = cur.sample_probs
-                tried_ids = []
-                accepts_token = False
-                for child in children:
-                    r = torch.rand(1).item()
-                    if r <= global_p[cur.ind][child.id] / q[child.id]:
-                        accepts_token = True
-                        accept_len += 1
-                        sampled_tokens.append(child.id)
-                        hidden_indices.append(cur.ind)
-                        cur = child
-                        break
-                    else:
-                        global_p[cur.ind] = get_residual(global_p[cur.ind], q)
-                        q[child.id] = 0
+                accept_draft, token_id = verify_k(global_p[cur.ind], cur.sample_probs, cur)
+                sampled_tokens.append(token_id)
+                hidden_indices.append(cur.ind)
                         
-                        # Below only benefits when sampled ids have prob 0, which is rarely the case.
-                        # set q[t] = 0 if t in S, else 1
-                        tried_ids.append(cur.ind)
-                        if q.sum() == 0:
-                            child_ids = [child.id for child in cur.children]
-                            q = torch.zeros_like(q)
-                            q[child_ids] = 1
-                            q[tried_ids] = 0
-                        
-                        q = q / q.sum()
-                       
                 # stop loop if no token is accepted
-                if accepts_token == False: break
+                if accept_draft: 
+                    accept_len += 1
+                    cur = child_id_to_node[token_id]
+                else:    
+                    all_accept = False
+                    break
              
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
+            if all_accept and (len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id): # eos token should be the last token
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
-        
+
         elif verify_method == "treedy":
-            assert do_sample == True, "treedy method requires sampling"
+            assert do_sample == True, "TreeDy method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            all_accept = True
             
             cur = root
             while cur.children:
                 total_len += 1
-
-                q = cur.sample_probs
-                tried_ids = []
-                accepts_token = False
-                for child in cur.children:
-                    r = torch.rand(1).item()
-                    if r <= global_p[cur.ind][child.id] / q[child.id]:
-                        accepts_token = True
-                        accept_len += 1
-                        sampled_tokens.append(child.id)
-                        hidden_indices.append(cur.ind)
-                        cur = child
-                        break
-                    else:
-                        global_p[cur.ind] = get_residual(global_p[cur.ind], q)
-                        q[child.id] = 0
-                        
-                        # Below only benefits when sampled ids have prob 0, which is rarely the case.
-                        # set q[t] = 0 if t in S, else 1
-                        tried_ids.append(cur.ind)
-                        if q.sum() == 0:
-                            child_ids = [child.id for child in cur.children]
-                            q = torch.zeros_like(q)
-                            q[child_ids] = 1
-                            q[tried_ids] = 0
-                        
-                        q = q / q.sum()
+                child_id_to_node = {node.id: node for node in cur.children}
+                
+                if total_len <= 2:
+                    accept_draft, token_id = verify_topk(global_p[cur.ind], None, cur)
+                else:
+                    accept_draft, token_id = verify_k(global_p[cur.ind], cur.sample_probs, cur)
+                sampled_tokens.append(token_id)
+                hidden_indices.append(cur.ind)
                         
                 # stop loop if no token is accepted
-                if accepts_token == False: break
+                if accept_draft: 
+                    accept_len += 1
+                    cur = child_id_to_node[token_id]
+                else:    
+                    all_accept = False
+                    break
              
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # eos token should be the last token
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1).item()
+            if all_accept and (len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id): # eos token should be the last token
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
         
@@ -252,7 +206,7 @@ class SDWrapper(WrapperBase):
             real_token_ids = self._sample_token(logits[:, :1, :], logits_warper, do_sample=do_sample).squeeze(0) # remove batch dim
 
             cur = root
-            if len(sampled_tokens) == 0 or sampled_tokens[-1] != eos_token_id: # no token matched, accept first token
+            if len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id: # no token matched, accept first token
                 bonus_token = real_token_ids[cur.ind].item()
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
@@ -326,7 +280,7 @@ class SDWrapper(WrapperBase):
         finished = False
         while not finished:
             # * speculate
-            root = self._speculate(hidden_states, input_ids, logits_warper, do_sample, ssm_past_key_values, eos_token_id=self.tokenizer.eos_token_id)
+            root = self._speculate([hidden_states, input_ids], ssm_past_key_values)
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()
@@ -343,9 +297,8 @@ class SDWrapper(WrapperBase):
             # * verify
             sampled_tokens, hidden_indices, _ = self._verify(
                                                 root, next_token_logits, 
-                                                logits_warper, 
+                                                logits_warper,
                                                 do_sample,
-                                                eos_token_id=self.tokenizer.eos_token_id,
                                                 verify_method=self.ssm.verify_method
                                             )
             
@@ -375,8 +328,8 @@ class ProfileSDWrapper(SDWrapper):
         self.prefix = prefix
         
     
-    def _verify(self, root, logits, logits_warper, do_sample, eos_token_id=None, verify_method="greedy"):
-        sampled_tokens, hidden_indices, (total_len, accept_len) = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, eos_token_id, verify_method)
+    def _verify(self, root, logits, logits_warper, do_sample, verify_method="greedy"):
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super(ProfileSDWrapper, self)._verify(root, logits, logits_warper, do_sample, verify_method)
         
         # tokenize ids
         nodes = list(preorder_iter(root))

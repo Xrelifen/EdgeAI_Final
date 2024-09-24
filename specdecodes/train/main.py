@@ -22,7 +22,7 @@ from copy import deepcopy
 import wandb
 
 from ..models.llm import modeling_llama_no_layernorm as modeling_llama
-from ..models.ssm.eagle import SSM_Eagle
+from ..models import SSM_Eagle
 
 
 class AddGaussianNoise:
@@ -310,6 +310,15 @@ def calc_skl_loss(mask, s_logits, t_logits, alpha=0.1):
     loss = aggr_sum_loss(mask, loss)
     return loss
 
+def calc_reverse_kl_loss(mask, s_logits, t_logits):
+    with torch.no_grad():
+        t_logits = F.log_softmax(t_logits, dim=-1)
+    s_logits = F.softmax(s_logits, dim=-1)
+    
+    loss = F.kl_div(t_logits, s_logits, reduction='none')
+    loss = aggr_sum_loss(mask, loss)
+    return loss
+
 def calc_tvdpp_loss(mask, s_logits, t_logits):
     s_logits = F.softmax(s_logits, dim=-1)
     with torch.no_grad():
@@ -349,13 +358,8 @@ def calc_l1_loss(mask, s_logits, t_logits):
     return loss
 
 def calculate_loss(loss_mask, s_logits, t_logits, s_out, t_out, train_config):
-    ploss = calc_kl_loss_with_temp(loss_mask, s_out, t_out, temp=0.8)
-    # ploss = calc_tv_loss_with_temp(loss_mask, s_out, t_out, temp=2.5)
-    
+    ploss = calc_kl_loss_with_temp(loss_mask, s_out, t_out, temp=1)
     vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
-    # vloss = calc_kl_loss(loss_mask, s_logits, t_logits)
-    # vloss = calc_skl_loss(loss_mask, s_out, t_out)
-    
     loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
     
     return loss, ploss, vloss
@@ -369,7 +373,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
         with accelerator.accumulate(model):
             optimizer.zero_grad()
             with torch.no_grad():
-                t_logits = data["target"]
+                t_logits = data["target"] # data["target"] = data["hidden_states"][:, 1:]
                 t_out = lm_head(t_logits.to(lm_head.weight.dtype))
             s_logits = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
             s_out = lm_head(s_logits)
@@ -573,16 +577,6 @@ def main(args):
     lm_head = lm_head.to(torch.float32)
     embed_tokens = embed_tokens.to(torch.float32)
     
-    # Manually free up memory before loading pretrained model
-    print(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
-    llm.lm_head = None
-    llm.set_input_embeddings(None)
-    llm.model = None
-    del llm
-    gc.collect()
-    torch.cuda.empty_cache()
-    print(f'GPU memory after freeing llm: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
-    
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         print("Loading pretrained model...")
@@ -592,10 +586,20 @@ def main(args):
         model = SSM_Eagle(draft_config)
     
     # load llm's last attention layer's data to draft model
-    # model.model.layers[0].self_attn = llm.model.layers[-1].self_attn
-    # for (draft_param, llm_param) in zip(model.model.layers[0].self_attn.parameters(), llm.model.layers[-1].self_attn.parameters()):
-    #     print(draft_param.data.shape, llm_param.data.shape)
+    # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
+    # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
     #     draft_param.data = llm_param.data
+    #     # draft_param.requires_grad = False
+        
+    # Manually free up memory before loading pretrained model
+    print(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
+    llm.lm_head = None
+    llm.set_input_embeddings(None)
+    llm.model = None
+    del llm
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f'GPU memory after freeing llm: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
 
     # Calculate the number of update steps per epoch  https://github.com/huggingface/diffusers/pull/6143/files
     print("Setting up training...")

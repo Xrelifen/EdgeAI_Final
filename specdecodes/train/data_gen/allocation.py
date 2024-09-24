@@ -23,6 +23,10 @@ num_p = len(gpus)
 
 outdir = os.path.join(args.outdir, 'sharegpt_{}_{}_{}'.format(s, e, args.suffix))
 
+# delete the directory if it exists
+if os.path.exists(outdir):
+    os.system('rm -r ' + outdir)
+
 
 def split_range(start, end, n, over=False):
     length = end - start + 1  # Include the end

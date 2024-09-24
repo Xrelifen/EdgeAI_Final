@@ -49,8 +49,6 @@ def build_tree_attention_data(root, position_offset, dtype):
     return tree_input_ids, tree_position_ids, tree_mask
 
 
-# Modified from https://github.com/Infini-AI-Lab/Sequoia/blob/main/utils.py
-
 def make_tree_attention_mask(
         prefix_len :int,
         gen_len :int,
@@ -71,89 +69,44 @@ def get_residual(p: torch.Tensor, q:torch.Tensor):
     return residual
 
 
-def sampling_without_replacement(
-        sampling_logits: torch.Tensor, 
-        rand: torch.Tensor,  
-        num_samples: int,
-        temperature :float = 1.0
-    ):
-    if temperature == 1.0:
-        sampling_q = torch.softmax(sampling_logits, dim=-1)
-    else:
-        sampling_q = torch.softmax(sampling_logits / temperature, dim=-1)
-
-    sampled_indices = (rand.log()/sampling_q).topk(k=num_samples).indices
-    sampled_probs = torch.gather(sampling_q, 1, sampled_indices)
-    
-    return sampling_q, sampled_probs, sampled_indices
-
-def balls_to_bins(
-        sampling_probs: torch.Tensor,
-        bins: int,
-        num_samples: int,
-        do_sample: bool = True,
-    ):
-    if do_sample:
-        sampled_bin_ids = torch.multinomial(sampling_probs, num_samples, replacement=True)
-        sampled_bin_counts = torch.bincount(sampled_bin_ids, minlength=bins)
-    else:
-        sampled_bin_counts = torch.floor(sampling_probs * num_samples).int()
-        # handle the case where the sum of the counts is more or less than num_samples
-        count_sum = sampled_bin_counts.sum()
-        if count_sum < num_samples:
-            _, top_indices = torch.topk(sampling_probs, num_samples - count_sum)
-            sampled_bin_counts[top_indices] += 1
-    return sampled_bin_counts
-    
-    
-def cuda_graph_for_sampling_without_replacement(
-        device="cuda:0", dtype=torch.float16, 
-        dim=32000,
-        n_warmups=3, mempool=None,
-        idx_len = 8, num_samples = 16,
-        temperature = 0.6,
-    ):
-    
-    # static_sampling_logits = torch.full((idx_len, dim), 1, dtype=dtype, device=device)
-    # static_rand = torch.empty((idx_len, dim), dtype=dtype, device=device).uniform_()
-    static_sampling_logits = torch.full((idx_len, dim), 1, dtype=dtype, device=device)
-    static_rand = torch.empty((idx_len, dim), dtype=dtype, device=device).uniform_()
-
-    s = torch.cuda.Stream()
-    s.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(s):
-        for _ in range(n_warmups):
-            static_probs, static_indices = sampling_without_replacement(
-                 static_sampling_logits,
-                 static_rand,
-                 num_samples,
-                 temperature
-            )
-        s.synchronize()
-    torch.cuda.current_stream().wait_stream(s)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, pool=mempool):
-        static_probs, static_indices = sampling_without_replacement(
-                 static_sampling_logits,
-                 static_rand,
-                 num_samples,
-                 temperature
-            )
-    
-    def run(draft_logits, rand_vector):
-        # static_sampling_logits.copy_(draft_logits)
-        # static_rand.copy_(rand_vector)
-        # graph.replay()
-        # return static_position.clone()
+def verify_topk(p, q, node):
+    p = p.to(torch.float32)
+    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
+    for child_id in child_ids:
+        r = torch.rand(1).item()
+        if r <= p[child_id]:
+            return True, child_id.item()
         
-        static_sampling_logits.copy_(draft_logits)
-        static_rand.copy_(rand_vector)
-        graph.replay()
-        return static_probs.clone(), static_indices.clone()
-    
-    return run
+        else:
+            p[child_id] = 0
+            p = p / p.sum()
+            
+    return False, p.multinomial(num_samples=1).item()
+   
 
+def verify_k(p, q, node):
+    p = p.to(torch.float32)
+    q = q.to(torch.float32)
+    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
+    tried_ids = torch.full_like(child_ids, -1)
+    for i, child_id in enumerate(child_ids):
+        r = torch.rand(1).item()
+        if p[child_id] > r*q[child_id]:
+            return True, child_id.item()
+        
+        else:
+            tried_ids[i] = child_id
+            p = get_residual(p, q)
+            
+            q[child_id] = 0
+            if q.sum() == 0:
+                q = torch.zeros_like(q)
+                q[child_ids] = 1
+                q[tried_ids[tried_ids != -1]] = 0
+            q = q / q.sum()
+            
+    return False, p.multinomial(num_samples=1).item() 
+    
 
 class TreeDynamicCache(DynamicCache):
     def reorder_cache(self, beam_idx: torch.LongTensor, dim=0):

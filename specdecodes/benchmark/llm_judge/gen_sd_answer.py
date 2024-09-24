@@ -67,18 +67,21 @@ def load_model(
             ssm = SSM_Eagle.from_pretrained(
                 ssm_path, 
                 config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
         elif sd_method == "sequoia":
             ssm = SSM_Sequoia.from_pretrained(
                 ssm_path, 
                 config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
         elif sd_method == "treedy":
             ssm = SSM_TreeDy.from_pretrained(
-                ssm_path, 
+                ssm_path,
                 config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
         
