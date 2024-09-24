@@ -15,6 +15,7 @@ class SSMBase(nn.Module):
     def __init__(self, config, eos_token_id=None):
         super().__init__()
         self.eos_token_id = eos_token_id
+        self.config = config
     
     @classmethod
     def from_pretrained(
@@ -55,11 +56,6 @@ class SSM_EagleBase(SSMBase):
         self.depth = 8
         self.topk_len = 15
         self.verify_method = "eagle"
-    
-    # calling .config is same as calling model.config
-    @property
-    def config(self):
-        return self.model.config
     
     # Currently not used. This may be used to match LLM's sampling behavior.
     @torch.no_grad()
