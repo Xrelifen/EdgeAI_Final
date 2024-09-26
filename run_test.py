@@ -15,6 +15,7 @@ def load_model(
     ssm_path: str,
     mode: str,
     sd_method: str,
+    layers: int,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     ):
@@ -41,7 +42,7 @@ def load_model(
         
         # load SSM
         draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = 2
+        draft_config.num_hidden_layers = layers
         
         if sd_method == "greedy":
             ssm = SSM_Greedy.from_pretrained(
@@ -97,7 +98,7 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
 
     # warm up
     if not args.no_warm_up:
@@ -194,6 +195,12 @@ if __name__ == "__main__":
         type=str,
         default="greedy",
         help="The mode of model generation.",
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=1,
+        help="The number of layers for SSM.",
     )
     parser.add_argument(
         "-nw",

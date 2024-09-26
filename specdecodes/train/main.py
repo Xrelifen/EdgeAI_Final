@@ -555,7 +555,7 @@ def main(args):
     )
     
     draft_config = deepcopy(llm.config)
-    draft_config.num_hidden_layers = 1
+    draft_config.num_hidden_layers = args.layers
     draft_config.use_cache = False
     draft_config._attn_implementation = "sdpa"
     
@@ -650,6 +650,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='sp')
     parser.add_argument('--llm-path', '-llm', type=str, default="meta-llama/Llama-2-7b-chat-hf")
+    parser.add_argument("--layers", type=int, default=1)
     parser.add_argument('--datadir', type=str, default='0')
     parser.add_argument('--savedir', type=str, default='0')
     parser.add_argument('--data-ratio', type=float, default=1)

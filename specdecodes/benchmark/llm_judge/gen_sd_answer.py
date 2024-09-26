@@ -34,6 +34,7 @@ def load_model(
     ssm_path: str,
     mode: str,
     sd_method: str,
+    layers: int,
     out_dir: str = None,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
@@ -61,7 +62,7 @@ def load_model(
         
         # load SSM
         draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = 1
+        draft_config.num_hidden_layers = layers
         
         if sd_method == "greedy":
             ssm = SSM_Greedy.from_pretrained(
@@ -112,6 +113,7 @@ def run_eval(
     ssm_path,
     mode,
     sd_method,
+    layers,
     out_dir,
     model_id,
     question_file,
@@ -150,6 +152,7 @@ def run_eval(
                 ssm_path,
                 mode,
                 sd_method,
+                layers,
                 out_dir,
                 model_id,
                 questions[i : i + chunk_size],
@@ -173,6 +176,7 @@ def get_model_answers(
     ssm_path,
     mode,
     sd_method,
+    layers,
     out_dir,
     model_id,
     questions,
@@ -195,7 +199,7 @@ def get_model_answers(
     #     cpu_offloading=False,
     #     debug=False,
     # )
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, out_dir, dtype=dtype, device="cuda")
+    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir, dtype=dtype, device="cuda")
 
     for question in tqdm(questions):
         if question["category"] in temperature_config:
@@ -335,6 +339,12 @@ if __name__ == "__main__":
         help="The mode of model generation.",
     )
     parser.add_argument(
+        "--layers",
+        type=int,
+        default=1,
+        help="The number of layers for SSM.",
+    )
+    parser.add_argument(
         "--out-dir",
         type=str,
         default="specdecodes/experiments/mt_bench/",
@@ -439,6 +449,7 @@ if __name__ == "__main__":
             ssm_path=args.ssm_path,
             mode=args.mode,
             sd_method=args.sd_method,
+            layers=args.layers,
             out_dir=args.out_dir,
             
             model_id=args.model_id,

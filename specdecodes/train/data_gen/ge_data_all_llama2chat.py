@@ -102,7 +102,7 @@ def build_dataset(tokenizer, dataset_dir, start, end, num_proc, seed=42):
 def model_forward(model, data):
     input_ids = data["input_ids"]
     outputs = model(input_ids.cuda(), past_key_values=DynamicCache(), output_hidden_states=True)
-    hidden_state = outputs.hidden_states[-1]
+    hidden_state = outputs.hidden_states[-2]#[-1]
     
     return {
         "input_ids": input_ids.cpu().squeeze(0),
@@ -129,16 +129,16 @@ def main(args):
         dtype = torch.float32
     print("dtype:",dtype)
     
-    # Load dataset
-    dataset_dir = "Aeala/ShareGPT_Vicuna_unfiltered"
-    ds = build_dataset(tokenizer, dataset_dir, args.start, args.end, args.num_proc, seed=42)
-    print(ds)
-
     # Init model
     llm_path = "meta-llama/Llama-2-7b-chat-hf"
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     model = AutoModelForCausalLM.from_pretrained(llm_path, device_map="auto", attn_implementation="sdpa", torch_dtype=dtype)
     model.eval()
+    
+    # Load dataset
+    dataset_dir = "Aeala/ShareGPT_Vicuna_unfiltered"
+    ds = build_dataset(tokenizer, dataset_dir, args.start, args.end, args.num_proc, seed=42)
+    print(ds)
 
     # Create output directory if not exists
     outdir = os.path.join(args.outdir, f"gpu{str(args.index)}")
@@ -164,6 +164,7 @@ parser.add_argument('--index', type=int, default=1)
 parser.add_argument('--gpu_index', type=int, nargs='+', default=[0, 1, 2])
 parser.add_argument('--outdir', type=str, default='outdir0')
 parser.add_argument('--dtype', type=str, default='fp16')
+parser.add_argument('--num_proc', type=int, default=16)
 args = parser.parse_args()
 
 # Run main function
