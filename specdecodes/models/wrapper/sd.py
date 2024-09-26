@@ -144,7 +144,7 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
-        elif verify_method in ["stochastic", "hstochastic"]:
+        elif verify_method == "stochastic":
             assert do_sample == True, "Stochastic method requires sampling"
             global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
             all_accept = True
@@ -171,35 +171,36 @@ class SDWrapper(WrapperBase):
                 sampled_tokens.append(bonus_token)
                 hidden_indices.append(cur.ind)
 
-        # elif verify_method == "treedy":
-        #     assert do_sample == True, "TreeDy method requires sampling"
-        #     global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
-        #     all_accept = True
+        elif verify_method == "mixed":
+            assert do_sample == True, "Mixed method requires sampling"
+            global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+            all_accept = True
             
-        #     cur = root
-        #     while cur.children:
-        #         total_len += 1
-        #         child_id_to_node = {node.id: node for node in cur.children}
+            cur = root
+            while cur.children:
+                total_len += 1
+                child_id_to_node = {node.id: node for node in cur.children}
                 
-        #         if total_len <= 2:
-        #             accept_draft, token_id = verify_topk(global_p[cur.ind], None, cur)
-        #         else:
-        #             accept_draft, token_id = verify_k(global_p[cur.ind], cur.sample_probs, cur)
-        #         sampled_tokens.append(token_id)
-        #         hidden_indices.append(cur.ind)
+                SWITCH_STEP = 2
+                if total_len <= SWITCH_STEP:
+                    accept_draft, token_id = verify_topk(global_p[cur.ind], None, cur)
+                else:
+                    accept_draft, token_id = verify_k(global_p[cur.ind], cur.sample_probs, cur)
+                sampled_tokens.append(token_id)
+                hidden_indices.append(cur.ind)
                         
-        #         # stop loop if no token is accepted
-        #         if accept_draft: 
-        #             accept_len += 1
-        #             cur = child_id_to_node[token_id]
-        #         else:    
-        #             all_accept = False
-        #             break
+                # stop loop if no token is accepted
+                if accept_draft: 
+                    accept_len += 1
+                    cur = child_id_to_node[token_id]
+                else:    
+                    all_accept = False
+                    break
              
-        #     if all_accept and (len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id): # eos token should be the last token
-        #         bonus_token = global_p[cur.ind].multinomial(num_samples=1)
-        #         sampled_tokens.append(bonus_token)
-        #         hidden_indices.append(cur.ind)
+            if all_accept and (len(sampled_tokens) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id): # eos token should be the last token
+                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
+                sampled_tokens.append(bonus_token)
+                hidden_indices.append(cur.ind)
         
         elif verify_method == "debug":
             total_len += 1

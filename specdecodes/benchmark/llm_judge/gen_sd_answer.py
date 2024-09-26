@@ -20,7 +20,7 @@ from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from ...models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic
+from ...models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed
 
 
 # set random deterministic
@@ -84,13 +84,15 @@ def load_model(
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
-        # elif sd_method == "treedy":
-        #     ssm = SSM_TreeDy.from_pretrained(
-        #         ssm_path,
-        #         config=draft_config,
-        #         eos_token_id=tokenizer.eos_token_id,
-        #         torch_dtype=dtype,
-        #     )
+        elif sd_method == "mixed":
+            ssm = SSM_Mixed.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+            )
+        else:
+            raise ValueError("Invalid method.")
         
         ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)

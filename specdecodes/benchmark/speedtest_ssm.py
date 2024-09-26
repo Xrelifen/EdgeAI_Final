@@ -9,7 +9,7 @@ import argparse
 import logging
 import os
 
-from ..models.ssm.eagle import DraftModel
+from ..models import SSM_Greedy
 
 
 logging.getLogger().setLevel(logging.INFO)
@@ -21,16 +21,16 @@ def flush_cache():
     x.zero_()
 
 
-def load_model(llm_path, dtype=torch.float16):
+def load_model(llm_path, layers, dtype=torch.float16):
     config = AutoConfig.from_pretrained(llm_path)
     draft_config = config
-    draft_config.num_hidden_layers = 1
+    draft_config.num_hidden_layers = layers
     draft_config._attn_implementation = "sdpa"
     
     # create new head and embed_tokens
     lm_head = nn.Linear(draft_config.hidden_size, draft_config.vocab_size, bias=False).to(dtype=dtype, device="cuda")
     embed_tokens = nn.Embedding(draft_config.vocab_size, draft_config.hidden_size, draft_config.pad_token_id).to(dtype=dtype, device="cuda")
-    model = DraftModel(draft_config).to(dtype=dtype, device="cuda")
+    model = SSM_Greedy(draft_config).to(dtype=dtype, device="cuda")
     
     return model, lm_head, embed_tokens
 
@@ -104,7 +104,7 @@ def main(args):
         raise ValueError(f"Invalid dtype: {args.dtype}")
   
     # Load model
-    model, lm_head, embed_tokens = load_model(args.llm_path, dtype=dtype)
+    model, lm_head, embed_tokens = load_model(args.llm_path, args.layers, dtype=dtype)
     
     # Test for number of new tokens from 1 to max_new_tokens
     for prev_tokens in args.prev_tokens:
@@ -120,7 +120,7 @@ def main(args):
         latencies = np.array(latencies)
 
         # save latencies
-        np.save(os.path.join(args.save_folder, f"ssm_prev_{prev_tokens}.npy"), latencies)
+        np.save(os.path.join(args.save_folder, f"ssm_{args.layers}layer_prev_{prev_tokens}.npy"), latencies)
 
 
 if __name__ == "__main__":
@@ -130,7 +130,8 @@ if __name__ == "__main__":
     args.add_argument("--dtype", type=str, default="float16")
     args.add_argument("--device", type=str, default="cuda")
     args.add_argument("--llm-path", "-llm", type=str, default="meta-llama/Llama-2-7b-chat-hf")
-    args.add_argument("--repetitions", "-rep", type=int, default=10)
+    args.add_argument("--layers", type=int, default=1)
+    args.add_argument("--repetitions", "-rep", type=int, default=100)
     args.add_argument("--max_new_tokens", type=int, default=512)
     args.add_argument("--batch_size", type=int, default=1)
     args.add_argument("--save_folder", "-save", type=str, default="speedtest")

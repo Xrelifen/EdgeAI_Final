@@ -218,23 +218,24 @@ class SSM_Stochastic(SSM_EagleBase):
 class SSM_HStochastic(SSM_EagleBase):
     def __init__(self, config, eos_token_id=None):
         super().__init__(config, eos_token_id)
-        self.verify_method = "hstochastic"
+        self.verify_method = "stochastic"
 
     @torch.no_grad()
     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
         next_nodes = heuristic_k_sampling(sampled_probs, prev_nodes, num_samples, step)
         return next_nodes
 
-# class SSM_TreeDy(SSM_EagleBase):
-#     def __init__(self, config, eos_token_id=None):
-#         super().__init__(config, eos_token_id)
-#         self.verify_method = "treedy"
+class SSM_Mixed(SSM_EagleBase):
+    def __init__(self, config, eos_token_id=None):
+        super().__init__(config, eos_token_id)
+        self.verify_method = "mixed"
 
-#     @torch.no_grad()
-#     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-#         if step <= 2:
-#             next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
-#         else:
-#             next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
+    @torch.no_grad()
+    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
+        SWITCH_STEP = 2
+        if step <= SWITCH_STEP:
+            next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
+        else:
+            next_nodes = heuristic_k_sampling(sampled_probs, prev_nodes, num_samples, step)
             
-#         return next_nodes
+        return next_nodes
