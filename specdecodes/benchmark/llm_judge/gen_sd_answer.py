@@ -20,7 +20,7 @@ from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from ...models import SSM_Sequoia, SSM_Eagle, SSM_TreeDy
+from ...models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic
 
 
 # set random deterministic
@@ -63,27 +63,34 @@ def load_model(
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = 1
         
-        if sd_method == "eagle":
-            ssm = SSM_Eagle.from_pretrained(
+        if sd_method == "greedy":
+            ssm = SSM_Greedy.from_pretrained(
                 ssm_path, 
                 config=draft_config,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
-        elif sd_method == "sequoia":
-            ssm = SSM_Sequoia.from_pretrained(
+        elif sd_method == "stochastic":
+            ssm = SSM_Stochastic.from_pretrained(
                 ssm_path, 
                 config=draft_config,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
-        elif sd_method == "treedy":
-            ssm = SSM_TreeDy.from_pretrained(
-                ssm_path,
+        elif sd_method == "hstochastic":
+            ssm = SSM_HStochastic.from_pretrained(
+                ssm_path, 
                 config=draft_config,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             )
+        # elif sd_method == "treedy":
+        #     ssm = SSM_TreeDy.from_pretrained(
+        #         ssm_path,
+        #         config=draft_config,
+        #         eos_token_id=tokenizer.eos_token_id,
+        #         torch_dtype=dtype,
+        #     )
         
         ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)

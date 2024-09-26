@@ -6,7 +6,7 @@ import os
 
 from bigtree import Node
 
-from .sampling_utils import topk_sampling, k_sampling
+from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
 from ..utils import invert_mask
 from ..llm import modeling_llama_no_layernorm as modeling_llama
 
@@ -53,7 +53,7 @@ class SSM_EagleBase(SSMBase):
         self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
         self.model = model
 
-        self.depth = 8
+        self.depth = 10#8
         self.topk_len = 15
         self.verify_method = "eagle"
     
@@ -195,36 +195,46 @@ class SSM_EagleBase(SSMBase):
         
         return root
 
-class SSM_Eagle(SSM_EagleBase):
+class SSM_Greedy(SSM_EagleBase):
     def __init__(self, config, eos_token_id=None):
         super().__init__(config, eos_token_id)
-        self.verify_method = "eagle"#"fast"#"eagle"
+        self.verify_method = "greedy"
 
     @torch.no_grad()
     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
         next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
         return next_nodes
 
-class SSM_Sequoia(SSM_EagleBase):
+class SSM_Stochastic(SSM_EagleBase):
     def __init__(self, config, eos_token_id=None):
         super().__init__(config, eos_token_id)
-        self.verify_method = "sequoia"
+        self.verify_method = "stochastic"
 
     @torch.no_grad()
     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
         next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
         return next_nodes
 
-class SSM_TreeDy(SSM_EagleBase):
+class SSM_HStochastic(SSM_EagleBase):
     def __init__(self, config, eos_token_id=None):
         super().__init__(config, eos_token_id)
-        self.verify_method = "treedy"
+        self.verify_method = "hstochastic"
 
     @torch.no_grad()
     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        if step <= 2:
-            next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
-        else:
-            next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
-            
+        next_nodes = heuristic_k_sampling(sampled_probs, prev_nodes, num_samples, step)
         return next_nodes
+
+# class SSM_TreeDy(SSM_EagleBase):
+#     def __init__(self, config, eos_token_id=None):
+#         super().__init__(config, eos_token_id)
+#         self.verify_method = "treedy"
+
+#     @torch.no_grad()
+#     def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
+#         if step <= 2:
+#             next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
+#         else:
+#             next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
+            
+#         return next_nodes

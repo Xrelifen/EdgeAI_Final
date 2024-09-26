@@ -22,7 +22,7 @@ from copy import deepcopy
 import wandb
 
 from ..models.llm import modeling_llama_no_layernorm as modeling_llama
-from ..models import SSM_Eagle
+from ..models import SSM_Greedy
 
 
 class AddGaussianNoise:
@@ -580,10 +580,10 @@ def main(args):
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         print("Loading pretrained model...")
-        model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_Greedy.from_pretrained(args.pretrained, config=draft_config)
     else:
         print("Loading draft model...")
-        model = SSM_Eagle(draft_config)
+        model = SSM_Greedy(draft_config)
     
     # load llm's last attention layer's data to draft model
     # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
