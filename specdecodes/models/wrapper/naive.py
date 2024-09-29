@@ -30,7 +30,8 @@ class NaiveWrapper(WrapperBase):
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
-        next_token_logits = outputs.logits[:, -1:].clone() #TODO: check shape, hf uses outputs.logits[:, -1, :].clone()
+        # We keep the seq_len axis considering cases of multiple tokens.
+        next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :].clone() here
 
         # This is needed to properly delete outputs.logits which may be very large for first iteration
         # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
@@ -44,7 +45,7 @@ class NaiveWrapper(WrapperBase):
             outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True)
         
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # (the clone itself is always small)
+            # We keep the seq_len axis considering cases of multiple tokens.
             next_token_logits = outputs.logits.clone()
             
             # This is needed to properly delete outputs.logits which may be very large for first iteration
@@ -54,7 +55,7 @@ class NaiveWrapper(WrapperBase):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
             
-            # * check stopping criteria
+            # Stopping criteria
             finished = stopping_criteria(input_ids, None)
             
         return input_ids

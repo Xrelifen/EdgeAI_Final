@@ -36,11 +36,11 @@ class WrapperBase(nn.Module):
         Simplified HuggingFace's `LogitsProcessorList` for multinomial sampling.
         This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsWarper`] instances
         used for multinomial sampling.
+        Visit https://github.com/huggingface/transformers/pull/5420/files for more details.
         """
-        # instantiate warpers list
+        # Instantiate warpers list
         warpers = LogitsProcessorList()
         
-        # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
         if temperature is not None and temperature != 1.0:
             warpers.append(TemperatureLogitsWarper(temperature))
         if top_k is not None and top_k != 0:
