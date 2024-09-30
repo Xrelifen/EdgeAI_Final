@@ -81,13 +81,13 @@ class SDWrapper(WrapperBase):
             total_len += 1
             accept_token_id, new_p = verify(global_p[cur.ind], cur.sample_probs, cur)
                     
-            # Stop loop if no token is accepted
+            # Accept token if it is in the children
             if accept_token_id:
                 accept_len += 1
                 sampled_tokens.append(accept_token_id)
                 hidden_indices.append(cur.ind)
                 cur = next(node for node in cur.children if node.id == accept_token_id)
-
+            # Reject token, update global_p and break
             else:
                 global_p[cur.ind] = new_p
                 break
