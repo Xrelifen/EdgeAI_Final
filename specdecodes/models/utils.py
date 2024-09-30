@@ -67,45 +67,6 @@ def get_residual(p: torch.Tensor, q:torch.Tensor):
     residual = (p - q).relu_()
     residual = residual / (residual.sum(dim=-1).unsqueeze(-1))
     return residual
-
-
-def verify_topk(p, q, node):
-    p = p.to(torch.float32)
-    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
-    for child_id in child_ids:
-        r = torch.rand(1).item()
-        if r <= p[child_id]:
-            return True, child_id.item()
-        
-        else:
-            p[child_id] = 0
-            p = p / p.sum()
-            
-    return False, p.multinomial(num_samples=1).item()
-   
-
-def verify_k(p, q, node):
-    p = p.to(torch.float32)
-    q = q.to(torch.float32)
-    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
-    tried_ids = torch.full_like(child_ids, -1)
-    for i, child_id in enumerate(child_ids):
-        r = torch.rand(1).item()
-        if p[child_id] > r*q[child_id]:
-            return True, child_id.item()
-        
-        else:
-            tried_ids[i] = child_id
-            p = get_residual(p, q)
-            
-            q[child_id] = 0
-            if q.sum() == 0:
-                q = torch.zeros_like(q)
-                q[child_ids] = 1
-                q[tried_ids[tried_ids != -1]] = 0
-            q = q / q.sum()
-            
-    return False, p.multinomial(num_samples=1).item() 
     
 
 class TreeDynamicCache(DynamicCache):

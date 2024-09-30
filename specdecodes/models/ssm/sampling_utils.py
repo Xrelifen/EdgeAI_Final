@@ -40,20 +40,22 @@ def topk_sampling(sampling_probs, nodes, num_samples, step):
     flattened_probs = global_probs.flatten()
     # Get the indices of the top k values
     topk_values, topk_indices = torch.topk(flattened_probs, num_samples)
-    prev_indices = topk_indices // vocab_dim
+    prev_ids = topk_indices // vocab_dim
     token_ids = topk_indices % vocab_dim
     
     #* Create nodes
     next_nodes = []
     last_node_id = int(nodes[-1].name)
-    for prev_ind, token_id, global_prob in zip(prev_indices, token_ids, topk_values):
-        prev_node = nodes[prev_ind]
-        prev_node.sample_probs = sampling_probs[prev_ind]
+    for prev_id, token_id, global_prob in zip(prev_ids, token_ids, topk_values):
+        prev_node = nodes[prev_id]
+        prev_node.sample_probs = sampling_probs[prev_id]
+        prev_node.verify_method = "greedy"
+        
         prob = global_prob / prev_node.global_prob
         # if prob < 1e-4 or global_prob < 1e-6:
             #     continue
         last_node_id += 1
-        new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_ind)
+        new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_id)
         next_nodes.append(new_node)
 
     return next_nodes
@@ -72,6 +74,7 @@ def k_sampling(sampling_probs, nodes, num_samples, step):
     last_node_id = int(nodes[-1].name)
     for prev_ind, prev_node in enumerate(nodes):
         prev_node.sample_probs = sampling_probs[prev_ind]
+        prev_node.verify_method = "stochastic"
         for i in range(parent_bin_counts[prev_ind]):
             token_id = sampled_indices[prev_ind][i]
             prob = sampled_probs[prev_ind][i]
@@ -85,7 +88,6 @@ def k_sampling(sampling_probs, nodes, num_samples, step):
     return next_nodes
 
 
-# not used, effect seems to be worse than k_sampling
 def heuristic_k_sampling(sampling_probs, nodes, num_samples, step):
     rand = torch.rand(sampling_probs.shape, device=sampling_probs.device)
     sampled_indices, sampled_probs = sampling_without_replacement(sampling_probs, rand=rand, num_samples=num_samples)
@@ -96,24 +98,84 @@ def heuristic_k_sampling(sampling_probs, nodes, num_samples, step):
     global_probs = sampling_probs * parent_probs
     flattened_probs = global_probs.flatten()
     # Get the indices of the top k values
-    _, topk_indices = torch.topk(flattened_probs, num_samples)
-    topk_bin_ids = topk_indices // vocab_dim  # Dividing by vocab_dim gives the bin index
-    parent_bin_counts = torch.bincount(topk_bin_ids, minlength=n)
+    topk_values, topk_indices = torch.topk(flattened_probs, num_samples)
+    prev_ids = topk_indices // vocab_dim  # Dividing by vocab_dim gives the bin index
+    # token_ids = topk_indices % vocab_dim
+    parent_bin_counts = torch.bincount(prev_ids, minlength=n)
     
     #* Create nodes
     next_nodes = []
     last_node_id = int(nodes[-1].name)
-    for prev_ind, prev_node in enumerate(nodes):
-        prev_node.sample_probs = sampling_probs[prev_ind]
-        for i in range(parent_bin_counts[prev_ind]):
-            token_id = sampled_indices[prev_ind][i]
-            prob = sampled_probs[prev_ind][i]
+    for prev_id, prev_node in enumerate(nodes):
+        prev_node.sample_probs = sampling_probs[prev_id]
+        prev_node.verify_method = "stochastic"
+        for i in range(parent_bin_counts[prev_id]):
+            token_id = sampled_indices[prev_id][i]
+            prob = sampled_probs[prev_id][i]
             global_prob = prob * prev_node.global_prob
             # if prob < 1e-4 or global_prob < 1e-6:
             #     continue
             last_node_id += 1
-            new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_ind)
+            new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_id)
             next_nodes.append(new_node) 
+    
+    return next_nodes
+
+
+def mixed_k_sampling(sampling_probs, nodes, num_samples, step):
+    rand = torch.rand(sampling_probs.shape, device=sampling_probs.device)
+    sampled_indices, sampled_probs = sampling_without_replacement(sampling_probs, rand=rand, num_samples=num_samples)
+
+    # Finding the top k tokens by childrens' global prob., assign how much tokens each parent node should sample
+    n, vocab_dim = sampling_probs.shape
+    parent_probs = torch.tensor([node.global_prob for node in nodes], dtype=sampling_probs.dtype, device=sampling_probs.device).unsqueeze(1)
+    global_probs = sampling_probs * parent_probs
+    flattened_probs = global_probs.flatten()
+    
+    # Get the indices of the top k values
+    topk_values, topk_indices = torch.topk(flattened_probs, num_samples)
+    prev_ids = topk_indices // vocab_dim
+    token_ids = topk_indices % vocab_dim
+    parent_bin_counts = torch.bincount(prev_ids, minlength=n)
+    
+    # not only count the number of tokens to sample, but also append the indices of the tokens
+    parent_bin_tokens = [ [] for _ in range(n) ]
+    for prev_id, token_id, global_prob in zip(prev_ids, token_ids, topk_values):
+        parent_bin_tokens[prev_id].append(token_id)
+        
+    #* Create nodes
+    next_nodes = []
+    last_node_id = int(nodes[-1].name)
+    for prev_id, prev_node in enumerate(nodes):
+        prev_node.sample_probs = sampling_probs[prev_id]
+        childs_to_sample = parent_bin_counts[prev_id]
+        if childs_to_sample == 0:
+            continue
+        
+        if childs_to_sample == 1:
+            prev_node.verify_method = "stochastic"
+            for i in range(parent_bin_counts[prev_id]):
+                token_id = sampled_indices[prev_id][i]
+                prob = sampled_probs[prev_id][i]
+                global_prob = prob * prev_node.global_prob
+                # if prob < 1e-4 or global_prob < 1e-6:
+                #     continue
+                last_node_id += 1
+                new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_id)
+                next_nodes.append(new_node) 
+        else:
+            prev_node.verify_method = "greedy"
+            for i in range(childs_to_sample):
+                token_id = parent_bin_tokens[prev_id][i]
+                global_prob = global_probs[prev_id][token_id]
+                prob = global_prob / prev_node.global_prob
+                # if prob < 1e-4 or global_prob < 1e-6:
+                #     continue
+                last_node_id += 1
+                new_node = Node(str(last_node_id), id=token_id.item(), prob=prob, global_prob=global_prob, ind=prev_id)
+                next_nodes.append(new_node)
+        
+            
     
     return next_nodes
   
