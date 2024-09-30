@@ -11,6 +11,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 
 from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
+import prettytable as pt
 
 from .verify_utils import verify_topk, verify_k, verify_deterministic, verify_fast
 from ..utils import TreeDynamicCache, build_tree_attention_data
@@ -278,66 +279,48 @@ class ProfileSDWrapper(SDWrapper):
         # run generation
         input_ids = super(ProfileSDWrapper, self)._generate(input_ids, stopping_criteria, logits_warper, do_sample)
         
-        # logging
+        
+        # compute stats
         total_sampled = self.sampled_count
         total_iterations = self.iter_count
         avg_sampled = total_sampled / total_iterations
-        logging.info(
-            f"Total sampled: {total_sampled},"\
-            f"\tTotal iterations: {total_iterations},"\
-            f"\tAverage sampled: {avg_sampled:.2f}"
-        )
-        
         depth = max(self.profile_data['total_len']) + 1
+        
+        # alpha (node)
         total_lens = torch.bincount( torch.tensor(self.profile_data['total_len']), minlength=depth)
         accept_lens = torch.bincount( torch.tensor(self.profile_data['accept_len']), minlength=depth)
         depth_total_cnt = total_lens + total_lens.sum() - total_lens.cumsum(dim=-1) # reverse cumsum
         depth_total_cnt = depth_total_cnt[1:] # remove first element
         depth_accept_cnt = accept_lens + accept_lens.sum() - accept_lens.cumsum(dim=-1) # reverse cumsum
         depth_accept_cnt = depth_accept_cnt[1:] # remove first element
-        
-        logging.info(
-            f"Depth trials count:\t{depth_total_cnt.tolist()}"
-        )
-        logging.info(
-            f"Depth accept count:\t{depth_accept_cnt.tolist()}"
-        )
-        
-        depth_total_cnt_rate = depth_total_cnt.float() / depth_total_cnt[0]
-        print_ratio_str = "Trials ratio:\t["
-        for i, val in enumerate(depth_total_cnt_rate.tolist()):
-            print_ratio_str += f"{val:.2f}"
-            if i < len(depth_total_cnt_rate) - 1:
-                print_ratio_str += ", "
-        print_ratio_str += "]"
-        logging.info(print_ratio_str)
-        
-        # alpha_per_node
         alpha_per_node = depth_accept_cnt.float() / depth_total_cnt.float()
-        print_alpha_str = "Alpha per node:\t["
-        for i, val in enumerate(alpha_per_node.tolist()):
-            print_alpha_str += f"{val:.2f}"
-            if i < len(alpha_per_node) - 1:
-                print_alpha_str += ", "
-        print_alpha_str += "]"
-        logging.info(print_alpha_str)
         
-        # alpha_per_depth
+        # aLive ratio
+        depth_alive_rate = depth_total_cnt.float() / depth_total_cnt[0]
+        
+        # alpha (depth)
         sampled_lens = torch.tensor([len(sampled_tokens) for sampled_tokens in self.profile_data["iter"]])
         sampled_len_bins = torch.bincount(sampled_lens, minlength=depth+1)
         depth_total_cnt = sampled_len_bins + sampled_len_bins.sum() - sampled_len_bins.cumsum(dim=-1) # reverse cumsum
         depth_accept_cnt = depth_total_cnt - sampled_len_bins
         depth_total_cnt = depth_total_cnt[1:depth]
         depth_accept_cnt = depth_accept_cnt[1:depth]
-            
         alpha_per_depth = depth_accept_cnt.float() / depth_total_cnt.float()
-        print_alpha_str = "Alpha per depth:\t["
-        for i, val in enumerate(alpha_per_depth.tolist()):
-            print_alpha_str += f"{val:.2f}"
-            if i < len(alpha_per_depth) - 1:
-                print_alpha_str += ", "
-        print_alpha_str += "]"
-        logging.info(print_alpha_str)
+        
+        # log stats
+        tb = pt.PrettyTable()
+        tb.field_names = [ "Summary \ Depth" ] + [ f"{i}" for i in range(1, depth) ]
+        tb.add_row([ "Trials count" ] + [ f"{val}" for val in depth_total_cnt.tolist() ])
+        tb.add_row([ "Accept count" ] + [ f"{val}" for val in depth_accept_cnt.tolist() ])
+        tb.add_row([ "Alpha (node)" ] + [ f"{val:.2f}" for val in alpha_per_node.tolist() ])
+        tb.add_row([ "Alpha (depth)" ] + [ f"{val:.2f}" for val in alpha_per_depth.tolist() ])
+        tb.add_row([ "Alive ratio" ] + [ f"{val:.2f}" for val in depth_alive_rate.tolist() ])
+        logging.info(
+            f"Total sampled: {total_sampled},"\
+            f"\tTotal iterations: {total_iterations},"\
+            f"\tAverage sampled: {avg_sampled:.2f}"\
+            f"\n{tb}"
+        )
         
         # save profile data
         self.profile_data["total_sampled"] = total_sampled
