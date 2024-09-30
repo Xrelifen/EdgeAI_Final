@@ -57,13 +57,13 @@ class SDWrapper(WrapperBase):
         # Assign verify method
         verify_method = root.verify_method
         if not do_sample or verify_method == "deterministic":
-            verify = verify_deterministic
+            verify_step = verify_deterministic
         elif verify_method == "fast":
-            verify = verify_fast
+            verify_step = verify_fast
         elif verify_method == "greedy":
-            verify = verify_topk
+            verify_step = verify_topk
         elif verify_method == "stochastic":
-            verify = verify_k
+            verify_step = verify_k
         else:
             raise ValueError(f"Unknown verify method: {verify_method}")
         
@@ -80,7 +80,7 @@ class SDWrapper(WrapperBase):
         cur = root
         while cur.children:
             total_len += 1
-            accept_token_id, new_p = verify(global_p[cur.ind], cur.sample_probs, cur)
+            accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur)
                     
             # Accept token if it is in the children
             if accept_token_id:
