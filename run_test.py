@@ -7,7 +7,7 @@ import os
 import logging
 
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed
+from specdecodes.models import SSM_Classic, SSM_Eagle
 
 
 def load_model(
@@ -36,46 +36,33 @@ def load_model(
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif mode == "sd":
+    elif mode == "sd-classic":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=None)
+        
+        # load SSM
+        ssm = SSM_Classic.from_pretrained(
+            ssm_path,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+        
+    elif mode == "sd-eagle":
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = layers
-        
-        if sd_method == "greedy":
-            ssm = SSM_Greedy.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "stochastic":
-            ssm = SSM_Stochastic.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "hstochastic":
-            ssm = SSM_HStochastic.from_pretrained(
-                ssm_path,
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "mixed":
-            ssm = SSM_Mixed.from_pretrained(
-                ssm_path,
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        else:
-            raise ValueError("Invalid method.")
-            
-        ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ssm = SSM_Eagle.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
     else:
         raise ValueError("Invalid mode.")
@@ -119,7 +106,8 @@ def main(args):
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    input_message = "What's the best way to start learning a new language?"
+    # input_message = "What's the best way to start learning a new language?"
+    input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?" # beyblade is the correct spelling
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},

@@ -26,11 +26,17 @@ class SDWrapper(WrapperBase):
         self.ssm = ssm
     
     def _speculate(self, inputs, past_key_values):
+        # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
+        if hasattr(self.ssm, "lm_head"):
+            lm_head = self.ssm.lm_head
+        else:
+            lm_head = self.llm.lm_head
+            
         return self.ssm.speculate(
             inputs,
             past_key_values=past_key_values,
             embed_tokens=self.llm.get_input_embeddings(), 
-            lm_head=self.llm.lm_head,
+            lm_head=lm_head,
         )
         
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
@@ -83,7 +89,7 @@ class SDWrapper(WrapperBase):
             accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur)
                     
             # Accept token if it is in the children
-            if accept_token_id:
+            if accept_token_id is not None:
                 accept_len += 1
                 sampled_tokens.append(accept_token_id)
                 hidden_indices.append(cur.ind)

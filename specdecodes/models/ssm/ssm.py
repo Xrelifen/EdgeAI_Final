@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from safetensors.torch import load_model
 import os
 
@@ -12,27 +13,33 @@ from ..llm import modeling_llama_no_layernorm as modeling_llama
 
 
 class SSMBase(nn.Module):
-    def __init__(self, config, eos_token_id=None):
+    def __init__(self, config, eos_token_id=None, sampling_method='greedy'):
         super().__init__()
         self.eos_token_id = eos_token_id
         self.config = config
+        self.init_sampling_method(sampling_method)
+         
+        self.depth = 9 + 1 # 6 + 1 # 9 + 1 
+        self.topk_len = 15 # 5 # 15
+        self.min_sample_prob = 1e-3
     
-    @classmethod
-    def from_pretrained(
-        cls, 
-        pretrained_model_name_or_path,
-        *model_args,
-        config,
-        torch_dtype=torch.float32,
-        **model_kwargs
-    ):
-        draft_model_path = os.path.join(
-            pretrained_model_name_or_path, "model.safetensors")
-        
-        model = cls(config, *model_args, **model_kwargs)
-        load_model(model, draft_model_path, strict=True)
-        model.to(dtype=torch_dtype)
-        return model
+    def init_sampling_method(self, sampling_method):
+        if sampling_method == 'greedy':
+            self.sample_nodes = topk_sampling
+        elif sampling_method == 'stochastic':
+            self.sample_nodes = k_sampling
+        elif sampling_method == 'hstochastic':
+            self.sample_nodes = heuristic_k_sampling
+        elif sampling_method == 'mixed':
+            def mixed_sampling(sampling_probs, nodes, num_samples, step):
+                SWITCH_STEP = 2
+                if step <= SWITCH_STEP:
+                    return topk_sampling(sampling_probs, nodes, num_samples, step)
+                else:
+                    return heuristic_k_sampling(sampling_probs, nodes, num_samples, step)
+            self.sample_nodes = mixed_sampling
+        else:
+            raise ValueError("Sampling method not supported")
     
     @torch.no_grad()
     def forward(self, inputs=[], **kwargs):
@@ -41,21 +48,7 @@ class SSMBase(nn.Module):
     @torch.no_grad()
     def speculate(self, inputs, past_key_values, **kwargs):
         raise NotImplementedError
-
-class SSM_EagleBase(SSMBase):
-    def __init__(self, config, eos_token_id=None):
-        super().__init__(config, eos_token_id)
         
-        model = modeling_llama.LlamaModel(config)
-        if hasattr(model, "embed_tokens"):
-            del model.embed_tokens
-
-        self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
-        self.model = model
-
-        self.depth = 9 + 1 # 6 + 1 # 9 + 1 
-        self.topk_len = 15 # 5 # 15
-    
     # Currently not used. This may be used to match LLM's sampling behavior.
     @torch.no_grad()
     def _sample_probs(
@@ -74,6 +67,161 @@ class SSM_EagleBase(SSMBase):
         
         else:
             return torch.softmax(logits, dim=-1)
+
+
+class SSM_Classic(SSMBase):
+    def __init__(self, model, *model_args, **model_kwargs):
+        super().__init__(model.config, *model_args, **model_kwargs)
+        self.model = model
+        
+    @classmethod
+    def from_pretrained(
+        cls, 
+        pretrained_model_name_or_path,
+        *model_args,
+        torch_dtype=torch.float32,
+        **model_kwargs
+    ):
+        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
+        eos_token_id = model_kwargs.pop("eos_token_id", None)
+        sampling_method = model_kwargs.pop("sampling_method", "greedy")
+        
+        # Load SSM
+        ssm = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path,
+            torch_dtype=torch_dtype,
+            **model_kwargs
+        )
+        
+        # Create the model
+        model = cls(ssm, eos_token_id, sampling_method, *model_args, **model_kwargs).to(dtype=torch_dtype)
+        model.to(dtype=torch_dtype)
+        return model
+    
+    @torch.no_grad()
+    def _update_tree_attention_data(self, depth, nodes, tree_mask, position_offset, device):
+        indices = torch.tensor([node.ind for node in nodes])
+        
+        input_ids = torch.tensor([node.id for node in nodes], device=device)[None]
+        
+        position_ids = torch.zeros(len(nodes), device=device)[None] + (position_offset + depth)
+        
+        # Generating tree masks for the new nodes, don't have to consider the old nodes
+        tree_mask = tree_mask[:, :, indices]
+        tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
+
+        return input_ids, position_ids, tree_mask
+    
+    def forward(self, input_ids, **kwargs):
+        return self.model(input_ids, **kwargs)
+    
+    @torch.no_grad()
+    def speculate(self, inputs, past_key_values, embed_tokens, lm_head):
+        """This method is used to draft/guess the next tokens that the LLM may generate.
+
+        Args:
+            inputs (list): A list of two tensors: hidden_states and input_ids.
+            past_key_values (Cache): Cache object to store the past key-values generated by the model.
+            embed_tokens (Module): embedding from LLM.
+            lm_head (Module): lm_head from LLM.
+
+        Returns:
+            Node: The root node of the generated draft token tree.
+        """
+        [_, input_ids] = inputs
+        
+        device = input_ids.device
+        
+        # take out last token as sample_token
+        sample_token = input_ids[:, -1:]
+        
+        # keep original length of input_ids
+        org_input_len = input_ids.shape[1] # offset of positon_id
+        
+        # initialize tree_mask and tree 
+        tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
+        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
+        
+        depth = 1 # depth starts from 1 in tree library
+        prev_nodes = [root]
+        while depth < self.depth:
+            #* Decode previous nodes
+            if depth == 1: # first iteration
+                kv_len = past_key_values.get_seq_length()
+                outputs = self(
+                    input_ids[:, kv_len:],
+                    past_key_values=past_key_values
+                )
+                logits = outputs.logits[:, -1:].clone() # Only the last token's hidden state is needed.
+            else:
+                input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, tree_mask, org_input_len, device=logits.device)
+                outputs = self(
+                    input_ids,
+                    past_key_values=past_key_values,
+                    position_ids=position_ids, 
+                    attention_mask=invert_mask(tree_mask, dtype=self.model.lm_head.weight.dtype)
+                )
+                logits = outputs.logits
+
+            # This is needed to properly delete outputs.logits which may be very large for first iteration
+            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+            del outputs
+
+            #* Get the probabilities of each token
+            T = 1
+            sampled_probs = torch.softmax(logits[0]/T, dim=-1)
+            
+            #* Sample/Select the next nodes
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
+
+            #* Append nodes to their parent nodes
+            for node in next_nodes:
+                prev_nodes[node.ind].append(node)
+ 
+            #* Get the nodes as input for next iteration
+            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
+            prev_nodes = next_nodes
+            
+            #* Depth increment
+            depth += 1
+            
+            #* Early stop if no nodes for next iteration
+            # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
+            if len(next_nodes) == 0:
+                break
+        
+        #* Crop the tree to the max_candidate_tokens
+        past_key_values.crop(org_input_len)
+        
+        return root
+    
+
+class SSM_Eagle(SSMBase):
+    def __init__(self, config, *model_args, **model_kwargs):
+        super().__init__(config, *model_args, **model_kwargs)
+        
+        model = modeling_llama.LlamaModel(config)
+        if hasattr(model, "embed_tokens"):
+            del model.embed_tokens
+        self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
+        self.model = model
+    
+    @classmethod
+    def from_pretrained(
+        cls, 
+        pretrained_model_name_or_path,
+        *model_args,
+        config,
+        torch_dtype=torch.float32,
+        **model_kwargs
+    ):
+        draft_model_path = os.path.join(
+            pretrained_model_name_or_path, "model.safetensors")
+        
+        model = cls(config, *model_args, **model_kwargs)
+        load_model(model, draft_model_path, strict=True)
+        model.to(dtype=torch_dtype)
+        return model
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset):
@@ -101,10 +249,6 @@ class SSM_EagleBase(SSMBase):
         return self.model(inputs_embeds=hidden_states, **kwargs)
     
     @torch.no_grad()
-    def _sample_nodes(sampled_probs, prev_nodes, num_sample, step):
-        raise NotImplementedError
-    
-    @torch.no_grad()
     def speculate(self, inputs, past_key_values, embed_tokens, lm_head):
         """This method is used to draft/guess the next tokens that the LLM may generate.
 
@@ -123,6 +267,8 @@ class SSM_EagleBase(SSMBase):
         
         # take out last token as sample_token
         sample_token = input_ids[:, -1:]
+        
+        # remove the first token from input_ids (input_ids is shifted by 1)
         input_ids = input_ids[:, 1:]
         
         # keep original length of input_ids
@@ -170,14 +316,14 @@ class SSM_EagleBase(SSMBase):
             sampled_probs = torch.softmax(lm_head(hidden_states)[0]/T, dim=-1)
             
             #* Sample/Select the next nodes
-            next_nodes = self._sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
 
             #* Append nodes to their parent nodes
             for node in next_nodes:
                 prev_nodes[node.ind].append(node)
  
             #* Get the nodes as input for next iteration
-            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id] # don't sample nodes after eos_token_id
+            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
             prev_nodes = next_nodes
             
             #* Depth increment
@@ -192,45 +338,3 @@ class SSM_EagleBase(SSMBase):
         past_key_values.crop(org_input_len)
         
         return root
-
-class SSM_Greedy(SSM_EagleBase):
-    def __init__(self, config, eos_token_id=None):
-        super().__init__(config, eos_token_id)
-
-    @torch.no_grad()
-    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
-        return next_nodes
-
-class SSM_Stochastic(SSM_EagleBase):
-    def __init__(self, config, eos_token_id=None):
-        super().__init__(config, eos_token_id)
-
-    @torch.no_grad()
-    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
-        return next_nodes
-
-class SSM_HStochastic(SSM_EagleBase):
-    def __init__(self, config, eos_token_id=None):
-        super().__init__(config, eos_token_id)
-
-    @torch.no_grad()
-    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        next_nodes = heuristic_k_sampling(sampled_probs, prev_nodes, num_samples, step)
-        return next_nodes
-
-class SSM_Mixed(SSM_EagleBase):
-    def __init__(self, config, eos_token_id=None):
-        super().__init__(config, eos_token_id)
-
-    @torch.no_grad()
-    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        SWITCH_STEP = 2
-        if step <= SWITCH_STEP:
-            next_nodes = topk_sampling(sampled_probs, prev_nodes, num_samples, step)
-        else:
-            # next_nodes = heuristic_k_sampling(sampled_probs, prev_nodes, num_samples, step)
-            next_nodes = mixed_k_sampling(sampled_probs, prev_nodes, num_samples, step)
-            
-        return next_nodes

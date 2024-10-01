@@ -15,15 +15,21 @@ from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_wi
 from transformers.cache_utils import StaticCache, DynamicCache
 
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import set_seed, release_memory
 
 from tqdm import tqdm
 from copy import deepcopy
 import wandb
 
 from ..models.llm import modeling_llama_no_layernorm as modeling_llama
-from ..models import SSM_Greedy
+from ..models import SSM_Eagle
 
+
+# similar effect as release_memory
+# def flush():
+#   gc.collect()
+#   torch.cuda.empty_cache()
+#   torch.cuda.reset_peak_memory_stats()
 
 class AddGaussianNoise:
     def __init__(self, mean=0.0, std=0.0):
@@ -580,10 +586,10 @@ def main(args):
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         print("Loading pretrained model...")
-        model = SSM_Greedy.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config)
     else:
         print("Loading draft model...")
-        model = SSM_Greedy(draft_config)
+        model = SSM_Eagle(draft_config)
     
     # load llm's last attention layer's data to draft model
     # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
@@ -593,12 +599,8 @@ def main(args):
         
     # Manually free up memory before loading pretrained model
     print(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
-    llm.lm_head = None
-    llm.set_input_embeddings(None)
-    llm.model = None
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
+    release_memory()
     print(f'GPU memory after freeing llm: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
 
     # Calculate the number of update steps per epoch  https://github.com/huggingface/diffusers/pull/6143/files
