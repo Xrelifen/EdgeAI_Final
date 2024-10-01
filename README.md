@@ -26,7 +26,7 @@ CUDA_VISIBLE_DEVICES=0 python -m specdecodes.benchmark.llm_judge.gen_sd_answer -
 ### 1. Generate Dataset
 
 ```bash
-python -m train.data_gen.allocation --gpu_index 0
+python -m train.data_gen.allocation --gpu_index 0 --outdir <dataset save location>
 ```
 
 ### 2. Train SSM
