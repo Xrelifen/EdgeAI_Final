@@ -21,15 +21,8 @@ from tqdm import tqdm
 from copy import deepcopy
 import wandb
 
-from ..models.llm import modeling_llama_no_layernorm as modeling_llama
 from ..models import SSM_Classic
 
-
-# similar effect as release_memory
-# def flush():
-#   gc.collect()
-#   torch.cuda.empty_cache()
-#   torch.cuda.reset_peak_memory_stats()
 
 class AddGaussianNoise:
     def __init__(self, mean=0.0, std=0.0):
@@ -489,8 +482,8 @@ def main(args):
         "p_w": 0.1,
         "v_w": 1.0,
         "num_workers": 4,
-        # "data_noise": True,
-        "data_noise": False,
+        "data_noise": True,
+        # "data_noise": False,
         "noise": "uniform",
         "mean": 0.0,
         "std": 0.2,
@@ -584,6 +577,11 @@ def main(args):
     else:
         print("Loading draft model...")
         model = SSM_Classic(config=draft_config)
+    
+    # load llm's embeddings to draft model
+    for param, llm_param in zip(model.model.embed_tokens.parameters(), llm.get_input_embeddings().parameters()):
+        param.data = llm_param.data
+        param.requires_grad = False
     
     # load llm's last attention layer's data to draft model
     # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
