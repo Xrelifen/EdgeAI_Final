@@ -159,8 +159,7 @@ def getkacc(model, data, lm_head, embed_tokens, max_length=5):
         past_key_values = DynamicCache()
         for i in range(max_length):
             outputs = model(
-                hidden_states, 
-                input_ids=input_ids if i == 0 else token,
+                inputs=[hidden_states, input_ids if i == 0 else token],
                 embed_tokens=embed_tokens, 
                 past_key_values=past_key_values, 
                 use_cache=True
@@ -381,7 +380,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
             with torch.no_grad():
                 t_logits = data["target"] # data["target"] = data["hidden_states"][:, 1:]
                 t_out = lm_head(t_logits.to(lm_head.weight.dtype))
-            s_logits = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+            s_logits = model(inputs=[data["hidden_states"], data["input_ids"]], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
             s_out = lm_head(s_logits)
             
             loss, ploss, vloss = calculate_loss(data["loss_mask"], s_logits, t_logits, s_out, t_out, train_config)
@@ -438,7 +437,7 @@ def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num
                 k_acc[i].append(acces[i])
 
         # Forward pass
-        s_logit = model(data["hidden_states"], input_ids=data["input_ids"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+        s_logit = model(inputs=[data["hidden_states"], data["input_ids"]], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
         t_logit = data["target"]
 
         # Head computation
@@ -589,7 +588,7 @@ def main(args):
         model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config)
     else:
         print("Loading draft model...")
-        model = SSM_Eagle(draft_config)
+        model = SSM_Eagle(config=draft_config)
     
     # load llm's last attention layer's data to draft model
     # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
@@ -637,12 +636,13 @@ def main(args):
         )
         
         # Validate
-        if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
-            validate(
-                model, lm_head, embed_tokens,
-                test_loader, train_config, 
-                epoch, args.epochs, args.savedir, accelerator, run
-            )
+        if not args.no_validate:
+            if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
+                validate(
+                    model, lm_head, embed_tokens,
+                    test_loader, train_config, 
+                    epoch, args.epochs, args.savedir, accelerator, run
+                )
 
     # Finish
     if accelerator.is_main_process:
@@ -665,6 +665,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4) #1e-2 too large, loss becomes nan when lr>3e-4
     parser.add_argument('--weight-decay', type=float, default=1e-2) # from paper: 1e-3
     parser.add_argument('--betas', type=float, default=(0.9, 0.95))  # from paper: (0.95, 0.5)
+    
+    parser.add_argument('--no-validate', '-nv', action='store_true', help='Skip validation')
     
     # logging
     parser.add_argument('--wandb', action='store_true')

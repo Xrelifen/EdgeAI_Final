@@ -13,15 +13,66 @@ from ..llm import modeling_llama_no_layernorm as modeling_llama
 
 
 class SSMBase(nn.Module):
-    def __init__(self, config, eos_token_id=None, sampling_method='greedy'):
+    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
         super().__init__()
+        
+        # Set model and config
+        if model is not None and config is not None:
+            raise ValueError("Only one of model or config must be provided.")   
+        
+        elif model is not None:
+            self.model = model
+            self.config = model.config
+            
+        elif config is not None:
+            model = modeling_llama.LlamaModel(config)
+            self.model = model
+            self.config = config
+            
+        else:
+            raise ValueError("Either model or config must be provided.")
+        
+        # Set other attributes
         self.eos_token_id = eos_token_id
-        self.config = config
         self.init_sampling_method(sampling_method)
          
         self.depth = 9 + 1 # 6 + 1 # 9 + 1 
         self.topk_len = 15 # 5 # 15
         self.min_sample_prob = 1e-3
+        
+    @classmethod
+    def from_pretrained(
+        cls, 
+        pretrained_model_name_or_path,
+        *model_args,
+        config = None,
+        torch_dtype=torch.float32,
+        **model_kwargs
+    ):
+        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
+        eos_token_id = model_kwargs.pop("eos_token_id", None)
+        sampling_method = model_kwargs.pop("sampling_method", "greedy")
+        
+        # Load HuggingFace model if config is not provided
+        if config is not None: 
+            draft_model_path = os.path.join(
+            pretrained_model_name_or_path, "model.safetensors")
+        
+            model = cls(None, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
+            load_model(model, draft_model_path, strict=True)
+            model.to(dtype=torch_dtype)
+            return model
+        
+        else:
+            ssm = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                **model_kwargs
+            )
+            
+            model = cls(ssm, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs).to(dtype=torch_dtype)
+            model.to(dtype=torch_dtype)
+            return model
     
     def init_sampling_method(self, sampling_method):
         if sampling_method == 'greedy':
@@ -42,7 +93,7 @@ class SSMBase(nn.Module):
             raise ValueError("Sampling method not supported")
     
     @torch.no_grad()
-    def forward(self, inputs=[], **kwargs):
+    def forward(self, inputs, *model_args, **kwargs):
         raise NotImplementedError
     
     @torch.no_grad()
@@ -70,33 +121,12 @@ class SSMBase(nn.Module):
 
 
 class SSM_Classic(SSMBase):
-    def __init__(self, model, *model_args, **model_kwargs):
-        super().__init__(model.config, *model_args, **model_kwargs)
-        self.model = model
-        
-    @classmethod
-    def from_pretrained(
-        cls, 
-        pretrained_model_name_or_path,
-        *model_args,
-        torch_dtype=torch.float32,
-        **model_kwargs
-    ):
-        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
-        eos_token_id = model_kwargs.pop("eos_token_id", None)
-        sampling_method = model_kwargs.pop("sampling_method", "greedy")
-        
-        # Load SSM
-        ssm = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path,
-            torch_dtype=torch_dtype,
-            **model_kwargs
-        )
-        
-        # Create the model
-        model = cls(ssm, eos_token_id, sampling_method, *model_args, **model_kwargs).to(dtype=torch_dtype)
-        model.to(dtype=torch_dtype)
-        return model
+    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
+        super().__init__(model=model, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
+    
+    def forward(self, input_ids, *model_args, **kwargs):
+        _ = kwargs.pop("embed_tokens", None)
+        return self.model(input_ids, *model_args, **kwargs)
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, tree_mask, position_offset, device):
@@ -111,9 +141,6 @@ class SSM_Classic(SSMBase):
         tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
 
         return input_ids, position_ids, tree_mask
-    
-    def forward(self, input_ids, **kwargs):
-        return self.model(input_ids, **kwargs)
     
     @torch.no_grad()
     def speculate(self, inputs, past_key_values, embed_tokens, lm_head):
@@ -197,31 +224,22 @@ class SSM_Classic(SSMBase):
     
 
 class SSM_Eagle(SSMBase):
-    def __init__(self, config, *model_args, **model_kwargs):
-        super().__init__(config, *model_args, **model_kwargs)
+    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
+        super().__init__(model=model, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
         
-        model = modeling_llama.LlamaModel(config)
-        if hasattr(model, "embed_tokens"):
-            del model.embed_tokens
-        self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
-        self.model = model
-    
-    @classmethod
-    def from_pretrained(
-        cls, 
-        pretrained_model_name_or_path,
-        *model_args,
-        config,
-        torch_dtype=torch.float32,
-        **model_kwargs
-    ):
-        draft_model_path = os.path.join(
-            pretrained_model_name_or_path, "model.safetensors")
+        self.fc = nn.Linear(self.config.hidden_size*2, self.config.hidden_size, bias=True)
+        if hasattr(self.model, "embed_tokens"):
+            del self.model.embed_tokens
         
-        model = cls(config, *model_args, **model_kwargs)
-        load_model(model, draft_model_path, strict=True)
-        model.to(dtype=torch_dtype)
-        return model
+    def forward(self, inputs, *model_args, **kwargs):
+        [hidden_states, input_ids] = inputs
+        embed_tokens = kwargs.pop("embed_tokens", None)
+        
+        with torch.no_grad():
+            inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
+            
+        hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset):
@@ -239,14 +257,6 @@ class SSM_Eagle(SSMBase):
         tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
 
         return input_hidden, input_ids, position_ids, tree_mask
-    
-    def forward(self, inputs, embed_tokens, **kwargs):
-        [hidden_states, input_ids] = inputs
-        with torch.no_grad():
-            inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
-            
-        hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
-        return self.model(inputs_embeds=hidden_states, **kwargs)
     
     @torch.no_grad()
     def speculate(self, inputs, past_key_values, embed_tokens, lm_head):

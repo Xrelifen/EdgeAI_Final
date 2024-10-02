@@ -29,6 +29,12 @@ def load_model(
         low_cpu_mem_usage=True,
         device_map=device
     )
+    # check if ssm_path directory exists
+    if os.path.exists(ssm_path):
+        draft_config = deepcopy(llm.config)
+        draft_config.num_hidden_layers = layers
+    else:
+        draft_config = None
 
     if mode == "naive":
         model = NaiveWrapper()
@@ -43,6 +49,7 @@ def load_model(
         # load SSM
         ssm = SSM_Classic.from_pretrained(
             ssm_path,
+            config=draft_config,
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
@@ -54,8 +61,6 @@ def load_model(
         model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
-        draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = layers
         ssm = SSM_Eagle.from_pretrained(
             ssm_path,
             config=draft_config,
