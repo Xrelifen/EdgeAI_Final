@@ -9,8 +9,8 @@ from bigtree import Node
 
 from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling, mixed_k_sampling
 from ..utils import invert_mask
-from ..llm import modeling_llama_no_layernorm as modeling_llama
-
+# from ..llm import modeling_llama_no_layernorm as modeling_llama
+from ..llm import modeling_llama_no_init_weights as modeling_llama
 
 class SSMBase(nn.Module):
     def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
