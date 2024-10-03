@@ -22,6 +22,7 @@ from copy import deepcopy
 import wandb
 
 from ..models import SSM_Classic
+# from liger_kernel.transformers import apply_liger_kernel_to_llama
 
 
 class AddGaussianNoise:
@@ -213,73 +214,25 @@ def update_metrics(loss_mask, s_out, t_out, correct, total, topk_acc):
     correct += ((predicted == targeted) * loss_mask).sum().item()
     total += loss_mask.sum().item()
     
+    # Calculate expectation
+    p_t = F.softmax(t_out, dim=-1)
+    p_s = F.softmax(s_out, dim=-1)
+    expect = torch.sum(p_t * p_s, dim=-1).mean()
+    
+    # Calculate top-k accuracy
     s_out = s_out.view(-1, t_out.shape[-1])[loss_mask.view(-1)]
     targeted = targeted.view(-1)[loss_mask.view(-1)]
     temp_top_acc = top_accuracy(s_out, targeted, (1, 2, 3))
     for idx, top_i in enumerate(temp_top_acc):
         topk_acc[idx] += top_i
 
-    return correct, total
-
-
-@torch.no_grad()
-def gather_metrics(correct, total, topk_acc, accelerator):
-    device = accelerator.device
-    correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
-    correct, total = accelerator.gather_for_metrics((correct, total))
-    correct, total = correct.sum().item(), total.sum().item()
-    topk_acc = accelerator.gather_for_metrics(topk_acc)
-    return correct, total, topk_acc
+    return expect, correct, total
 
 def aggr_mean_loss(mask, loss):
     return torch.sum(torch.mean(mask.unsqueeze(-1) * loss, 2)) / (mask.sum() + 1e-5)
 
 def aggr_sum_loss(mask, loss):
     return torch.sum(torch.sum(mask.unsqueeze(-1) * loss, 2)) / (mask.sum() + 1e-5)
-
-# def calc_kl_loss(mask, s_logits, t_logits):
-#     with torch.no_grad():
-#         t_logits = F.softmax(t_logits[mask], dim=-1)
-#     s_logits = F.log_softmax(s_logits[mask], dim=-1)
-#     loss = F.kl_div(s_logits, t_logits, reduction='batchmean')
-#     return loss
-
-# def calc_skl_loss(mask, s_logits, t_logits, alpha=0.1):
-#     with torch.no_grad():
-#         t_logits = F.softmax(t_logits[mask], dim=-1)
-#     s_logits = s_logits[mask]
-#     t_logits = alpha * t_logits + (1 - alpha) * F.softmax(s_logits, dim=-1)
-#     s_logits = F.log_softmax(s_logits, dim=-1)
-#     loss = F.kl_div(s_logits, t_logits, reduction='batchmean')
-#     return loss
-
-# def calc_tvdpp_loss(mask, s_logits, t_logits):
-#     s_logits = F.softmax(s_logits[mask], dim=-1)
-#     with torch.no_grad():
-#         t_logits = F.softmax(t_logits[mask], dim=-1)
-#         reward = torch.as_tensor((t_logits-s_logits) > 0, dtype=torch.float32)
-#         std = torch.std(reward, dim=-1, keepdim=True)
-#         mean = torch.mean(reward, dim=-1, keepdim=True)
-#         reward = (reward - mean) / (std + 1e-5)
-    
-#     policy_loss = torch.log(s_logits) * -reward
-#     policy_loss = policy_loss.mean(dim=-1).mean(dim=-1)
-#     return policy_loss
-
-# def calc_tvd_loss(mask, s_logits, t_logits):
-#     with torch.no_grad():
-#         t_logits = t_logits[mask]
-#         t_logits = F.softmax(t_logits, dim=-1)
-#     s_logits = s_logits[mask]
-#     s_logits = F.softmax(s_logits, dim=-1)
-    
-#     loss = F.l1_loss(s_logits, t_logits, reduction='batchmean') * 0.5
-#     return loss
-
-# def calc_l1_loss(mask, s_logits, t_logits):
-#     loss = F.l1_loss(s_logits[mask], t_logits[mask], reduction='mean')
-#     loss = aggr_mean_loss(mask, loss)
-#     return loss
 
 def calc_kl_loss(mask, s_logits, t_logits):
     with torch.no_grad():
@@ -307,7 +260,7 @@ def calc_skl_loss(mask, s_logits, t_logits, alpha=0.1):
     loss = aggr_sum_loss(mask, loss)
     return loss
 
-def calc_reverse_kl_loss(mask, s_logits, t_logits):
+def calc_rkl_loss(mask, s_logits, t_logits):
     with torch.no_grad():
         t_logits = F.log_softmax(t_logits, dim=-1)
     s_logits = F.softmax(s_logits, dim=-1)
@@ -326,7 +279,6 @@ def calc_tvdpp_loss(mask, s_logits, t_logits):
         reward = (reward - mean) / (std + 1e-5)
     
     policy_loss = torch.log(s_logits) * -reward
-    # policy_loss = policy_loss.mean(dim=-1).mean(dim=-1)
     policy_loss = aggr_mean_loss(mask, policy_loss)
     
     return policy_loss
@@ -355,14 +307,16 @@ def calc_l1_loss(mask, s_logits, t_logits):
     return loss
 
 def calculate_loss(loss_mask, s_logits, t_logits, s_out, t_out, train_config):
-    ploss = calc_kl_loss_with_temp(loss_mask, s_out, t_out, temp=1)
-    vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
-    loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
+    ploss = calc_kl_loss(loss_mask, s_out, t_out)
+    # vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
+    # vloss = calc_skl_loss(loss_mask, s_logits, t_logits)
+    loss = ploss#train_config["p_w"] * ploss + train_config["v_w"] * vloss
     
-    return loss, ploss, vloss
+    return loss, ploss, ploss#vloss
 
 def train_one_epoch(model, lm_head, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
+    device = accelerator.device
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
 
@@ -382,14 +336,15 @@ def train_one_epoch(model, lm_head, train_loader, optimizer, scheduler, train_co
             scheduler.step()
 
         prev_total = total
-        correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
+        expect, correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
         if accelerator.is_main_process and (idx % train_config["log_freq"] == 0) and total > prev_total and run:
             logdict = {
                 "train/lr": optimizer.optimizer.param_groups[0]["lr"], 
                 "train/vloss": vloss.item(),
                 "train/ploss": ploss.item(), 
                 "train/loss": loss.item(), 
-                "train/acc": correct / total
+                "train/acc": correct / total,
+                "train/expect": expect.item()
             }
             for id, acc in enumerate(topk_acc):
                 logdict[f'train/top_{id + 1}_acc'] = acc.item() / total
@@ -397,7 +352,15 @@ def train_one_epoch(model, lm_head, train_loader, optimizer, scheduler, train_co
         epoch_loss += loss.item()
         num_batches += 1
 
-    correct, total, topk_acc = gather_metrics(correct, total, topk_acc, accelerator)
+    # gather metrics
+    correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
+    correct, total = accelerator.gather_for_metrics((correct, total))
+    expect = accelerator.gather_for_metrics(expect)
+    topk_acc = accelerator.gather_for_metrics(topk_acc)
+    
+    expect = expect.mean().item()
+    correct = correct.sum().item()
+    total = total.sum().item()
     epoch_loss /= num_batches
 
     if accelerator.is_local_main_process and run:
@@ -405,7 +368,8 @@ def train_one_epoch(model, lm_head, train_loader, optimizer, scheduler, train_co
         print(f'Train Accuracy: {100 * correct / total:.2f}%')
         logdict = {
             "train/epochacc": correct / total, 
-            "train/epochloss": epoch_loss
+            "train/epochloss": epoch_loss,
+            "train/epochexpect": expect,
         }
         for id, acc in enumerate(topk_acc):
             logdict[f'train/epochtop_{id + 1}_acc'] = acc.sum().item() / total
@@ -418,16 +382,8 @@ def validate(model, lm_head, test_loader, train_config, epoch, num_epochs, save_
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
     topk_acc = [0] * 3
-    k_acc_max_length = 5
-    k_acc = [[] for _ in range(k_acc_max_length)]
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
-        # Calculate k-accuracy for the first 10 batches
-        if batch_idx < 10:
-            acces = getkacc(model, data, lm_head, max_length=k_acc_max_length)
-            for i in range(len(acces)):
-                k_acc[i].append(acces[i])
-
         # Forward pass
         s_logit = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
         t_logit = data["target"]
@@ -440,16 +396,19 @@ def validate(model, lm_head, test_loader, train_config, epoch, num_epochs, save_
         loss, ploss, vloss = calculate_loss(data["loss_mask"], s_logit, t_logit, s_out, t_out, train_config)
 
         # Update metrics
-        correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
+        expect, correct, total = update_metrics(data["loss_mask"], s_out, t_out, correct, total, topk_acc)
         epoch_loss += loss.item()
         num_batches += 1
 
-    # Compute mean accuracy
-    mean_acces = [torch.tensor(np.array(i).mean(), device=device) for i in k_acc]
-    mean_acces = accelerator.gather_for_metrics(mean_acces)
-    
     # gather metrics
-    correct, total, topk_acc = gather_metrics(correct, total, topk_acc, accelerator)
+    correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
+    correct, total = accelerator.gather_for_metrics((correct, total))
+    expect = accelerator.gather_for_metrics(expect)
+    topk_acc = accelerator.gather_for_metrics(topk_acc)
+    
+    expect = expect.mean().item()
+    correct = correct.sum().item()
+    total = total.sum().item()
     epoch_loss /= num_batches
 
     # Log and save model
@@ -461,9 +420,9 @@ def validate(model, lm_head, test_loader, train_config, epoch, num_epochs, save_
             "test/epochloss": epoch_loss,
             "test/ploss": ploss.item(),
             "test/vloss": vloss.item(),
+            "test/expect": expect,
         }
-        for id, acc in enumerate(mean_acces):
-            logdict[f'test/{id}_acc'] = acc.mean().item()
+
         for id, acc in enumerate(topk_acc):
             logdict[f'test/top_{id + 1}_acc'] = acc.sum().item() / total
         run.log(logdict)
@@ -542,7 +501,7 @@ def main(args):
 
 
     # load head
-    print("Lodaing head...")
+    print("Loading head...")
     config = AutoConfig.from_pretrained(args.llm_path)
     llm = LlamaForCausalLM.from_pretrained(
         config=config,
@@ -583,11 +542,20 @@ def main(args):
         param.data = llm_param.data
         param.requires_grad = False
     
-    # load llm's last attention layer's data to draft model
-    # load_index = -1 # model.model.layers[-1].self_attn = llm.model.layers[-1].self_attn
+    # apply liger kernel to ssm model (however causes error during training, not sure why)
+    # apply_liger_kernel_to_llama(model=model.model)
+    
+    # load llm's last attention layer's data to draft model (not trainable)
+    # load_index = -1
     # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
     #     draft_param.data = llm_param.data
-    #     # draft_param.requires_grad = False
+    #     draft_param.requires_grad = False
+    
+    # # load llm's first layer's data to draft model
+    # load_index = 0
+    # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
+    #     draft_param.data = llm_param.data
+    #     draft_param.requires_grad = False
         
     # Manually free up memory before loading pretrained model
     print(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
