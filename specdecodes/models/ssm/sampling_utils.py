@@ -33,7 +33,7 @@ def balls_to_bins(
     return sampled_bin_counts
 
 
-def topk_sampling(sampling_probs, nodes, num_samples, step, min_accept_prob=1e-4):
+def topk_sampling(sampling_probs, nodes, num_samples, step, min_accept_prob=1e-8):
     n, vocab_dim = sampling_probs.shape
     parent_probs = torch.tensor([node.global_prob for node in nodes], dtype=sampling_probs.dtype, device=sampling_probs.device).unsqueeze(1)
     global_probs = sampling_probs * parent_probs # Multiply by parent's prob to get global prob
