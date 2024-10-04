@@ -25,7 +25,7 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, inputs, past_key_values):
+    def _speculate(self, input_ids, hidden_states, past_key_values):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
@@ -33,7 +33,8 @@ class SDWrapper(WrapperBase):
             lm_head = self.llm.lm_head
             
         return self.ssm.speculate(
-            inputs,
+            input_ids,
+            hidden_states=hidden_states,
             past_key_values=past_key_values,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
@@ -147,6 +148,7 @@ class SDWrapper(WrapperBase):
 
         # * prefill stage
         outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
+        
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
         # We keep the seq_len axis considering cases of multiple tokens.
@@ -163,7 +165,7 @@ class SDWrapper(WrapperBase):
         finished = False
         while not finished:
             # * speculate
-            root = self._speculate([hidden_states, input_ids], ssm_past_key_values)
+            root = self._speculate(input_ids, hidden_states, ssm_past_key_values)
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()

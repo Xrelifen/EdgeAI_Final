@@ -153,7 +153,8 @@ def getkacc(model, data, lm_head, embed_tokens, max_length=5):
         past_key_values = DynamicCache()
         for i in range(max_length):
             outputs = model(
-                inputs=[hidden_states, input_ids if i == 0 else token],
+                input_ids if i == 0 else token,
+                hidden_states=hidden_states,
                 embed_tokens=embed_tokens, 
                 past_key_values=past_key_values, 
                 use_cache=True
@@ -318,9 +319,9 @@ def calc_l1_loss(mask, s_logits, t_logits):
     return loss
 
 def calculate_loss(loss_mask, s_logits, t_logits, s_out, t_out, train_config):
-    ploss = calc_kl_loss_with_temp(loss_mask, s_out, t_out, temp=1)
+    ploss = calc_kl_loss(loss_mask, s_out, t_out)
     vloss = calc_l1_loss(loss_mask, s_logits, t_logits)
-    loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss
+    loss = train_config["p_w"] * ploss + train_config["v_w"] * vloss 
     
     return loss, ploss, vloss
 
@@ -336,7 +337,7 @@ def train_one_epoch(model, lm_head, embed_tokens, train_loader, optimizer, sched
             with torch.no_grad():
                 t_logits = data["target"] # data["target"] = data["hidden_states"][:, 1:]
                 t_out = lm_head(t_logits.to(lm_head.weight.dtype))
-            s_logits = model(inputs=[data["hidden_states"], data["input_ids"]], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+            s_logits = model(data["input_ids"], hidden_states=data["hidden_states"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
             s_out = lm_head(s_logits)
             
             loss, ploss, vloss = calculate_loss(data["loss_mask"], s_logits, t_logits, s_out, t_out, train_config)
@@ -395,7 +396,7 @@ def validate(model, lm_head, embed_tokens, test_loader, train_config, epoch, num
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
         # Forward pass
-        s_logit = model(inputs=[data["hidden_states"], data["input_ids"]], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
+        s_logit = model(data["input_ids"], hidden_states=data["hidden_states"], embed_tokens=embed_tokens, attention_mask=data["attention_mask"])[0]
         t_logit = data["target"]
 
         # Head computation
