@@ -1,13 +1,13 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from copy import deepcopy
 import argparse
 import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
+from specdecodes.models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed, SSM_SX
 
 
 def load_model(
@@ -87,6 +87,41 @@ def load_model(
     
     return model, tokenizer
 
+def load_offload_model(
+    llm_path: str,
+    ssm_path: str,
+    mode: str,
+    sd_method: str,
+    dtype: torch.dtype = torch.float16,
+    device="cuda:0"    
+):
+    # Load Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
+
+    if mode == "naive":
+        model = NaiveWrapper()
+
+    elif mode == "sd":
+
+        draft_config = AutoConfig.from_pretrained(ssm_path)
+        ssm = SSM_SX.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        )
+        ssm = ssm.to(device)
+
+        # Load offload model
+        model = OffloadSDWrapper()
+        model.set_ssm(ssm)
+        model.set_tokenizer(tokenizer)
+        model.set_offload_llm(llm_path)
+
+    model.eval()
+
+    return model, tokenizer
+
 def main(args):
     
     # set logging level by environment variable
@@ -98,7 +133,10 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
+    if args.offload:
+        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
+    else:
+        model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
 
     # warm up
     if not args.no_warm_up:
@@ -119,7 +157,8 @@ def main(args):
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    input_message = "What's the best way to start learning a new language?"
+    # input_message = "What's the best way to start learning a new language?"
+    input_message = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},
@@ -226,6 +265,12 @@ if __name__ == "__main__":
         type=int,
         default=42,
         help="Random seed.",
+    )
+    parser.add_argument(
+        "-o",
+        "--offload",
+        action="store_true",
+        help="Offload target model"
     )
     args = parser.parse_args()
     
