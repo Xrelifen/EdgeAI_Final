@@ -110,12 +110,13 @@ def load_offload_model(
 
     elif mode == "sd":
 
-        draft_config = AutoConfig.from_pretrained(ssm_path)
+        # draft_config = AutoConfig.from_pretrained(ssm_path)
         ssm = SSM_SX.from_pretrained(
             ssm_path,
-            config=draft_config,
+            # config=draft_config,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
+            sampling_method="greedy",
         )
         ssm = ssm.to(device)
 
