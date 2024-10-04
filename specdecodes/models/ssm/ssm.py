@@ -497,13 +497,11 @@ class SSM_SharedKV(SSM_Classic):
         return root
 
 class SSM_SX(SSMBase):
-    def __init__(self, ssm_path, config, eos_token_id=None, torch_dtype=torch.float16):
-        super().__init__(config, eos_token_id)
+    def __init__(self, ssm, config, eos_token_id=None, torch_dtype=torch.float16, sampling_method="greedy", *model_args, **model_kwargs):
+        super().__init__(ssm, config, eos_token_id, sampling_method, *model_args, **model_kwargs)
 
-        self.model = AutoModelForCausalLM.from_pretrained(ssm_path, torch_dtype=torch_dtype)
-        self.verify_method = "stochastic"
         self.budget = 64
-        self.depth = 10
+        self.depth = 12
         self.topk_len = 16
 
     @classmethod
@@ -511,12 +509,12 @@ class SSM_SX(SSMBase):
         cls, 
         pretrained_model_name_or_path,
         *model_args,
-        config,
+        config=None,
         torch_dtype=torch.float16,
         **model_kwargs
     ):
-
-        model = cls(pretrained_model_name_or_path, config, torch_dtype=torch_dtype, *model_args, **model_kwargs)
+        ssm = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, torch_dtype=torch_dtype)
+        model = cls(ssm, config, torch_dtype=torch_dtype, *model_args, **model_kwargs)
         return model
 
     @torch.no_grad()
@@ -561,11 +559,6 @@ class SSM_SX(SSMBase):
         )
 
         return outputs
-
-    @torch.no_grad()
-    def _sample_nodes(self, sampled_probs, prev_nodes, num_samples, step):
-        next_nodes = k_sampling(sampled_probs, prev_nodes, num_samples, step)
-        return next_nodes
 
     @torch.no_grad()
     def speculate(self, input_ids, past_key_values):
@@ -621,8 +614,11 @@ class SSM_SX(SSMBase):
 
             del outputs
 
+            if depth == 1:
+                sampled_probs = sampled_probs[-1:, :]
+                
             # * Sample / Select the next nodes
-            next_nodes = self._sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
             # root.show()
 
             # * depth increment

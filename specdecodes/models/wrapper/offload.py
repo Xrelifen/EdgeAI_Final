@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .base import WrapperBase
 from .sd import SDWrapper
 import numpy as np
+import logging
 
 from transformers import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsWarper
@@ -15,10 +16,10 @@ from accelerate import dispatch_model
 
 from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
-from ..utils import TreeDynamicCache, build_tree_attention_data, get_residual, verify_topk, verify_k
+from ..utils import TreeDynamicCache, build_tree_attention_data
 
 class OffloadSDWrapper(SDWrapper):
-    def __init__(self, method="stochastic"):
+    def __init__(self, method="greedy"):
         super(OffloadSDWrapper, self).__init__(method=method)
 
     def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
@@ -34,7 +35,7 @@ class OffloadSDWrapper(SDWrapper):
 
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if i < 10:
+            if i < 6:
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
@@ -162,8 +163,7 @@ class OffloadSDWrapper(SDWrapper):
             sampled_tokens, hidden_indices, _ = self._verify(
                                                 root, next_token_logits, 
                                                 logits_warper,
-                                                do_sample,
-                                                verify_method=self.ssm.verify_method
+                                                do_sample
                                             )
             target_time_per_iter.append(time.perf_counter()-target_start)
 
