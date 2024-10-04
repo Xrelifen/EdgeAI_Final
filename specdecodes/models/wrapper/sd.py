@@ -13,7 +13,7 @@ from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
 import prettytable as pt
 
-from .verify_utils import verify_topk, verify_k, verify_deterministic, verify_fast
+from .verify_utils import verify_step
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
 
@@ -60,19 +60,6 @@ class SDWrapper(WrapperBase):
         return outputs
     
     def _verify(self, root, logits, logits_warper, do_sample):
-        # Assign verify method
-        verify_method = root.verify_method
-        if not do_sample or verify_method == "deterministic":
-            verify_step = verify_deterministic
-        elif verify_method == "fast":
-            verify_step = verify_fast
-        elif verify_method == "greedy":
-            verify_step = verify_topk
-        elif verify_method == "stochastic":
-            verify_step = verify_k
-        else:
-            raise ValueError(f"Unknown verify method: {verify_method}")
-        
         # Obtain LLM sample logits
         global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
         
@@ -86,7 +73,7 @@ class SDWrapper(WrapperBase):
         cur = root
         while cur.children:
             total_len += 1
-            accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur)
+            accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur, do_sample)
                     
             # Accept token if it is in the children
             if accept_token_id is not None:

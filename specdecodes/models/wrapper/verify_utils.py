@@ -60,3 +60,18 @@ def verify_k(p, q, node):
             q = q / q.sum()
             
     return None, p
+
+def verify_step(p, q, node, do_sample):
+    verify_method = node.verify_method
+    if not do_sample or verify_method == "deterministic":
+        _verify_step = verify_deterministic
+    elif verify_method == "fast":
+        _verify_step = verify_fast
+    elif verify_method == "greedy":
+        _verify_step = verify_topk
+    elif verify_method == "stochastic":
+        _verify_step = verify_k
+    else:
+        raise ValueError(f"Unknown verify method: {verify_method}")
+    
+    return _verify_step(p, q, node)
