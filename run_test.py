@@ -6,8 +6,8 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
-from specdecodes.models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed, SSM_SX
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
 
 
 def load_model(
@@ -29,6 +29,12 @@ def load_model(
         low_cpu_mem_usage=True,
         device_map=device
     )
+    # check if ssm_path directory exists
+    if os.path.exists(ssm_path):
+        draft_config = deepcopy(llm.config)
+        draft_config.num_hidden_layers = layers
+    else:
+        draft_config = None
 
     if mode == "naive":
         model = NaiveWrapper()
@@ -36,47 +42,48 @@ def load_model(
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif mode == "sd":
+    elif mode == "sd-classic":
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
-        draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = layers
-        
-        if sd_method == "greedy":
-            ssm = SSM_Greedy.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "stochastic":
-            ssm = SSM_Stochastic.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "hstochastic":
-            ssm = SSM_HStochastic.from_pretrained(
-                ssm_path,
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "mixed":
-            ssm = SSM_Mixed.from_pretrained(
-                ssm_path,
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        else:
-            raise ValueError("Invalid method.")
-            
-        ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ssm = SSM_Classic.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
+        
+    elif mode == "sd-eagle":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=None)
+        
+        # load SSM
+        ssm = SSM_Eagle.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+        
+    elif mode == "sd-sharedkv":
+        # model = SharedKV_SDWrapper()
+        model = SharedKV_ProfileSDWrapper(out_dir=None)
+        
+        # load SSM
+        ssm = SSM_SharedKV.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+        
     else:
         raise ValueError("Invalid mode.")
     
@@ -157,8 +164,9 @@ def main(args):
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    # input_message = "What's the best way to start learning a new language?"
-    input_message = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
+    input_message = "What's the best way to start learning a new language?"
+    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?" # beyblade is the correct spelling
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},
@@ -275,12 +283,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     main(args)
-    
-    
-# # TREE-DY
-# INFO:root:Trials ratio: [1.00, 0.78, 0.49, 0.40, 0.31, 0.18, 0.12, 0.12, 0.07]
-# INFO:root:Alpha:        [0.96, 0.94, 0.94, 0.95, 0.81, 0.89, 1.00, 0.83, 0.86]
-
-# # EAGLE
-# INFO:root:Trials ratio: [1.00, 0.95, 0.81, 0.61, 0.27, 0.20, 0.15, 0.08, 0.04]
-# INFO:root:Alpha:        [0.97, 0.91, 0.83, 0.58, 0.75, 0.73, 0.55, 0.50, 0.67]

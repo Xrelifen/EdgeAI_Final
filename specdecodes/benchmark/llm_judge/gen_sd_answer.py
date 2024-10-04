@@ -19,8 +19,8 @@ from fastchat.model import get_conversation_template # load_model,
 from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from ...models import SSM_Greedy, SSM_Stochastic, SSM_HStochastic, SSM_Mixed
+from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
+from ...models import SSM_Classic, SSM_Eagle, SSM_SharedKV
 
 
 # set random deterministic
@@ -44,59 +44,66 @@ def load_model(
     
     # load LLM
     llm = AutoModelForCausalLM.from_pretrained(
-        args.llm_path, 
+        llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         device_map=device
     )
+    # check if ssm_path directory exists
+    if os.path.exists(ssm_path):
+        draft_config = deepcopy(llm.config)
+        draft_config.num_hidden_layers = layers
+    else:
+        draft_config = None
 
     if mode == "naive":
         model = NaiveWrapper()
         
     elif mode == "hf":
         model = HuggingFaceWrapper()
-        
-    elif mode == "sd":
-        # model = SDWrapper(method=sd_method)
-        model = ProfileSDWrapper(method=sd_method, out_dir=out_dir)
+    
+    elif mode == "sd-classic":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=out_dir)
         
         # load SSM
-        draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = layers
-        
-        if sd_method == "greedy":
-            ssm = SSM_Greedy.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "stochastic":
-            ssm = SSM_Stochastic.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "hstochastic":
-            ssm = SSM_HStochastic.from_pretrained(
-                ssm_path, 
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        elif sd_method == "mixed":
-            ssm = SSM_Mixed.from_pretrained(
-                ssm_path,
-                config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            )
-        else:
-            raise ValueError("Invalid method.")
-        
-        ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ssm = SSM_Classic.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
+        
+    elif mode == "sd-eagle":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=out_dir)
+        
+        # load SSM
+        ssm = SSM_Eagle.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+        
+    elif mode == "sd-sharedkv":
+        # model = SharedKV_SDWrapper()
+        model = SharedKV_ProfileSDWrapper(out_dir=out_dir)
+        
+        # load SSM
+        ssm = SSM_SharedKV.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+        
     else:
         raise ValueError("Invalid mode.")
     

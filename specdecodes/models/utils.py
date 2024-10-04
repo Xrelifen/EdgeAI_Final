@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 
@@ -67,48 +68,28 @@ def get_residual(p: torch.Tensor, q:torch.Tensor):
     residual = (p - q).relu_()
     residual = residual / (residual.sum(dim=-1).unsqueeze(-1))
     return residual
-
-
-def verify_topk(p, q, node):
-    p = p.to(torch.float32)
-    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
-    for child_id in child_ids:
-        r = torch.rand(1).item()
-        if r <= p[child_id]:
-            return True, child_id.item()
-        
-        else:
-            p[child_id] = 0
-            p = p / p.sum()
-            
-    return False, p.multinomial(num_samples=1).item()
-   
-
-def verify_k(p, q, node):
-    p = p.to(torch.float32)
-    q = q.to(torch.float32)
-    child_ids = torch.tensor([child.id for child in node.children], dtype=torch.long)
-    tried_ids = torch.full_like(child_ids, -1)
-    for i, child_id in enumerate(child_ids):
-        r = torch.rand(1).item()
-        if p[child_id] > r*q[child_id]:
-            return True, child_id.item()
-        
-        else:
-            tried_ids[i] = child_id
-            p = get_residual(p, q)
-            
-            q[child_id] = 0
-            if q.sum() == 0:
-                q = torch.zeros_like(q)
-                q[child_ids] = 1
-                q[tried_ids[tried_ids != -1]] = 0
-            q = q / q.sum()
-            
-    return False, p.multinomial(num_samples=1).item() 
     
 
 class TreeDynamicCache(DynamicCache):
+    def __init__(self, num_hidden_layers: Optional[int] = None) -> None:
+        super().__init__()
+        
+    def crop(self, max_length: int):
+        """Crop the past key values up to a new `max_length` in terms of tokens. `max_length` can also be
+        negative to remove `max_length` tokens. This is used in assisted decoding and contrastive search."""
+        # In case it is negative
+        if max_length < 0:
+            max_length = self.get_seq_length() - abs(max_length)
+
+        # if self.get_seq_length() <= max_length:
+        #     return
+
+        self._seen_tokens = max_length
+        for idx in range(len(self.key_cache)):
+            if self.key_cache[idx] != []:
+                self.key_cache[idx] = self.key_cache[idx][..., :max_length, :]
+                self.value_cache[idx] = self.value_cache[idx][..., :max_length, :]
+                
     def reorder_cache(self, beam_idx: torch.LongTensor, dim=0):
         """Reorders the cache for beam search, given the selected beam indices."""
         for layer_idx in range(len(self.key_cache)):

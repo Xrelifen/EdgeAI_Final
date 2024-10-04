@@ -1,3 +1,5 @@
+# Speed test for decoding multiple tokens in a single forward pass
+
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
@@ -55,13 +57,16 @@ def benchmark_tpot(model, past_key_values, tokens, repetitions=100):
         for _ in range(repetitions):
             _ = model(tokens, past_key_values=past_key_values)
             past_key_values.crop(prev_tokens)
+        s.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
     torch.cuda.current_stream().wait_stream(s)
     
     # Capture CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         _ = model(tokens, past_key_values=past_key_values)
-    # actually not required to crop past_key_values, since cudagraph will replay and read and write to the same memory locations
+    # not required to crop past_key_values, since cudagraph will replay and read and write to the same memory locations
     # past_key_values.crop(prev_tokens)
     
     # Start and end events

@@ -17,7 +17,7 @@ from .verify_utils import verify_topk, verify_k, verify_deterministic, verify_fa
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
 
-class SDWrapper(WrapperBase):
+class SharedKV_SDWrapper(WrapperBase):
     def __init__(self, method="greedy"):
         super().__init__()
         self.method = method
@@ -25,7 +25,7 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, inputs, past_key_values):
+    def _speculate(self, inputs, past_key_values, past_key_values_llm):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
@@ -35,6 +35,7 @@ class SDWrapper(WrapperBase):
         return self.ssm.speculate(
             inputs,
             past_key_values=past_key_values,
+            past_key_values_llm=past_key_values_llm,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
         )
@@ -176,7 +177,7 @@ class SDWrapper(WrapperBase):
         finished = False
         while not finished:
             # * speculate
-            root = self._speculate([hidden_states, input_ids], ssm_past_key_values)
+            root = self._speculate([hidden_states, input_ids], ssm_past_key_values, llm_past_key_values)
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()
@@ -212,7 +213,7 @@ class SDWrapper(WrapperBase):
         return input_ids
     
 
-class ProfileSDWrapper(SDWrapper):
+class SharedKV_ProfileSDWrapper(SharedKV_SDWrapper):
     def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
         super().__init__(method)
         self.profile_data = {}

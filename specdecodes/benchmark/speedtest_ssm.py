@@ -1,3 +1,5 @@
+# Speed test for decoding multiple tokens in a single forward pass
+
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
@@ -59,18 +61,21 @@ def benchmark_tpot(model, lm_head, embed_tokens, input_data, repetitions=100):
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(repetitions):
-            output = model(hidden_states, tokens, embed_tokens, past_key_values=past_key_values)
+            output = model([hidden_states, tokens], embed_tokens, past_key_values=past_key_values)
             _ = lm_head(output.last_hidden_state)
             past_key_values.crop(prev_tokens)
+        s.synchronize()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
     torch.cuda.current_stream().wait_stream(s)
     
     # Capture CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         # _ = model(tokens, past_key_values=past_key_values)
-        output = model(hidden_states, tokens, embed_tokens, past_key_values=past_key_values)
+        output = model([hidden_states, tokens], embed_tokens, past_key_values=past_key_values)
         _ = lm_head(output.last_hidden_state)
-    # actually not required to crop past_key_values, since cudagraph will replay and read and write to the same memory locations
+    # not required to crop past_key_values, since cudagraph will replay and read and write to the same memory locations
     # past_key_values.crop(prev_tokens)
     
     # Start and end events
@@ -118,6 +123,10 @@ def main(args):
         
         # convert to numpy array, plot and save
         latencies = np.array(latencies)
+        
+        # create folder if not exists
+        if not os.path.exists(args.save_folder):
+            os.makedirs(args.save_folder)
 
         # save latencies
         np.save(os.path.join(args.save_folder, f"ssm_{args.layers}layer_prev_{prev_tokens}.npy"), latencies)

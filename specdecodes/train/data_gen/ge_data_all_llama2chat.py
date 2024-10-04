@@ -102,7 +102,7 @@ def build_dataset(tokenizer, dataset_dir, start, end, num_proc, seed=42):
 def model_forward(model, data):
     input_ids = data["input_ids"]
     outputs = model(input_ids.cuda(), past_key_values=DynamicCache(), output_hidden_states=True)
-    hidden_state = outputs.hidden_states[-2]#[-1]
+    hidden_state = outputs.hidden_states[-1]
     
     return {
         "input_ids": input_ids.cpu().squeeze(0),
