@@ -1,4 +1,5 @@
 import torch
+import logging
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
@@ -21,6 +22,7 @@ class NaiveWrapper(WrapperBase):
 
         # * clone input_ids 
         input_ids = input_ids.clone()
+        org_input_len = len(input_ids[0])
 
         # * prepare kv-cache
         llm_past_key_values = DynamicCache()
@@ -41,6 +43,7 @@ class NaiveWrapper(WrapperBase):
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
         finished = False
+        start_time = time.perf_counter()
         while not finished:
             outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True)
         
@@ -57,5 +60,9 @@ class NaiveWrapper(WrapperBase):
             
             # Stopping criteria
             finished = stopping_criteria(input_ids, None)
-            
+        
+        end_time = time.perf_counter()
+        n_gen_token = len(input_ids[0][org_input_len:])
+        logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)}")
+
         return input_ids

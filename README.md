@@ -14,6 +14,11 @@ LOGLEVEL=DEBUG CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --
 LOGLEVEL=DEBUG CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample -nw --seed 999 --mode sd-eagle --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm <SSM directory> --layers 1
 ```
 
+**c. Speculative Decoding with Target Model Offloading**
+```bash
+LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sd-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
+```
+
 ## 2. Run MT-Bench Benchmark:
 
 ```bash

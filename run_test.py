@@ -6,7 +6,16 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
+from specdecodes.models import (
+    HuggingFaceWrapper, 
+    NaiveWrapper, 
+    SDWrapper, 
+    ProfileSDWrapper, 
+    OffloadSDWrapper, 
+    SharedKV_SDWrapper, 
+    SharedKV_ProfileSDWrapper,
+    OffloadWrapper
+) 
 from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
 
 
@@ -18,7 +27,7 @@ def load_model(
     layers: int,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
-    ):
+):
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
@@ -38,7 +47,6 @@ def load_model(
 
     if mode == "naive":
         model = NaiveWrapper()
-        
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
@@ -83,7 +91,6 @@ def load_model(
             torch_dtype=dtype,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
-        
     else:
         raise ValueError("Invalid mode.")
     
@@ -105,27 +112,25 @@ def load_offload_model(
     # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
 
-    if mode == "naive":
-        model = NaiveWrapper()
-
-    elif mode == "sd":
-
-        # draft_config = AutoConfig.from_pretrained(ssm_path)
+    if mode == "sd-offload":
         ssm = SSM_SX.from_pretrained(
             ssm_path,
             # config=draft_config,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
-            sampling_method="greedy",
+            sampling_method=sd_method,
         )
         ssm = ssm.to(device)
 
         # Load offload model
         model = OffloadSDWrapper()
         model.set_ssm(ssm)
-        model.set_tokenizer(tokenizer)
-        model.set_offload_llm(llm_path)
 
+    elif mode == "offload":
+        model = OffloadWrapper()
+        
+    model.set_tokenizer(tokenizer)
+    model.set_offload_llm(llm_path)
     model.eval()
 
     return model, tokenizer
@@ -134,14 +139,14 @@ def main(args):
     
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
-    logging.basicConfig(level=LOGLEVEL)
+    logging.basicConfig(format='%(levelname)s - %(message)s', level=LOGLEVEL)
 
     # deterministic
     torch.manual_seed(args.seed)
 
     # load model
     print("Loading model...")
-    if args.offload:
+    if "offload" in args.mode:
         model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
     else:
         model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
@@ -274,12 +279,6 @@ if __name__ == "__main__":
         type=int,
         default=42,
         help="Random seed.",
-    )
-    parser.add_argument(
-        "-o",
-        "--offload",
-        action="store_true",
-        help="Offload target model"
     )
     args = parser.parse_args()
     

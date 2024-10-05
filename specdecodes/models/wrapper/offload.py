@@ -8,15 +8,125 @@ from .base import WrapperBase
 from .sd import SDWrapper
 import numpy as np
 import logging
+import gc
 
 from transformers import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 from accelerate import dispatch_model
+from transformers.cache_utils import StaticCache, DynamicCache
 
 from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data
+
+class OffloadWrapper(WrapperBase):
+    def __init__(self):
+        super(OffloadWrapper, self).__init__()
+
+    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+        device_map = {
+            "model.embed_tokens": "cuda:0",
+            "model.rotary_emb": "cuda:0",
+            "model.norm": "cuda:0",
+            "lm_head": "cuda:0",
+        }     
+
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            device_map="cpu", 
+            low_cpu_mem_usage=True, 
+            torch_dtype=torch.float16
+        )
+
+        estimated_mem = 0.0
+        for param in self.llm.model.embed_tokens.parameters():
+            estimated_mem += param.numel() * param.element_size()
+        for param in self.llm.lm_head.parameters():
+            estimated_mem += param.numel() * param.element_size()
+        estimated_mem = estimated_mem / (1024 ** 3)
+        
+        decoder_layer_mem = 0.0
+        for param in self.llm.model.layers[0].parameters():
+            decoder_layer_mem += param.numel() * param.element_size()
+
+        decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
+
+        # TODO: Check the memory usage to check how much layers to be offloaded
+        for i in range(len(self.llm.model.layers)):
+            if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+                estimated_mem += decoder_layer_mem
+                device_map[f"model.layers.{i}"] = device
+            else:
+                device_map[f"model.layers.{i}"] = "cpu"
+        
+        # set pin_memory to reduce memory access time
+        for layer in self.llm.model.layers:
+            for param in layer.parameters():
+                param.data = param.data.cpu().pin_memory(device)
+
+        self.llm = dispatch_model(self.llm, device_map=device_map)
+        allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
+        logging.debug(f"Allocated Memory = {allocated_memory} GB")
+        
+        if allocated_memory > memory_limit:
+            logging.info(f"[Warning] memory usage is too much")
+
+    def _generate(
+        self,
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+    ):
+        assert self.llm is not None, "LLM model must be provided"
+
+        # * clone input_ids 
+        input_ids = input_ids.clone()
+        org_input_len = len(input_ids[0])
+
+        # * prepare kv-cache
+        llm_past_key_values = DynamicCache()
+        
+        # * prefill stage
+        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True)
+        
+        # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+        # (the clone itself is always small)
+        # We keep the seq_len axis considering cases of multiple tokens.
+        next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :].clone() here
+
+        # This is needed to properly delete outputs.logits which may be very large for first iteration
+        # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+        del outputs
+        
+        next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+        input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+
+        finished = False
+        start_time = time.perf_counter()
+        while not finished:
+            outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True)
+        
+            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+            # We keep the seq_len axis considering cases of multiple tokens.
+            next_token_logits = outputs.logits.clone()
+            
+            # This is needed to properly delete outputs.logits which may be very large for first iteration
+            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+            del outputs
+            
+            next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+            input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+            
+            # Stopping criteria
+            finished = stopping_criteria(input_ids, None)
+        
+        end_time = time.perf_counter()
+        n_gen_token = len(input_ids[0][org_input_len:])
+        logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)} token/s")
+
+        return input_ids
 
 class OffloadSDWrapper(SDWrapper):
     def __init__(self, method="greedy"):
@@ -31,11 +141,30 @@ class OffloadSDWrapper(SDWrapper):
             "lm_head": "cuda:0",
         }
 
-        self.llm = AutoModelForCausalLM.from_pretrained(llm_path, device_map="cpu", low_cpu_mem_usage=True, torch_dtype=torch.float16)
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            device_map="cpu", 
+            low_cpu_mem_usage=True, 
+            torch_dtype=torch.float16
+        )
+
+        estimated_mem = torch.cuda.memory_allocated(device)
+        for param in self.llm.model.embed_tokens.parameters():
+            estimated_mem += param.numel() * param.element_size()
+        for param in self.llm.lm_head.parameters():
+            estimated_mem += param.numel() * param.element_size()
+        estimated_mem = estimated_mem / (1024 ** 3)
+        
+        decoder_layer_mem = 0.0
+        for param in self.llm.model.layers[0].parameters():
+            decoder_layer_mem += param.numel() * param.element_size()
+
+        decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
 
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if i < 6:
+            if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+                estimated_mem += decoder_layer_mem
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
@@ -47,10 +176,10 @@ class OffloadSDWrapper(SDWrapper):
 
         self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        print(f"[Debug] Allocated Memory = {allocated_memory} GB")
+        logging.debug(f"Allocated Memory = {allocated_memory} GB")
         
         if allocated_memory > memory_limit:
-            print(f"[Warning] memory usage is too much")
+            logging.info(f"[Warning] memory usage is too much")
 
         
     def _speculate(self, inputs, past_key_values):
@@ -169,18 +298,19 @@ class OffloadSDWrapper(SDWrapper):
 
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
+            del outputs, root
+            gc.collect()
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
 
             speculated_tokens_per_iter.append(len(sampled_tokens[0]))
-            print(f"new speculated number of token: +{len(sampled_tokens[0])}")
+            logging.info(f"new speculated number of token: +{len(sampled_tokens[0])}")
 
             # * update input_ids, hidden_states, and kv-cache
             # llm_past_key_values.crop(prev_kv_len)
             input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
-            
+
             # * check stopping criteria
             finished = stopping_criteria(input_ids, None)
         
@@ -189,12 +319,12 @@ class OffloadSDWrapper(SDWrapper):
         mean_gen_rate = np.mean(speculated_tokens_per_iter)
         mean_draft_time = np.mean(draft_time_per_iter)
         mean_target_time = np.mean(target_time_per_iter)
-        print(f"Average spculated number of token: {mean_gen_rate} tokens")
-        print(f"Average draft model time: {mean_draft_time}s")
-        print(f"Average target model time: {mean_target_time}s")
-        print(f"Theoretically speedup: {mean_gen_rate * mean_target_time / (mean_target_time + mean_draft_time)}")
+        logging.info(f"Average spculated number of token: {mean_gen_rate} tokens")
+        logging.info(f"Average draft model time: {mean_draft_time}s")
+        logging.info(f"Average target model time: {mean_target_time}s")
+        logging.info(f"Theoretically speedup: {mean_gen_rate * mean_target_time / (mean_target_time + mean_draft_time)}")
 
         n_gen_tokens = len(input_ids[0][org_input_len:])
-        print(f"Generate speed: {n_gen_tokens/(end_time-start_time)} tok/s")
+        logging.info(f"Generate speed: {n_gen_tokens/(end_time-start_time)} tok/s")
 
         return input_ids               

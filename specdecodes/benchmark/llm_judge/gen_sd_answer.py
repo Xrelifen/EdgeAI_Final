@@ -19,8 +19,8 @@ from fastchat.model import get_conversation_template # load_model,
 from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
-from ...models import SSM_Classic, SSM_Eagle, SSM_SharedKV
+from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper, OffloadSDWrapper
+from ...models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
 
 
 # set random deterministic
@@ -114,6 +114,39 @@ def load_model(
     
     return model, tokenizer
 
+def load_offload_model(
+    llm_path: str,
+    ssm_path: str,
+    mode: str,
+    sd_method: str,
+    dtype: torch.dtype = torch.float16,
+    device="cuda:0"    
+):
+    # Load Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
+
+    if mode == "sd-offload":
+        ssm = SSM_SX.from_pretrained(
+            ssm_path,
+            # config=draft_config,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+            sampling_method=sd_method,
+        )
+        ssm = ssm.to(device)
+
+        # Load offload model
+        model = OffloadSDWrapper()
+        model.set_ssm(ssm)
+
+    elif mode == "offload":
+        model = OffloadWrapper()
+        
+    model.set_tokenizer(tokenizer)
+    model.set_offload_llm(llm_path)
+    model.eval()
+
+    return model, tokenizer
 
 def run_eval(
     llm_path,
@@ -206,7 +239,11 @@ def get_model_answers(
     #     cpu_offloading=False,
     #     debug=False,
     # )
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir, dtype=dtype, device="cuda")
+
+    if "offload" in args.mode:
+        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
+    else:
+        model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
 
     for question in tqdm(questions):
         if question["category"] in temperature_config:
