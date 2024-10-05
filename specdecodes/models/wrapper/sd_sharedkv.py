@@ -25,7 +25,7 @@ class SharedKV_SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, inputs, past_key_values, past_key_values_llm):
+    def _speculate(self, input_ids, hidden_states, past_key_values, past_key_values_llm):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
@@ -33,7 +33,8 @@ class SharedKV_SDWrapper(WrapperBase):
             lm_head = self.llm.lm_head
             
         return self.ssm.speculate(
-            inputs,
+            input_ids,
+            hidden_states=hidden_states,
             past_key_values=past_key_values,
             past_key_values_llm=past_key_values_llm,
             embed_tokens=self.llm.get_input_embeddings(), 
@@ -177,7 +178,7 @@ class SharedKV_SDWrapper(WrapperBase):
         finished = False
         while not finished:
             # * speculate
-            root = self._speculate([hidden_states, input_ids], ssm_past_key_values, llm_past_key_values)
+            root = self._speculate(input_ids, hidden_states, ssm_past_key_values, llm_past_key_values)
 
             # * tree decoding
             prev_kv_len = llm_past_key_values.get_seq_length()
