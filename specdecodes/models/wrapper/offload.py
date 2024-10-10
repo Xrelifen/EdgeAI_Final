@@ -302,6 +302,7 @@ class OffloadSDWrapper(SDWrapper):
             gc.collect()
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
+            hidden_indices = hidden_indices.to(input_ids.device)
 
             speculated_tokens_per_iter.append(len(sampled_tokens[0]))
             logging.info(f"new speculated number of token: +{len(sampled_tokens[0])}")
