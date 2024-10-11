@@ -26,13 +26,13 @@ CUDA_VISIBLE_DEVICES=0 python -m specdecodes.benchmark.llm_judge.gen_sd_answer -
 ### 1. Generate Dataset
 
 ```bash
-python -m train.data_gen.allocation --gpu_index 0 --outdir <dataset save location>
+python -m specdecodes.train.data_gen.allocation --gpu_index 0 --outdir <dataset save location>
 ```
 
 ### 2. Train SSM
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29500 --num_processes=4 --mixed_precision=bf16 -m specdecodes.train.main --datadir <dataset location> --data-ratio 1 --savedir <save location> --wandb 
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29500 --num_processes=4 --mixed_precision=bf16 -m specdecodes.train.main_eagle --datadir <dataset location> --data-ratio 1 --savedir <save location> --wandb 
 ```
 
 ##
