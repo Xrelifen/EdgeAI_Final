@@ -113,7 +113,7 @@ def list_files(path):
     return datapath
 
 def top_accuracy(output, target, topk=(1,)):
-    # output.shape (bs, num_classes), target.shape (bs, )
+    # output.shape (bs, num_classes), target.shape (bs, num_classes)
     """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():
         maxk = max(topk)
@@ -127,6 +127,26 @@ def top_accuracy(output, target, topk=(1,)):
         for k in topk:
             correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k)
+        return res
+
+def top_sampled_probability_sum(output, target, topk=(1,)):
+    # output.shape (bs, num_classes), target.shape (bs, num_classes)
+    """Computes the sum of target probabilities over the k top predictions for the specified values of k."""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        # Get top-k indices from the output tensor
+        _, topk_indices = output.topk(maxk, dim=1, largest=True, sorted=True)
+
+        res = []
+        for k in topk:
+            # Gather the target probabilities using the top-k indices
+            topk_probs = torch.gather(target, 1, topk_indices[:, :k])
+            # Sum the probabilities for each sample in the batch
+            prob_sum = topk_probs.sum()#(dim=1).sum(0, keepdim=True)
+            res.append(prob_sum)
+
         return res
 
 # Currently not used
@@ -191,24 +211,52 @@ def getkacc(model, data, llm_last, max_length=5):
     acc = correct.float() / total.float()
     return acc.cpu().tolist()
 
+# @torch.no_grad()
+# def update_metrics(loss_mask, s_logits, t_logits, correct, total, topk_acc):
+#     _, predicted = torch.max(s_logits, 2)
+#     _, targeted = torch.max(t_logits, 2)
+#     correct += ((predicted == targeted) * loss_mask).sum().item()
+#     total += loss_mask.sum().item()
+    
+#     # Calculate expectation
+#     p_t = F.softmax(t_logits, dim=-1)
+#     p_s = F.softmax(s_logits, dim=-1)
+#     expect = torch.sum(p_t * p_s, dim=-1).mean()
+    
+#     # Calculate top-k accuracy
+#     s_logits = s_logits.view(-1, t_logits.shape[-1])[loss_mask.view(-1)]
+#     targeted = targeted.view(-1)[loss_mask.view(-1)]
+#     temp_top_acc = top_accuracy(s_logits, targeted, (1, 2, 3))
+#     for idx, top_i in enumerate(temp_top_acc):
+#         topk_acc[idx] += top_i
+
+#     return expect, correct, total
+
 @torch.no_grad()
-def update_metrics(loss_mask, s_logits, t_logits, correct, total, topk_acc):
+def update_metrics(loss_mask, s_logits, t_logits, correct, total, topk_prob):
     _, predicted = torch.max(s_logits, 2)
     _, targeted = torch.max(t_logits, 2)
     correct += ((predicted == targeted) * loss_mask).sum().item()
     total += loss_mask.sum().item()
     
     # Calculate expectation
-    p_t = F.softmax(t_logits, dim=-1)
     p_s = F.softmax(s_logits, dim=-1)
-    expect = torch.sum(p_t * p_s, dim=-1).mean()
+    p_t = F.softmax(t_logits, dim=-1)
+    expect = torch.sum(p_s * p_t, dim=-1).mean()
     
-    # Calculate top-k accuracy
-    s_logits = s_logits.view(-1, t_logits.shape[-1])[loss_mask.view(-1)]
-    targeted = targeted.view(-1)[loss_mask.view(-1)]
-    temp_top_acc = top_accuracy(s_logits, targeted, (1, 2, 3))
-    for idx, top_i in enumerate(temp_top_acc):
-        topk_acc[idx] += top_i
+    # # Calculate top-k accuracy
+    # s_logits = s_logits.view(-1, t_logits.shape[-1])[loss_mask.view(-1)]
+    # targeted = targeted.view(-1)[loss_mask.view(-1)]
+    # temp_top_acc = top_accuracy(s_logits, targeted, (1, 2, 3))
+    # for idx, top_i in enumerate(temp_top_acc):
+    #     topk_acc[idx] += top_i
+    
+    # Calculate top sampled probability sum
+    p_s = p_s.view(-1, p_s.shape[-1])[loss_mask.view(-1)]
+    p_t = p_t.view(-1, p_t.shape[-1])[loss_mask.view(-1)]
+    temp_top_probs_sum = top_sampled_probability_sum(p_s, p_t, (1, 3, 5, 10))
+    for idx, top_i in enumerate(temp_top_probs_sum):
+        topk_prob[idx] += top_i
 
     return expect, correct, total
 

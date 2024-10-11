@@ -34,7 +34,8 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
     model.train()
     device = accelerator.device
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
-    topk_acc = [0] * 3
+    topk_prob_k = [1, 3, 5, 9]
+    topk_prob = [0] * len(topk_prob_k)
 
     for idx, data in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")):
         with accelerator.accumulate(model):
@@ -57,7 +58,7 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
             optimizer.zero_grad()
 
         prev_total = total
-        expect, correct, total = update_metrics(data["loss_mask"], s_logits, t_logits, correct, total, topk_acc)
+        expect, correct, total = update_metrics(data["loss_mask"], s_logits, t_logits, correct, total, topk_prob)
         if accelerator.is_main_process and (idx % train_config["log_freq"] == 0) and total > prev_total and run:
             logdict = {
                 "train/lr": optimizer.optimizer.param_groups[0]["lr"], 
@@ -67,8 +68,8 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
                 "train/acc": correct / total,
                 "train/expect": expect.item()
             }
-            for id, acc in enumerate(topk_acc):
-                logdict[f'train/top_{id + 1}_acc'] = acc.item() / total
+            for id, prob in enumerate(topk_prob):
+                logdict[f'train/top_{topk_prob_k[id]}_prob'] = prob.item() / total
             run.log(logdict)
         epoch_loss += loss.item()
         num_batches += 1
@@ -77,7 +78,7 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
     correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
     correct, total = accelerator.gather_for_metrics((correct, total))
     expect = accelerator.gather_for_metrics(expect)
-    topk_acc = accelerator.gather_for_metrics(topk_acc)
+    topk_prob = accelerator.gather_for_metrics(topk_prob)
     
     expect = expect.mean().item()
     correct = correct.sum().item()
@@ -91,8 +92,8 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
             "train/epochloss": epoch_loss,
             "train/epochexpect": expect,
         }
-        for id, acc in enumerate(topk_acc):
-            logdict[f'train/epochtop_{id + 1}_acc'] = acc.sum().item() / total
+        for id, prob in enumerate(topk_prob):
+            logdict[f'train/epochtop_{topk_prob_k[id]}_prob'] = prob.sum().item() / total
         run.log(logdict)
 
 
@@ -101,7 +102,8 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
     device = accelerator.device
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
-    topk_acc = [0] * 3
+    topk_prob_k = [1, 3, 5, 9]
+    topk_prob = [0] * len(topk_prob_k)
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
         # teacher
@@ -116,7 +118,7 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
         loss, vloss, ploss = calculate_loss(data["loss_mask"], s_hidden_states, t_hidden_states, s_logits, t_logits, train_config)
 
         # Update metrics
-        expect, correct, total = update_metrics(data["loss_mask"], s_logits, t_logits, correct, total, topk_acc)
+        expect, correct, total = update_metrics(data["loss_mask"], s_logits, t_logits, correct, total, topk_prob)
         epoch_loss += loss.item()
         num_batches += 1
 
@@ -124,7 +126,7 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
     correct, total = torch.tensor(correct, device=device), torch.tensor(total, device=device)
     correct, total = accelerator.gather_for_metrics((correct, total))
     expect = accelerator.gather_for_metrics(expect)
-    topk_acc = accelerator.gather_for_metrics(topk_acc)
+    topk_prob = accelerator.gather_for_metrics(topk_prob)
     
     expect = expect.mean().item()
     correct = correct.sum().item()
@@ -142,8 +144,8 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
             "test/expect": expect,
         }
 
-        for id, acc in enumerate(topk_acc):
-            logdict[f'test/top_{id + 1}_acc'] = acc.sum().item() / total
+        for id, prob in enumerate(topk_prob):
+            logdict[f'test/top_{topk_prob_k[id]}_prob'] = prob.sum().item() / total
         run.log(logdict)
 
         # save model
