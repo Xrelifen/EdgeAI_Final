@@ -20,13 +20,37 @@ import logging
 import argparse
 import wandb
 
-from ..models import SSM_Classic, LLM_Last_Layers
+from ..models import SSM_FSPAD, LLM_Last_Layers
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 
 # logging
 logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
+
+
+class AddGaussianNoise:
+    def __init__(self, mean=0.0, std=0.0):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, data):
+        tensor = data["hidden_state_big"]
+        noise = torch.randn(tensor.size()) * self.std + self.mean
+        noisy_tensor = tensor + noise
+        data["hidden_state_big"] = noisy_tensor
+        return data
+
+class AddUniformNoise:
+    def __init__(self, std=0.0):
+        self.std = std
+
+    def __call__(self, data):
+        tensor = data["hidden_state_big"]
+        noise = (torch.rand_like(tensor) - 0.5) * self.std * 512 / tensor.shape[1]
+        noisy_tensor = tensor + noise
+        data["hidden_state_big"] = noisy_tensor
+        return data
 
 class CustomDataset(Dataset):
     def __init__(self, datapath, transform=None, max_len=-1):
@@ -93,9 +117,10 @@ class DataCollatorWithPadding:
         batch_loss_mask = torch.cat([self.paddingtensor2D(item['loss_mask'], max_length) for item in features])
         batch_attention_mask = torch.cat([self.paddingtensor2D(item['attention_mask'], max_length) for item in features])
         
+        
         batch = {
             "input_ids": batch_input_ids,
-            # "hidden_states": batch_hidden_states,
+            "hidden_states": batch_hidden_states,
             "target": batch_prev_target,
             "attention_mask": batch_attention_mask,
             "loss_mask": batch_loss_mask,
@@ -303,11 +328,13 @@ def calc_smooth_l1_loss(mask, s_logits, t_logits):
     return loss
 
 def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logits, train_config):
-    vloss = calc_smooth_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    s_hidden_states_for_logit = s_hidden_states[:, :, :t_logits.shape[2]]
+    #s_hidden_states_for_input = s_hidden_states[:, :, t_logits.shape[2]:]
+    
+    vloss = calc_smooth_l1_loss(loss_mask, s_hidden_states_for_logit, t_hidden_states)
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
     loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
     return loss, vloss, ploss
-    # return ploss, ploss, ploss
 
 def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
@@ -323,8 +350,8 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
                 t_logits = llm_last(t_hidden_states)
             
             # student
-            s_hidden_states = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
-            s_logits = llm_last(s_hidden_states, head_only=True)
+            s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], attention_mask=data["attention_mask"])[0]
+            s_logits = llm_last(s_hidden_states[:, :, :t_hidden_states.shape[2]], head_only=True)
             
             # Calculate loss
             loss, vloss, ploss = calculate_loss(data["loss_mask"], s_hidden_states, t_hidden_states, s_logits, t_logits, train_config)
@@ -388,7 +415,7 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
         t_logits = llm_last(t_hidden_states)
         
         # student
-        s_hidden_states = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
+        s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], attention_mask=data["attention_mask"])[0]
         s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
@@ -441,6 +468,10 @@ def main(args):
         "p_w": 0.1,
         "v_w": 1.0,
         "num_workers": 4,
+        "data_noise": True,
+        "noise": "uniform",
+        "mean": 0.0,
+        "std": 0.2,
         # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
         "max_len": 2048,
         "grad_clip": 0.5,
@@ -463,6 +494,15 @@ def main(args):
         wandb.require("core")
         run = wandb.init(project="eagle", config=train_config)
 
+    # Data augmentation
+    if train_config["data_noise"]:
+        if train_config["noise"] == "uniform":
+            aug = AddUniformNoise(std=train_config["std"])
+        else:
+            aug = AddGaussianNoise(mean=train_config["mean"], std=train_config["std"])
+    else:
+        aug = None
+
     # Load dataset
     datapath = list_files(args.datadir)
     datapath = datapath[:int(len(datapath) * args.data_ratio)]
@@ -471,7 +511,7 @@ def main(args):
     traindatapath = datapath[:int(len(datapath) * 0.95)]
     testdatapath = datapath[int(len(datapath) * 0.95):]
 
-    traindataset = CustomDataset(traindatapath, max_len=train_config["max_len"])
+    traindataset = CustomDataset(traindatapath, transform=aug, max_len=train_config["max_len"])
     testdataset = CustomDataset(testdatapath, max_len=train_config["max_len"])
 
     train_loader = DataLoader(traindataset, batch_size=args.bs, shuffle=True,
@@ -511,10 +551,10 @@ def main(args):
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         logger.info("Loading pretrained model...")
-        model = SSM_Classic.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_FSPAD.from_pretrained(args.pretrained, config=draft_config)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Classic(config=draft_config)
+        model = SSM_FSPAD(config=draft_config)
         
     # ----------------- Load llm's weights to draft model -----------------
     

@@ -6,8 +6,8 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_FSEagle, SSM_FSPAD
 
 
 def load_model(
@@ -69,13 +69,27 @@ def load_model(
             torch_dtype=dtype,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
-        
-    elif mode == "sd-sharedkv":
-        # model = SharedKV_SDWrapper()
-        model = SharedKV_ProfileSDWrapper(out_dir=None)
+    
+    elif mode == "sd-fseagle":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
-        ssm = SSM_SharedKV.from_pretrained(
+        ssm = SSM_FSEagle.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        model.set_ssm(ssm)
+    
+    elif mode == "sd-fspad":
+        # model = SDWrapper()
+        model = ProfileSDWrapper(out_dir=None)
+        
+        # load SSM
+        ssm = SSM_FSPAD.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,

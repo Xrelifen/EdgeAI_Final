@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 
 import torch
-from torch.optim import AdamW
+from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 from typing import Any, Dict, List
@@ -20,13 +20,37 @@ import logging
 import argparse
 import wandb
 
-from ..models import SSM_Classic, LLM_Last_Layers
+from ..models import SSM_KVEagle, LLM_Last_Layers_KV
 from liger_kernel.transformers import apply_liger_kernel_to_llama
 
 # logging
 logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
+
+
+class AddGaussianNoise:
+    def __init__(self, mean=0.0, std=0.0):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, data):
+        tensor = data["hidden_state_big"]
+        noise = torch.randn(tensor.size()) * self.std + self.mean
+        noisy_tensor = tensor + noise
+        data["hidden_state_big"] = noisy_tensor
+        return data
+
+class AddUniformNoise:
+    def __init__(self, std=0.0):
+        self.std = std
+
+    def __call__(self, data):
+        tensor = data["hidden_state_big"]
+        noise = (torch.rand_like(tensor) - 0.5) * self.std * 512 / tensor.shape[1]
+        noisy_tensor = tensor + noise
+        data["hidden_state_big"] = noisy_tensor
+        return data
 
 class CustomDataset(Dataset):
     def __init__(self, datapath, transform=None, max_len=-1):
@@ -56,13 +80,13 @@ class CustomDataset(Dataset):
         zeropadding = torch.zeros(1, 1, dtype=input_ids.dtype)
         input_ids_target = torch.cat((input_ids_target, zeropadding), dim=1)
 
-        target = hidden_state[:, 1:, :]
-        zeropadding = torch.zeros(1, 1, target.shape[2])
-        target = torch.cat((target, zeropadding), dim=1)
+        prev_target = hidden_state[:, 1:, :]
+        zeropadding = torch.zeros(1, 1, prev_target.shape[2])
+        prev_target = torch.cat((prev_target, zeropadding), dim=1)
         
         new_data["attention_mask"] = attention_mask
         new_data["loss_mask"] = loss_mask
-        new_data["target"] = target
+        new_data["prev_target"] = prev_target
         new_data["hidden_state_big"] = hidden_state
         new_data["input_ids"] = input_ids_target
         
@@ -89,14 +113,15 @@ class DataCollatorWithPadding:
         max_length = max(item['hidden_state_big'].shape[1] for item in features)
         batch_input_ids = torch.cat([self.paddingtensor2D(item['input_ids'], max_length) for item in features])
         batch_hidden_states = torch.cat([self.paddingtensor(item['hidden_state_big'], max_length) for item in features])
-        batch_prev_target = torch.cat([self.paddingtensor(item['target'], max_length) for item in features])        
+        batch_prev_target = torch.cat([self.paddingtensor(item['prev_target'], max_length) for item in features])        
         batch_loss_mask = torch.cat([self.paddingtensor2D(item['loss_mask'], max_length) for item in features])
         batch_attention_mask = torch.cat([self.paddingtensor2D(item['attention_mask'], max_length) for item in features])
         
+        
         batch = {
             "input_ids": batch_input_ids,
-            # "hidden_states": batch_hidden_states,
-            "target": batch_prev_target,
+            "hidden_states": batch_hidden_states,
+            "prev_target": batch_prev_target,
             "attention_mask": batch_attention_mask,
             "loss_mask": batch_loss_mask,
         }
@@ -150,13 +175,13 @@ def getkacc(model, data, llm_last, max_length=5):
     hidden_states = data["hidden_states"]
     input_ids = data["input_ids"]
     loss_mask = data["loss_mask"]
-    target = data["target"]
+    prev_target = data["prev_target"]
     
     # get batch size and sequence length
     bs, seq_len = hidden_states.shape[0], hidden_states.shape[1]
     
     # generate target ids
-    target_ids = llm_last(target).argmax(dim=2)
+    target_ids = llm_last(prev_target).argmax(dim=2)
     
     # for calculating accuracy
     total = torch.zeros(max_length, dtype=torch.int32)
@@ -297,13 +322,8 @@ def calc_l1_loss(mask, s_logits, t_logits):
     loss = aggr_mean_loss(mask, loss)
     return loss
 
-def calc_smooth_l1_loss(mask, s_logits, t_logits):
-    loss = F.smooth_l1_loss(s_logits, t_logits, reduction='none')
-    loss = aggr_mean_loss(mask, loss)
-    return loss
-
 def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logits, train_config):
-    vloss = calc_smooth_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    vloss = calc_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
     loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
     return loss, vloss, ploss
@@ -319,11 +339,13 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
         with accelerator.accumulate(model):
             # teacher
             with torch.no_grad():
-                t_hidden_states = data["target"] # data["target"] equals data["hidden_states"][:, 1:]
-                t_logits = llm_last(t_hidden_states)
-            
+                # t_logits, t_hidden_states = llm_last(data["prev_target"], output_hidden_states=True)
+                t_logits, t_hidden_states, (target_QK, target_V) = llm_last(data["prev_target"], output_hidden_states=True, output_intermediates=True)
+                
             # student
-            s_hidden_states = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
+            # hidden_states[-2]: data["hidden_states"]
+            # hidden_states[-1]: t_hidden_states
+            s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], target_QK=target_QK, target_V=target_V, attention_mask=data["attention_mask"])[0]
             s_logits = llm_last(s_hidden_states, head_only=True)
             
             # Calculate loss
@@ -384,11 +406,13 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
 
     for batch_idx, data in enumerate(tqdm(test_loader, desc="Validating")):
         # teacher
-        t_hidden_states = data["target"] # data["target"] equals data["hidden_states"][:, 1:]
-        t_logits = llm_last(t_hidden_states)
+        t_logits, t_hidden_states = llm_last(data["prev_target"], output_hidden_states=True)
+        t_logits, t_hidden_states, (target_QK, target_V) = llm_last(data["prev_target"], output_hidden_states=True, output_intermediates=True)
         
         # student
-        s_hidden_states = model(input_ids=data["input_ids"], attention_mask=data["attention_mask"])[0]
+        # hidden_states[-2]: data["hidden_states"]
+        # hidden_states[-1]: t_hidden_states
+        s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], target_QK=target_QK, target_V=target_V, attention_mask=data["attention_mask"])[0]
         s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
@@ -434,16 +458,20 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
 def main(args):
     # HUGE speedup, especially on A100 or above
     torch.backends.cuda.matmul.allow_tf32 = True
-    # fix seed
-    set_seed(0)
+    set_seed(0) # fix seed
 
     train_config = {
         "p_w": 0.1,
         "v_w": 1.0,
         "num_workers": 4,
+        "data_noise": True,
+        # "data_noise": False,
+        "noise": "uniform",
+        "mean": 0.0,
+        "std": 0.2,
         # During training, truncating the training sequences means that the larger the setting, the more training data is used, and the better the effect, but it also consumes more VRAM.
         "max_len": 2048,
-        "grad_clip": 0.5,
+        "grad_clip": 1.0,
         "save_freq": 5,
         "log_freq": 1,
     }
@@ -463,6 +491,15 @@ def main(args):
         wandb.require("core")
         run = wandb.init(project="eagle", config=train_config)
 
+    # Data augmentation
+    if train_config["data_noise"]:
+        if train_config["noise"] == "uniform":
+            aug = AddUniformNoise(std=train_config["std"])
+        else:
+            aug = AddGaussianNoise(mean=train_config["mean"], std=train_config["std"])
+    else:
+        aug = None
+
     # Load dataset
     datapath = list_files(args.datadir)
     datapath = datapath[:int(len(datapath) * args.data_ratio)]
@@ -471,7 +508,7 @@ def main(args):
     traindatapath = datapath[:int(len(datapath) * 0.95)]
     testdatapath = datapath[int(len(datapath) * 0.95):]
 
-    traindataset = CustomDataset(traindatapath, max_len=train_config["max_len"])
+    traindataset = CustomDataset(traindatapath, transform=aug, max_len=train_config["max_len"])
     testdataset = CustomDataset(testdatapath, max_len=train_config["max_len"])
 
     train_loader = DataLoader(traindataset, batch_size=args.bs, shuffle=True,
@@ -497,8 +534,7 @@ def main(args):
     )
     
     # Load last layers of llm for teacher
-    llm_last = LLM_Last_Layers(llm, keep_layers_num=args.llm_last_layer)
-    llm_last.eval()
+    llm_last = LLM_Last_Layers_KV(llm, keep_layers_num=1)
     
     # Set draft model config
     draft_config = deepcopy(llm.config)
@@ -508,43 +544,42 @@ def main(args):
     if args.neftune:
         draft_config.neftune_noise_alpha = args.neftune_noise_alpha
     
+    # Additional config for sharedkv
+    draft_config.sharedkv_training = True
+    draft_config.sharedkv_N = args.sharedkv_N
+    
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         logger.info("Loading pretrained model...")
-        model = SSM_Classic.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_KVEagle.from_pretrained(args.pretrained, config=draft_config)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Classic(config=draft_config)
-        
-    # ----------------- Load llm's weights to draft model -----------------
+        model = SSM_KVEagle(config=draft_config)
     
     # load llm's embeddings to draft model
     for param, llm_param in zip(model.model.embed_tokens.parameters(), llm.get_input_embeddings().parameters()):
         param.data = llm_param.data
         param.requires_grad = False
 
-    # # load llm's norm layer to draft model
     # model.model.norm.weight.data = llm.model.norm.weight.data
     # model.model.norm.weight.requires_grad = False
     
-    # # load llm's last attention layer's data to draft model (not trainable)
+    # load llm's last attention layer's data to draft model (not trainable)
     # load_index = -1
     # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
     #     draft_param.data = llm_param.data
     #     draft_param.requires_grad = False
     
     # # load llm's first layer's data to draft model
-    # load_index = -2
+    # load_index = 0
     # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
     #     draft_param.data = llm_param.data
     #     draft_param.requires_grad = False
     
-    # ----------------- Load llm's weights to draft model -----------------
-        
     # apply liger kernel to ssm model
+    apply_liger_kernel_to_llama(model=model.model, rms_norm=False) # eagle have removed some norm layers
     apply_liger_kernel_to_llama(model=llm_last)
-    apply_liger_kernel_to_llama(model=model.model, rms_norm=False) # eagle removes some norm layers, so rms_norm=False
-    
+        
     # Manually free up memory by deleting llm
     logger.info(f'Current used GPU memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
     del llm
@@ -560,7 +595,7 @@ def main(args):
     logger.info(f'warmup steps: {num_warmup_steps}, training steps: {num_training_steps}')
     
     # Optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
     
     # Prepare accelerator
@@ -603,12 +638,7 @@ if __name__ == '__main__':
     parser.add_argument('--savedir', type=str, default='0')
     parser.add_argument('--data-ratio', type=float, default=1)
     parser.add_argument('--pretrained', type=str, default=None)
-    parser.add_argument('--no-validate', '-nv', action='store_true', help='Skip validation')
     
-    # llm last layer
-    parser.add_argument('--llm-last-layer', '-ll', type=int, default=0)
-    
-    # training parameters
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--warmup-ratio', type=int, default=0.05)
     parser.add_argument('--bs', type=int, default=4)
@@ -616,9 +646,15 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4) #1e-2 too large, loss becomes nan when lr>3e-4
     parser.add_argument('--weight-decay', type=float, default=1e-2) # from paper: 1e-3
     parser.add_argument('--betas', type=float, default=(0.9, 0.95))  # from paper: (0.95, 0.5)
-    # neftune (currently seems to decrease performance on eagle)
+    
+    # neftune
     parser.add_argument('--neftune', action='store_true')
     parser.add_argument('--neftune-noise-alpha', '-nefta', type=float, default=5)
+    
+    # sharedkv
+    parser.add_argument('--sharedkv_N', type=int, default=10)
+    
+    parser.add_argument('--no-validate', '-nv', action='store_true', help='Skip validation')
     
     # logging
     parser.add_argument('--wandb', action='store_true')
