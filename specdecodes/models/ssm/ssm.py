@@ -31,11 +31,10 @@ def load_custom_model(model, model_path):
     missing_keys = [key for key in missing_keys if 'embed_tokens' not in key]
     
     # error handling
-    # assert len(missing_keys) == 0, f"Missing keys: {missing_keys}"
-    # assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
     assert len(missing_keys) == 0 and len(unexpected_keys) == 0, f"Missing keys: {missing_keys}, Unexpected keys: {unexpected_keys}"
     
     return model
+
 
 class MergeLinear(nn.Module):
     def __init__(self, config):
@@ -44,6 +43,7 @@ class MergeLinear(nn.Module):
 
     def forward(self, x, emb):
         return self.fc(torch.cat((x, emb), dim=-1))
+
 
 class FeatureSampler(nn.Module):
     def __init__(self, config):
@@ -188,6 +188,7 @@ class SSMBase(nn.Module):
         else:
             return torch.softmax(logits, dim=-1)
 
+
 class SSMBaseNEFT(SSMBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -325,12 +326,13 @@ class SSM_Classic(SSMBaseNEFT):
         
         return root
 
+
 class SSM_Eagle(SSMBaseNEFT):
     def init_custom_model(self, config):
         return modeling_llama_eagle.LlamaModel(config)
 
     def init_additional_modules(self, config):
-        self.fc = MergeLinear(config)
+        self.fusion = MergeLinear(config)
         
     def forward(self, input_ids, hidden_states, *model_args, **kwargs):
         embed_tokens = kwargs.pop("embed_tokens", None)
@@ -341,7 +343,7 @@ class SSM_Eagle(SSMBaseNEFT):
             else:
                 inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
 
-        hidden_states = self.fc(hidden_states, inputs_embeds)
+        hidden_states = self.fusion(hidden_states, inputs_embeds)
         return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
     
     @torch.no_grad()
@@ -458,7 +460,7 @@ class SSM_Eagle(SSMBaseNEFT):
     
 class SSM_FSEagle(SSM_Eagle):
     def init_additional_modules(self, config):
-        self.fc = MergeLinear(config)
+        self.fusion = FeatureSampler(config)
     
 
 class SSM_FSPAD(SSM_Eagle):
@@ -467,7 +469,7 @@ class SSM_FSPAD(SSM_Eagle):
     
     def init_additional_modules(self, config):
         self.hidden_size = config.hidden_size
-        self.fs = FeatureSampler(config)
+        self.fusion = FeatureSampler(config)
         
     def forward(self, input_ids, hidden_states, *model_args, **kwargs):
         embed_tokens = kwargs.pop("embed_tokens", None)
@@ -478,8 +480,7 @@ class SSM_FSPAD(SSM_Eagle):
             else:
                 inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
             
-        # hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
-        hidden_states = self.fs(hidden_states, inputs_embeds)
+        hidden_states = self.fusion(hidden_states, inputs_embeds)
         return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
     
     @torch.no_grad()
