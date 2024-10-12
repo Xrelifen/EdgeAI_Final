@@ -306,7 +306,7 @@ def main(args):
     logger.info("Preparing accelerator...")
     train_loader, test_loader, accelerate_model, llm_first, llm_last, optimizer, scheduler = accelerator.prepare(
         train_loader, test_loader, model, llm_first, llm_last, optimizer, scheduler
-    )   
+    )
  
     # Training loop
     logger.info("Start training...")
