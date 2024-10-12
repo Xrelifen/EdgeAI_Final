@@ -69,7 +69,7 @@ def train_one_epoch(model, llm_first, llm_last, train_loader, optimizer, schedul
                 "train/expect": expect.item()
             }
             for id, prob in enumerate(topk_prob):
-                logdict[f'train/top_{topk_prob_k[id]}_prob'] = prob.item() / total
+                logdict[f'train/prob@{topk_prob_k[id]}'] = prob.item() / total
             run.log(logdict)
         epoch_loss += loss.item()
         num_batches += 1
@@ -93,7 +93,7 @@ def train_one_epoch(model, llm_first, llm_last, train_loader, optimizer, schedul
             "train/epochexpect": expect,
         }
         for id, prob in enumerate(topk_prob):
-            logdict[f'train/epochtop_{topk_prob_k[id]}_prob'] = prob.sum().item() / total
+            logdict[f'train/epochprob@{topk_prob_k[id]}'] = prob.sum().item() / total
         run.log(logdict)
 
 
@@ -145,7 +145,7 @@ def validate(model, llm_first, llm_last, test_loader, train_config, epoch, num_e
         }
 
         for id, prob in enumerate(topk_prob):
-            logdict[f'test/top_{topk_prob_k[id]}_prob'] = prob.sum().item() / total
+            logdict[f'test/prob@{topk_prob_k[id]}'] = prob.sum().item() / total
         run.log(logdict)
 
         # save model
