@@ -42,7 +42,8 @@ class MergeLinear(nn.Module):
         self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=True)
 
     def forward(self, x, emb):
-        return self.fc(torch.cat((x, emb), dim=-1))
+        # swapped (x, emb) to (emb, x) to match official implementation of Eagle
+        return self.fc(torch.cat((emb, x), dim=-1))
 
 
 class FeatureSampler(nn.Module):
