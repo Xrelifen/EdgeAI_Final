@@ -15,7 +15,7 @@ import argparse
 import wandb
 
 from liger_kernel.transformers import apply_liger_kernel_to_llama
-from ..models import SSM_FSEagle, LLM_Last_Layers
+from ..models import SSM_FSEagle, LLM_First_Layers, LLM_Last_Layers
 from .train_utils import *
 
 # logging
@@ -30,7 +30,7 @@ def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logi
     return loss, vloss, ploss
     # return ploss, ploss, ploss
 
-def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
+def train_one_epoch(model, llm_first, llm_last, train_loader, optimizer, scheduler, train_config, epoch, num_epochs, accelerator, run=None):
     model.train()
     device = accelerator.device
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
@@ -45,7 +45,7 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
                 t_logits = llm_last(t_hidden_states)
             
             # student
-            s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], attention_mask=data["attention_mask"])[0]
+            s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], embed_tokens=llm_first, attention_mask=data["attention_mask"])[0]
             s_logits = llm_last(s_hidden_states, head_only=True)
             
             # Calculate loss
@@ -98,7 +98,7 @@ def train_one_epoch(model, llm_last, train_loader, optimizer, scheduler, train_c
 
 
 @torch.no_grad()
-def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
+def validate(model, llm_first, llm_last, test_loader, train_config, epoch, num_epochs, save_dir, accelerator, run=None):
     device = accelerator.device
     model.eval()
     correct, total, epoch_loss, num_batches = 0, 0, 0, 0
@@ -111,7 +111,7 @@ def validate(model, llm_last, test_loader, train_config, epoch, num_epochs, save
         t_logits = llm_last(t_hidden_states)
         
         # student
-        s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], attention_mask=data["attention_mask"])[0]
+        s_hidden_states = model(input_ids=data["input_ids"], hidden_states=data["hidden_states"], embed_tokens=llm_first, attention_mask=data["attention_mask"])[0]
         s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
@@ -232,8 +232,10 @@ def main(args):
         # device_map="auto"
     )
     
-    # Load last layers of llm for teacher
-    llm_last = LLM_Last_Layers(llm, keep_layers_num=args.llm_last_layer)
+    # Load llm's first and last layers
+    llm_first = LLM_First_Layers(llm, keep_layers_num=args.llm_first_layers) # embed_tokens
+    llm_last = LLM_Last_Layers(llm, keep_layers_num=args.llm_last_layers) # lm_head
+    llm_first.eval()
     llm_last.eval()
     
     # Set draft model config
@@ -247,17 +249,18 @@ def main(args):
     # load weights from pretrained model if specified
     if args.pretrained is not None:
         logger.info("Loading pretrained model...")
-        model = SSM_FSEagle.from_pretrained(args.pretrained, config=draft_config)
+        model = SSM_FSEagle.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
     else:
         logger.info("Loading draft model...")
-        model = SSM_FSEagle(config=draft_config)
+        model = SSM_FSEagle(config=draft_config, keep_embeddings=args.keep_embeddings)
         
     # ----------------- Load llm's weights to draft model -----------------
     
-    # load llm's embeddings to draft model
-    for param, llm_param in zip(model.model.embed_tokens.parameters(), llm.get_input_embeddings().parameters()):
-        param.data = llm_param.data
-        param.requires_grad = False
+    # load llm's embeddings to draft model if exists
+    if getattr(model.model, "embed_tokens", None) is not None:
+        for param, llm_param in zip(model.model.embed_tokens.parameters(), llm.get_input_embeddings().parameters()):
+            param.data = llm_param.data
+            param.requires_grad = False
 
     # # load llm's norm layer to draft model
     # model.model.norm.weight.data = llm.model.norm.weight.data
@@ -311,7 +314,7 @@ def main(args):
         # Train
         model.activate_forward_hooks()
         train_one_epoch(
-            accelerate_model, llm_last,
+            accelerate_model, llm_first, llm_last,
             train_loader, optimizer, scheduler, train_config, 
             epoch, args.epochs, accelerator, run
         )
@@ -321,7 +324,7 @@ def main(args):
         if not args.no_validate:
             if (epoch == args.epochs-1) or (epoch % train_config["save_freq"] == 0):
                 validate(
-                    accelerate_model, llm_last,
+                    accelerate_model, llm_first, llm_last,
                     test_loader, train_config, 
                     epoch, args.epochs, args.savedir, accelerator, run
                 )
@@ -341,8 +344,10 @@ if __name__ == '__main__':
     parser.add_argument('--pretrained', type=str, default=None)
     parser.add_argument('--no-validate', '-nv', action='store_true', help='Skip validation')
     
-    # llm last layer
-    parser.add_argument('--llm-last-layer', '-ll', type=int, default=0)
+    # model parameters
+    parser.add_argument('--keep-embeddings', '-le', action='store_true', help='Keep embeddings saved in the model')
+    parser.add_argument('--llm-first-layers', '-fl', type=int, default=0)
+    parser.add_argument('--llm-last-layers', '-ll', type=int, default=0)
     
     # training parameters
     parser.add_argument('--epochs', type=int, default=20)

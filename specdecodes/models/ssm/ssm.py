@@ -81,7 +81,7 @@ class FeatureSampler(nn.Module):
     
     
 class SSMBase(nn.Module):
-    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy'):
+    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', keep_embeddings=False):
         super().__init__()
         self.eos_token_id = eos_token_id
         
@@ -93,6 +93,8 @@ class SSMBase(nn.Module):
             self.config = model.config
         elif config is not None:
             self.model = self.init_custom_model(config)
+            if not keep_embeddings:
+                if hasattr(self.model, "embed_tokens"): del self.model.embed_tokens
             self.config = config
         else:
             raise ValueError("Either model or config must be provided.")
@@ -217,12 +219,17 @@ class SSMBaseNEFT(SSMBase):
 
 
 class SSM_Classic(SSMBaseNEFT):
-    def forward(self, input_ids, *model_args, **kwargs):
-        # not using hidden_states and embed_tokens
+    def forward(self, input_ids, embed_tokens=None, *model_args, **kwargs):
+        # not using hidden_states
         _ = kwargs.pop("hidden_states", None)
-        _ = kwargs.pop("embed_tokens", None)
         
-        return self.model(input_ids, *model_args, **kwargs)
+        with torch.no_grad():
+            if hasattr(self.model, "embed_tokens"):
+                inputs_embeds = self.model.embed_tokens(input_ids)
+            else:
+                inputs_embeds = embed_tokens(input_ids)
+
+        return self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, tree_mask, position_offset, device):
@@ -239,7 +246,7 @@ class SSM_Classic(SSMBaseNEFT):
         return input_ids, position_ids, tree_mask
     
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, lm_head, *model_args, **kwargs):
+    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
         """This method is used to draft/guess the next tokens that the LLM may generate.
 
         Args:
@@ -276,7 +283,8 @@ class SSM_Classic(SSMBaseNEFT):
                 kv_len = past_key_values.get_seq_length()
                 outputs = self(
                     input_ids[:, kv_len:],
-                    past_key_values=past_key_values
+                    embed_tokens=embed_tokens,
+                    past_key_values=past_key_values,
                 )
                 if hasattr(self.model, "lm_head"):
                     logits = outputs.logits[:, -1:].clone()
@@ -288,6 +296,7 @@ class SSM_Classic(SSMBaseNEFT):
                     input_ids,
                     past_key_values=past_key_values,
                     position_ids=position_ids, 
+                    embed_tokens=embed_tokens,
                     attention_mask=invert_mask(tree_mask, dtype=dtype)
                 )
                 if hasattr(self.model, "lm_head"):
@@ -335,15 +344,13 @@ class SSM_Eagle(SSMBaseNEFT):
     def init_additional_modules(self, config):
         self.fusion = MergeLinear(config)
         
-    def forward(self, input_ids, hidden_states, *model_args, **kwargs):
-        embed_tokens = kwargs.pop("embed_tokens", None)
-        
+    def forward(self, input_ids, hidden_states, embed_tokens=None, *model_args, **kwargs):
         with torch.no_grad():
             if hasattr(self.model, "embed_tokens"):
                 inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
             else:
                 inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
-
+                
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
     
