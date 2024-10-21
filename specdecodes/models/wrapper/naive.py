@@ -1,5 +1,6 @@
 import torch
 import logging
+import time
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper

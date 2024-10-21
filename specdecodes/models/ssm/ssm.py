@@ -124,7 +124,9 @@ class SSMBase(nn.Module):
 class SSM_Classic(SSMBase):
     def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
         super().__init__(model=model, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
-    
+        self.depth = 12
+        self.topk_len = 16
+
     def forward(self, input_ids, *model_args, **kwargs):
         _ = kwargs.pop("embed_tokens", None)
         return self.model(input_ids, *model_args, **kwargs)
