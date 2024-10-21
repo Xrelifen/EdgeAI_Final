@@ -304,6 +304,7 @@ class OffloadSDWrapper(SDWrapper):
             gc.collect()
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
+            hidden_indices = hidden_indices.to(input_ids.device)
 
             speculated_tokens_per_iter.append(len(sampled_tokens[0]))
             logging.info(f"new speculated number of token: +{len(sampled_tokens[0])}")
@@ -331,11 +332,9 @@ class OffloadSDWrapper(SDWrapper):
 
         return input_ids               
 
-
-
 class ProfileOffloadSDWrapper(OffloadSDWrapper):
     def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
-        super().__init__(method)
+        super(ProfileOffloadSDWrapper, self).__init__(method=method)
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
         self.iter_count = 1 # assume first step is done (prefill stage)
@@ -457,4 +456,4 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
             with open(out_path, "w") as f:
                 json.dump(self.profile_data, f)
         
-        return input_ids
+        return input_ids            

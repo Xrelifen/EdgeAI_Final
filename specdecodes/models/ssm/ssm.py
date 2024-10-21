@@ -124,7 +124,9 @@ class SSMBase(nn.Module):
 class SSM_Classic(SSMBase):
     def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', *model_args, **model_kwargs):
         super().__init__(model=model, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
-    
+        self.depth = 12
+        self.topk_len = 16
+
     def forward(self, input_ids, *model_args, **kwargs):
         _ = kwargs.pop("embed_tokens", None)
         return self.model(input_ids, *model_args, **kwargs)
@@ -584,7 +586,7 @@ class SSM_SX(SSMBase):
 
         # initialize tree_mask and tree
         tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        root = Node(str(sample_token[0][0].item()), id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
+        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
 
         depth = 1
         prev_nodes = [root]
@@ -596,6 +598,7 @@ class SSM_SX(SSMBase):
                     input_ids[:, kv_len:],
                     past_key_values=past_key_values,
                 )
+                logits = outputs.logits[:, -1:].clone()
             else:
                 # TODO: update_tree_attention
                 input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, tree_mask, org_input_len, device=device)
@@ -605,17 +608,13 @@ class SSM_SX(SSMBase):
                     position_ids=position_ids,
                     attention_mask=invert_mask(tree_mask, dtype=dtype),
                 )
+                logits = outputs.logits.clone()
+            
+            del outputs
         
             # * Get probabilities of each token
-            sampled_probs = torch.softmax(outputs.logits, dim=-1)
-        
-            if sampled_probs.dim() == 3:
-                sampled_probs = sampled_probs.squeeze(0)
-
-            del outputs
-
-            if depth == 1:
-                sampled_probs = sampled_probs[-1:, :]
+            T = 1
+            sampled_probs = torch.softmax(logits[0]/T, dim=-1)
                 
             # * Sample / Select the next nodes
             next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
