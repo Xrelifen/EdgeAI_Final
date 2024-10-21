@@ -133,6 +133,7 @@ class OffloadWrapper(WrapperBase):
 class OffloadSDWrapper(SDWrapper):
     def __init__(self, method="greedy"):
         super(OffloadSDWrapper, self).__init__(method=method)
+        self.exp_log = {}
 
     def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
@@ -319,16 +320,11 @@ class OffloadSDWrapper(SDWrapper):
         
         end_time = time.perf_counter()
 
-        mean_gen_rate = np.mean(speculated_tokens_per_iter)
-        mean_draft_time = np.mean(draft_time_per_iter)
-        mean_target_time = np.mean(target_time_per_iter)
-        logging.info(f"Average spculated number of token: {mean_gen_rate} tokens")
-        logging.info(f"Average draft model time: {mean_draft_time}s")
-        logging.info(f"Average target model time: {mean_target_time}s")
-        logging.info(f"Theoretically speedup: {mean_gen_rate * mean_target_time / (mean_target_time + mean_draft_time)}")
-
-        n_gen_tokens = len(input_ids[0][org_input_len:])
-        logging.info(f"Generate speed: {n_gen_tokens/(end_time-start_time)} tok/s")
+        self.exp_log['accept_rate'] = np.mean(speculated_tokens_per_iter)
+        self.exp_log['avg_draft_time'] = np.mean(draft_time_per_iter)
+        self.exp_log['avg_target_time'] = np.mean(target_time_per_iter)
+        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
 
         return input_ids               
 

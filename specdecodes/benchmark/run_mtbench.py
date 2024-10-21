@@ -184,17 +184,18 @@ def run_eval(
             {"role": "user", "content": input_message},
         ]
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-        output_ids, log = model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
+        output_ids = model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
         output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
-
-        log["query"] = input_message
-        log["response"] = output
+        
+        exp_log = model.exp_log
+        exp_log["query"] = input_message
+        exp_log["response"] = output
         with open(answer_file, 'a+') as f:
-            json.dump(log, f, indent=4)
+            json.dump(exp_log, f, indent=4)
             f.write("\n")
 
-        tput_list.append(log["tput"])
-        accept_rate_list.append(log["accept_rate"])
+        tput_list.append(exp_log["tput"])
+        accept_rate_list.append(exp_log["accept_rate"])
 
     print(f"Average throughput: {np.mean(tput_list)} token / s")
     print(f"Average accept rate: {np.mean(accept_rate_list)}")
@@ -275,15 +276,14 @@ if __name__ == "__main__":
         dataset = [x[1] for x in dataset]
         random.shuffle(dataset)
 
-    result_folder = "specdecodes/benchmark/result/"
-    if not os.path.exists(result_folder):
-        os.makedirs(result_folder)
+    result_folder = "specdecodes/experiments/result"
+    os.makedirs(result_folder, exist_ok=True)
 
     llm_name = args.llm_path.split("/")[-1]
     ssm_name = args.ssm_path.split("/")[-1]
 
     for i in range(args.repeat):
-        answer_file = f"specdecodes/benchmark/result/{llm_name}-{ssm_name}-{i}.jsonl"
+        answer_file = f"{result_folder}/{llm_name}-{ssm_name}-offload-{i}.jsonl"
         if os.path.exists(answer_file):
             os.remove(answer_file)
 
