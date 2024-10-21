@@ -20,6 +20,8 @@ from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
+import prettytable as pt
+
 class OffloadWrapper(WrapperBase):
     def __init__(self):
         super(OffloadWrapper, self).__init__()
@@ -328,3 +330,131 @@ class OffloadSDWrapper(SDWrapper):
         logging.info(f"Generate speed: {n_gen_tokens/(end_time-start_time)} tok/s")
 
         return input_ids               
+
+
+
+class ProfileOffloadSDWrapper(OffloadSDWrapper):
+    def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
+        super().__init__(method)
+        self.profile_data = {}
+        self.sampled_count = 1 # assume first token is sampled (prefill stage)
+        self.iter_count = 1 # assume first step is done (prefill stage)
+        
+        self.out_dir = out_dir
+        self.prefix = prefix
+        
+    
+    def _verify(self, root, logits, logits_warper, do_sample):
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        
+        # tokenize ids
+        nodes = list(preorder_iter(root))
+        for node in nodes:
+            node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
+        
+        # to compute TVD between p and q
+        # tvd = 0.5 * torch.sum(torch.abs(p - q))
+        
+        # profile data
+        # json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
+        # sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
+        # self.profile_data[self.iter_count] = {}
+        # self.profile_data[self.iter_count]["draft_tree"] = json_graph
+        # self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
+        if self.profile_data.get('iter') is None:
+            self.profile_data['iter'] = []
+        
+        if self.profile_data.get('total_len') is None:
+            self.profile_data['total_len'] = []
+        
+        if self.profile_data.get('accept_len') is None:
+            self.profile_data['accept_len'] = []
+            
+        sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
+        self.profile_data['iter'].append(sampled_tokens_list)
+        self.profile_data['total_len'].append(total_len)
+        self.profile_data['accept_len'].append(accept_len)
+        # logging
+        logging.debug(
+            f"Total: {len(list(preorder_iter(root)))},"\
+            f"\tPredicted ({accept_len}/{total_len}): {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+        )
+        
+        # update stats
+        self.sampled_count += len(sampled_tokens[0])
+        self.iter_count += 1
+        
+        return sampled_tokens, hidden_indices, (total_len, accept_len)
+    
+    
+    def _generate(
+        self,
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+    ):
+        cur_time = time.strftime("%Y%m%d-%H%M%S")
+        
+        # prepare output directory
+        if self.out_dir is not None:
+            os.makedirs(self.out_dir, exist_ok=True)
+            out_path = os.path.join(self.out_dir, f"{self.prefix}_{cur_time}.json")
+        else:
+            out_path = None
+        
+        # run generation
+        input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        
+        
+        # compute stats
+        total_sampled = self.sampled_count
+        total_iterations = self.iter_count
+        avg_sampled = total_sampled / total_iterations
+        depth = max(self.profile_data['total_len']) + 1
+        
+        # alpha (node)
+        total_lens = torch.bincount( torch.tensor(self.profile_data['total_len']), minlength=depth)
+        accept_lens = torch.bincount( torch.tensor(self.profile_data['accept_len']), minlength=depth)
+        depth_total_cnt = total_lens + total_lens.sum() - total_lens.cumsum(dim=-1) # reverse cumsum
+        depth_total_cnt = depth_total_cnt[1:] # remove first element
+        depth_accept_cnt = accept_lens + accept_lens.sum() - accept_lens.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_accept_cnt[1:] # remove first element
+        alpha_per_node = depth_accept_cnt.float() / depth_total_cnt.float()
+        
+        # aLive ratio
+        depth_alive_rate = depth_total_cnt.float() / depth_total_cnt[0]
+        
+        # alpha (depth)
+        sampled_lens = torch.tensor([len(sampled_tokens) for sampled_tokens in self.profile_data["iter"]])
+        sampled_len_bins = torch.bincount(sampled_lens, minlength=depth+1)
+        depth_total_cnt = sampled_len_bins + sampled_len_bins.sum() - sampled_len_bins.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_total_cnt - sampled_len_bins
+        depth_total_cnt = depth_total_cnt[1:depth]
+        depth_accept_cnt = depth_accept_cnt[1:depth]
+        alpha_per_depth = depth_accept_cnt.float() / depth_total_cnt.float()
+        
+        # log stats
+        tb = pt.PrettyTable()
+        tb.field_names = [ "Summary \ Depth" ] + [ f"{i}" for i in range(1, depth) ]
+        tb.add_row([ "Trials count" ] + [ f"{val}" for val in depth_total_cnt.tolist() ])
+        tb.add_row([ "Accept count" ] + [ f"{val}" for val in depth_accept_cnt.tolist() ])
+        tb.add_row([ "Alpha (node)" ] + [ f"{val:.2f}" for val in alpha_per_node.tolist() ])
+        tb.add_row([ "Alpha (depth)" ] + [ f"{val:.2f}" for val in alpha_per_depth.tolist() ])
+        tb.add_row([ "Alive ratio" ] + [ f"{val:.2f}" for val in depth_alive_rate.tolist() ])
+        logging.info(
+            f"Total sampled: {total_sampled},"\
+            f"\tTotal iterations: {total_iterations},"\
+            f"\tAverage sampled: {avg_sampled:.2f}"\
+            f"\n{tb}"
+        )
+        
+        # save profile data
+        self.profile_data["total_sampled"] = total_sampled
+        self.profile_data["total_iterations"] = total_iterations
+        self.profile_data["average_sampled"] = avg_sampled
+        if self.out_dir is not None:
+            with open(out_path, "w") as f:
+                json.dump(self.profile_data, f)
+        
+        return input_ids
