@@ -14,10 +14,13 @@ from specdecodes.models import (
     OffloadSDWrapper, 
     SharedKV_SDWrapper, 
     SharedKV_ProfileSDWrapper,
-    OffloadWrapper
+    OffloadWrapper,
+    ProfileOffloadSDWrapper
 ) 
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX, SSM_SQ
 
+# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
+# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
 
 def load_model(
     llm_path: str,
@@ -123,12 +126,33 @@ def load_offload_model(
         ssm = ssm.to(device)
 
         # Load offload model
+        model = ProfileOffloadSDWrapper(out_dir='specdecodes/experiments/profile_data/llama3')
+        # model = OffloadSDWrapper()
+        model.set_ssm(ssm)
+
+    elif mode == "sq-offload":
+        ssm = SSM_SQ.from_pretrained(
+            ssm_path,
+            # config=draft_config,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+            sampling_method=sd_method,
+        )
+        grow_map = torch.load('../Sequoia/demo_tree_512_new.pt')
+        ssm.load_spectree_arch(grow_map['branches'])
+        
+        ssm = ssm.to(device)
+        # Load offload model
         model = OffloadSDWrapper()
         model.set_ssm(ssm)
+    
 
     elif mode == "offload":
         model = OffloadWrapper()
-        
+
+    else:
+        raise ValueError("Invalid mode.")
+
     model.set_tokenizer(tokenizer)
     model.set_offload_llm(llm_path)
     model.eval()
