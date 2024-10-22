@@ -9,7 +9,7 @@ from fastchat.llm_judge.common import load_questions
 from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from ..models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper
+from ..models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
 from ..models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
 
 # set random deterministic
@@ -128,7 +128,7 @@ def load_offload_model(
         model.set_ssm(ssm)
 
     elif mode == "offload":
-        model = OffloadWrapper()
+        model = OffloadWrapper(pin_memory=False)
         
     model.set_tokenizer(tokenizer)
     model.set_offload_llm(llm_path)
@@ -195,10 +195,14 @@ def run_eval(
             f.write("\n")
 
         tput_list.append(exp_log["tput"])
-        accept_rate_list.append(exp_log["accept_rate"])
+
+        if "sd" in mode:
+            accept_rate_list.append(exp_log["accept_rate"])
 
     print(f"Average throughput: {np.mean(tput_list)} token / s")
-    print(f"Average accept rate: {np.mean(accept_rate_list)}")
+
+    if "sd" in mode:
+        print(f"Average accept rate: {np.mean(accept_rate_list)}")
  
 
 if __name__ == "__main__":
@@ -214,7 +218,7 @@ if __name__ == "__main__":
         "--ssm-path",
         "-ssm",
         type=str,
-        required=True,
+        default="",
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(

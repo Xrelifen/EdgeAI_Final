@@ -23,8 +23,10 @@ from ..utils import TreeDynamicCache, build_tree_attention_data
 import prettytable as pt
 
 class OffloadWrapper(WrapperBase):
-    def __init__(self):
+    def __init__(self, pin_memory=True):
         super(OffloadWrapper, self).__init__()
+        self.exp_log = {}
+        self.pin_memory = pin_memory
 
     def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
         device_map = {
@@ -63,9 +65,11 @@ class OffloadWrapper(WrapperBase):
                 device_map[f"model.layers.{i}"] = "cpu"
         
         # set pin_memory to reduce memory access time
-        for layer in self.llm.model.layers:
-            for param in layer.parameters():
-                param.data = param.data.cpu().pin_memory(device)
+        
+        if self.pin_memory:
+            for layer in self.llm.model.layers:
+                for param in layer.parameters():
+                    param.data = param.data.cpu().pin_memory(device)
 
         self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
@@ -127,6 +131,7 @@ class OffloadWrapper(WrapperBase):
         end_time = time.perf_counter()
         n_gen_token = len(input_ids[0][org_input_len:])
         logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)} token/s")
+        self.exp_log['tput'] = n_gen_token / (end_time-start_time)
 
         return input_ids
 
