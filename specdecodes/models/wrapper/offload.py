@@ -136,7 +136,6 @@ class OffloadWrapper(WrapperBase):
 class OffloadSDWrapper(SDWrapper):
     def __init__(self, method="greedy"):
         super(OffloadSDWrapper, self).__init__(method=method)
-        self.exp_log = {}
 
     def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
