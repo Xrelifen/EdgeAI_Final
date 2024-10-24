@@ -64,6 +64,9 @@ class NaiveWrapper(WrapperBase):
         
         end_time = time.perf_counter()
         n_gen_token = len(input_ids[0][org_input_len:])
-        logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)}")
+
+        self.exp_log['n_token'] = n_gen_token
+        self.exp_log['tput'] = n_gen_token / (end_time-start_time)
+        # logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)}")
 
         return input_ids

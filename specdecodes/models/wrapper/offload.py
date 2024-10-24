@@ -25,7 +25,6 @@ import prettytable as pt
 class OffloadWrapper(WrapperBase):
     def __init__(self, pin_memory=True):
         super(OffloadWrapper, self).__init__()
-        self.exp_log = {}
         self.pin_memory = pin_memory
 
     def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):

@@ -10,6 +10,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria, Stopping
 class WrapperBase(nn.Module):
     def __init__(self):
         super(WrapperBase, self).__init__()
+        self.exp_log = {}
         
     # calling .config is same as calling .llm.config
     @property
