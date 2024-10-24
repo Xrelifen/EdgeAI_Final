@@ -65,7 +65,6 @@ class OffloadWrapper(WrapperBase):
                 device_map[f"model.layers.{i}"] = "cpu"
         
         # set pin_memory to reduce memory access time
-        
         if self.pin_memory:
             for layer in self.llm.model.layers:
                 for param in layer.parameters():

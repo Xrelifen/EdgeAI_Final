@@ -126,8 +126,8 @@ def load_offload_model(
         ssm = ssm.to(device)
 
         # Load offload model
-        model = ProfileOffloadSDWrapper(out_dir='specdecodes/experiments/profile_data/llama3')
-        # model = OffloadSDWrapper()
+        # model = ProfileOffloadSDWrapper(out_dir='specdecodes/experiments/profile_data/llama3')
+        model = OffloadSDWrapper()
         model.set_ssm(ssm)
 
     elif mode == "sq-offload":
@@ -207,6 +207,9 @@ def main(args):
     start_time = time.time()
     output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     end_time = time.time()
+
+    for key, value in model.exp_log.items():
+        print(f"{key}: {value}")
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
