@@ -21,8 +21,15 @@ LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --t
 
 ## 2. Run MT-Bench Benchmark:
 
+- Slower case
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m specdecodes.benchmark.llm_judge.gen_sd_answer --model-id llama7b --dtype float16 --mode sd-classic --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --out-dir specdecodes/experiments/mt-bench/b/greedy-d9k15/l1kl
+```
+
+- New MTBench runner
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m specdecodes.benchmark.run_mtbench --llm-path meta-llama/Llama-3.1-8B-Instruct --ssm-path meta-llama/Llama-3.2-1B-Instruct --mode sd-offload
 ```
 
 
