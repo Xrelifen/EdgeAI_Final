@@ -62,6 +62,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29500 --num_p
 - [ ] Implement efficient tree pruning
   - Current code does not prune token tree. This results in extra llm computation time.
 
+- [ ] Rewrite data_gen
+  - data_gen produces wrong masking. Currently only old version works.
+  - Rewrite data_gen with cleaner code.
+
 - [ ] Handle multiple GPU inference correctly
   - May require copying llm's embed_token in each GPU for efficiency.
   - May require refactoring wrapper and ssm's code.
