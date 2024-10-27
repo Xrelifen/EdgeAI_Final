@@ -4,34 +4,34 @@
 
 ## 1. Fast Run & Test:
 
-**a. Naive LLM Decoding:**
+a. Naive LLM Decoding:
 ```bash
 LOGLEVEL=DEBUG CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample -nw --mode naive --seed 999 -llm meta-llama/Llama-2-7b-chat-hf
 ```
 
-**b. Classic Speculative Decoding:**
+b. Classic Speculative Decoding:
 ```bash
 LOGLEVEL=DEBUG CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample -nw --mode sd-classic --sd-method greedy --seed 999 -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama_v1.1 
 ```
 
-**c. Eagle-based Speculative Decoding:**
+c. Eagle-based Speculative Decoding:
 ```bash
 LOGLEVEL=DEBUG CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample -nw --seed 999 --mode sd-eagle --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm <SSM directory>
 ```
 
 ## 2. Run MT-Bench Benchmark:
 
-**a. Naive LLM Decoding:**
+a. Naive LLM Decoding:
 ```bash
 LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=1 python -m specdecodes.benchmark.run_mtbench --dtype float16 -llm meta-llama/Llama-2-7b-chat-hf --mode naive --do-sample --temp 1.0 --log-dir <log directory>
 ```
 
-**b. Classic Speculative Decoding:**
+b. Classic Speculative Decoding:
 ```bash
 LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=1 python -m specdecodes.benchmark.run_mtbench --dtype float16 -llm meta-llama/Llama-2-7b-chat-hf -ssm <draft model directory> --mode sd-classic --sd-method greedy --do-sample --temp 1.0 --out-dir <out directory> --log-dir <log directory>
 ```
 
-**c. Eagle-based Speculative Decoding:**
+c. Eagle-based Speculative Decoding:
 ```bash
 LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=1 python -m specdecodes.benchmark.run_mtbench --dtype float16 -llm meta-llama/Llama-2-7b-chat-hf -ssm <draft model directory> --mode sd-eagle --sd-method greedy --do-sample --temp 1.0 --out-dir <out directory> --log-dir <log directory>
 ```
@@ -67,5 +67,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29500 --num_p
   - May require refactoring wrapper and ssm's code.
 
 - [ ] Handle profiling in a better way
-  - Currently, we implement import a seperate class for each wrapper, which is not efficient.
+  - Currently, we implement & import a seperate class for each wrapper, which is not efficient.
   - May require grouping code to several functions to unify naive and sd classes.
