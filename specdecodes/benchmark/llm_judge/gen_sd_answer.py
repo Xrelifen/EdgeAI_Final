@@ -19,8 +19,8 @@ from fastchat.model import get_conversation_template # load_model,
 from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SharedKV_SDWrapper, SharedKV_ProfileSDWrapper
-from ...models import SSM_Classic, SSM_Eagle, SSM_SharedKV
+from ...models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
+from ...models import SSM_Classic, SSM_Eagle
 
 
 # set random deterministic
@@ -80,22 +80,11 @@ def load_model(
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=out_dir)
         
+        # compress
+        # draft_config.compress_hidden_ratio = 0.5
+        
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
-        
-    elif mode == "sd-sharedkv":
-        # model = SharedKV_SDWrapper()
-        model = SharedKV_ProfileSDWrapper(out_dir=out_dir)
-        
-        # load SSM
-        ssm = SSM_SharedKV.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,

@@ -10,13 +10,14 @@ from typing import List
 from bigtree import Node
 
 from .training_hooks import TrainingHook, NEFTuneHook
-from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling, mixed_k_sampling
+from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
 from ..utils import invert_mask
 
-from ..llm.modeling_llama import ACT2FN
+from ..llm.modeling_llama import ACT2FN, LlamaMLP
 from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..llm import modeling_llama_no_inout_norm_fspad as modeling_llama_fspad
+from ..llm import modeling_llama_no_in_norm
+
      
      
 def load_custom_model(model, model_path):
@@ -45,8 +46,7 @@ class MergeLinear(nn.Module):
         # swapped (x, emb) to (emb, x) to match official implementation of Eagle
         return self.fc(torch.cat((emb, x), dim=-1))
 
-
-class FeatureSampler(nn.Module):
+class MergeFFN(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -79,6 +79,108 @@ class FeatureSampler(nn.Module):
 
         return x + down_proj
     
+class FeatureSampler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.org_hidden_size = config.org_hidden_size
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.org_hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x, emb):
+        if self.config.pretraining_tp > 1:
+            slice = self.intermediate_size // self.config.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+            gate_proj = torch.cat(
+                [F.linear(emb, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
+            )
+            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
+
+            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+            down_proj = [
+                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
+            ]
+            down_proj = sum(down_proj)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(emb)) * self.up_proj(x))
+
+        return x + down_proj
+    
+class Extractor(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.org_hidden_size = config.org_hidden_size
+        self.hidden_size = config.hidden_size # reduced hidden size
+        self.intermediate_size = config.org_intermediate_size
+        self.gate_proj = nn.Linear(self.org_hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.org_hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        if self.config.pretraining_tp > 1:
+            slice = self.intermediate_size // self.config.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+            gate_proj = torch.cat(
+                [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
+            )
+            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
+
+            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+            down_proj = [
+                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
+            ]
+            down_proj = sum(down_proj)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        return down_proj
+
+class Inserter(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size # reduced hidden size
+        self.org_hidden_size = config.org_hidden_size # reduced hidden size
+        self.intermediate_size = config.org_intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.org_hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x, hidden_states):
+        if self.config.pretraining_tp > 1:
+            slice = self.intermediate_size // self.config.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+            gate_proj = torch.cat(
+                [F.linear(hidden_states, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
+            )
+            up_proj = torch.cat([F.linear(hidden_states, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
+
+            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+            down_proj = [
+                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
+            ]
+            down_proj = sum(down_proj)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
+
+        return x + down_proj
+
     
 class SSMBase(nn.Module):
     def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', keep_embeddings=False):
@@ -142,9 +244,14 @@ class SSMBase(nn.Module):
         pass
 
     def init_draft_parameters(self):
-        self.depth = 9 + 1 # 6 + 1 # 9 + 1 
-        self.topk_len = 15 # 5 # 15
-        self.min_sample_prob = 1e-8
+        # self.depth = 9 + 1
+        # self.topk_len = 15
+        # self.min_sample_prob = 1e-8
+        # self.min_accept_prob = 1e-8
+        self.depth = 6 + 1
+        self.topk_len = 5
+        self.min_sample_prob = 1e-2
+        self.min_accept_prob = 1e-2
     
     def init_sampling_method(self, sampling_method):
         if sampling_method == 'greedy':
@@ -153,14 +260,6 @@ class SSMBase(nn.Module):
             self.sample_nodes = k_sampling
         elif sampling_method == 'hstochastic':
             self.sample_nodes = heuristic_k_sampling
-        elif sampling_method == 'mixed':
-            def mixed_sampling(sampling_probs, nodes, num_samples, step):
-                SWITCH_STEP = 2
-                if step <= SWITCH_STEP:
-                    return topk_sampling(sampling_probs, nodes, num_samples, step)
-                else:
-                    return heuristic_k_sampling(sampling_probs, nodes, num_samples, step)
-            self.sample_nodes = mixed_sampling
         else:
             raise ValueError("Sampling method not supported")
         
@@ -313,7 +412,7 @@ class SSM_Classic(SSMBaseNEFT):
             sampled_probs = torch.softmax(logits[0]/T, dim=-1)
             
             #* Sample/Select the next nodes
-            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth, min_accept_prob=self.min_accept_prob)
 
             #* Append nodes to their parent nodes
             for node in next_nodes:
@@ -339,6 +438,13 @@ class SSM_Classic(SSMBaseNEFT):
 
 class SSM_Eagle(SSMBaseNEFT):
     def init_custom_model(self, config):
+        config.org_hidden_size = config.hidden_size
+        config.org_intermediate_size = config.intermediate_size
+        if hasattr(config, "compress_hidden_ratio"):
+            config.hidden_size = int(config.hidden_size * config.compress_hidden_ratio)
+        if hasattr(config, "compress_intermediate_ratio"):
+            config.intermediate_size = int(config.intermediate_size * config.compress_intermediate_ratio)
+            
         return modeling_llama_eagle.LlamaModel(config)
 
     def init_additional_modules(self, config):
@@ -350,9 +456,11 @@ class SSM_Eagle(SSMBaseNEFT):
                 inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
             else:
                 inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
-                
+        
         hidden_states = self.fusion(hidden_states, inputs_embeds)
-        return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+
+        return hidden_states
     
     @torch.no_grad()
     def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset, device):
@@ -410,39 +518,30 @@ class SSM_Eagle(SSMBaseNEFT):
             #* Decode previous nodes
             if depth == 1: # first iteration
                 kv_len = past_key_values.get_seq_length()
-                outputs = self(
+                hidden_states = self(
                     input_ids[:, kv_len:],
                     hidden_states=hidden_states,
                     embed_tokens=embed_tokens,
                     past_key_values=past_key_values,
-                    # output_hidden_states=True
-                )
-                hidden_states = outputs.last_hidden_state[:, -1:].clone() # Only the last token's hidden state is needed.
-                # hidden_states = outputs.hidden_states[-1][:, -1:].clone() # Only the last token's hidden state is needed.
+                )[:, -1:]
+                
             else:
                 hidden_states, input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, hidden_states, tree_mask, org_input_len, device=hidden_states.device)
-                outputs = self(
+                hidden_states = self(
                     input_ids,
                     hidden_states=hidden_states,
                     embed_tokens=embed_tokens, 
                     past_key_values=past_key_values,
                     position_ids=position_ids, 
                     attention_mask=invert_mask(tree_mask, dtype=dtype),
-                    # output_hidden_states=True
                 )
-                hidden_states = outputs.last_hidden_state
-                # hidden_states = outputs.hidden_states[-1].clone()
-
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
 
             #* Get the probabilities of each token
             T = 1
             sampled_probs = torch.softmax(lm_head(hidden_states)[0]/T, dim=-1)
             
             #* Sample/Select the next nodes
-            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth, min_accept_prob=self.min_accept_prob)
 
             #* Append nodes to their parent nodes
             for node in next_nodes:
@@ -465,120 +564,38 @@ class SSM_Eagle(SSMBaseNEFT):
         
         return root
     
-    
-class SSM_FSEagle(SSM_Eagle):
-    def init_additional_modules(self, config):
-        self.fusion = FeatureSampler(config)
-    
-
-class SSM_FSPAD(SSM_Eagle):
+class SSM_ShrinkEagle(SSM_Eagle):
     def init_custom_model(self, config):
-        return modeling_llama_fspad.LlamaModel(config)
-    
+        config.org_hidden_size = config.hidden_size
+        config.org_intermediate_size = config.intermediate_size
+        if hasattr(config, "compress_hidden_ratio"):
+            config.hidden_size = int(config.hidden_size * config.compress_hidden_ratio)
+        if hasattr(config, "compress_intermediate_ratio"):
+            config.intermediate_size = int(config.intermediate_size * config.compress_intermediate_ratio)
+            
+        return modeling_llama_eagle.LlamaModel(config)
+
     def init_additional_modules(self, config):
-        self.hidden_size = config.hidden_size
-        self.fusion = FeatureSampler(config)
+        limited_vocab_size = 8192
+        self.lm_head = nn.Linear(config.hidden_size, limited_vocab_size, bias=False)
+        self.model.embed_tokens = nn.Embedding(limited_vocab_size, config.hidden_size, config.pad_token_id)
+        self.extract = Extractor(config)
         
-    def forward(self, input_ids, hidden_states, *model_args, **kwargs):
-        embed_tokens = kwargs.pop("embed_tokens", None)
+        # self.id_ssm_to_llm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map.pt", weights_only=True)
+        self.id_llm_to_ssm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_inverse.pt", weights_only=True)
+        self.id_llm_freq_map = torch.load('/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_freq.pt', weights_only=True)
         
-        with torch.no_grad():
-            if hasattr(self.model, "embed_tokens"):
-                inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
-            else:
-                inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
-            
-        hidden_states = self.fusion(hidden_states, inputs_embeds)
-        return self.model(inputs_embeds=hidden_states, *model_args, **kwargs)
-    
-    @torch.no_grad()
-    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
-        """This method is used to draft/guess the next tokens that the LLM may generate.
-
-        Args:
-            input_ids (Tensor): The input token ids.
-            hidden_states (Tensor): hidden_states from the previous iteration.
-            past_key_values (Cache): Cache object to store the past key-values generated by the model.
-            embed_tokens (Module): embedding from LLM.
-            lm_head (Module): lm_head from LLM.
-
-        Returns:
-            Node: The root node of the generated draft token tree.
-        """
         
-        device = input_ids.device
-        if hasattr(self.model, "lm_head"):
-            dtype = self.model.lm_head.weight.dtype
+    def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):
+        # convert input_ids to custom vocab
+        self.id_llm_to_ssm = self.id_llm_to_ssm.to(hidden_states.device)
+        input_ids = self.id_llm_to_ssm[input_ids]
+        
+        inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
+        hidden_states = inputs_embeds + self.extract(hidden_states) 
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+        
+        if not return_logits:
+            return hidden_states
         else:
-            dtype = lm_head.weight.dtype
-        
-        # take out last token as sample_token
-        sample_token = input_ids[:, -1:]
-        
-        # remove the first token from input_ids (input_ids is shifted by 1)
-        input_ids = input_ids[:, 1:]
-        
-        # keep original length of input_ids
-        org_input_len = input_ids.shape[1] # offset of positon_id
-        
-        # initialize tree_mask and tree 
-        tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
-        
-        depth = 1 # depth starts from 1 in tree library
-        prev_nodes = [root]
-        while depth < self.depth:
-            #* Decode previous nodes
-            if depth == 1: # first iteration
-                kv_len = past_key_values.get_seq_length()
-                outputs = self(
-                    input_ids[:, kv_len:],
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens,
-                    past_key_values=past_key_values
-                )
-                hidden_states = outputs.last_hidden_state[:, -1:].clone() # Only the last token's hidden state is needed.
-            else:
-                hidden_states, input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, hidden_states, tree_mask, org_input_len, device=hidden_states.device)
-                outputs = self(
-                    input_ids,
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens, 
-                    past_key_values=past_key_values,
-                    position_ids=position_ids, 
-                    attention_mask=invert_mask(tree_mask, dtype=dtype)
-                )
-                hidden_states = outputs.last_hidden_state
-
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
-            
-            #* Get the probabilities of each token
-            T = 1
-            sampled_probs = torch.softmax(lm_head(hidden_states[:,  :, :self.hidden_size])[0]/T, dim=-1)
-            hidden_states = hidden_states[:, :, self.hidden_size:]
-            
-            #* Sample/Select the next nodes
-            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth)
-
-            #* Append nodes to their parent nodes
-            for node in next_nodes:
-                prev_nodes[node.ind].append(node)
- 
-            #* Get the nodes as input for next iteration
-            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
-            prev_nodes = next_nodes
-            
-            #* Depth increment
-            depth += 1
-            
-            #* Early stop if no nodes for next iteration
-            # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
-            if len(next_nodes) == 0:
-                break
-        
-        #* Crop the tree to the max_candidate_tokens
-        past_key_values.crop(org_input_len)
-        
-        return root
+            return self.lm_head(hidden_states), hidden_states

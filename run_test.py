@@ -6,8 +6,8 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_FSEagle, SSM_FSPAD
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
+from specdecodes.models import SSM_Classic, SSM_Eagle
 
 
 def load_model(
@@ -33,11 +33,13 @@ def load_model(
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = layers
+        
     else:
         draft_config = None
 
     if mode == "naive":
-        model = NaiveWrapper()
+        # model = NaiveWrapper()
+        model = ProfileNaiveWrapper()
         
     elif mode == "hf":
         model = HuggingFaceWrapper()
@@ -60,36 +62,12 @@ def load_model(
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
+        # compress
+        # draft_config.compress_hidden = True
+        # draft_config.compress_hidden_ratio = 0.5
+        
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
-    
-    elif mode == "sd-fseagle":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
-        
-        # load SSM
-        ssm = SSM_FSEagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
-    
-    elif mode == "sd-fspad":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
-        
-        # load SSM
-        ssm = SSM_FSPAD.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,
@@ -141,7 +119,7 @@ def main(args):
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
     input_message = "What's the best way to start learning a new language?"
-    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?" # beyblade is the correct spelling
+    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},

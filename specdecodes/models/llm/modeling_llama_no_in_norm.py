@@ -211,19 +211,14 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 
 class LlamaMLP(nn.Module):
-    def __init__(self, config, layer_idx: Optional[int] = None):
+    def __init__(self, config):
         super().__init__()
-        self.layer_idx = layer_idx # [Modified]
-        self.num_hidden_layers = config.num_hidden_layers # [Modified]
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        if layer_idx == self.num_hidden_layers - 1: # [Modified]
-            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size*2, bias=config.mlp_bias)
-        else:
-            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
@@ -615,16 +610,15 @@ LLAMA_ATTENTION_CLASSES = {
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
-        self.layer_idx = layer_idx # [Modified]
-        self.num_hidden_layers = config.num_hidden_layers # [Modified]
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
 
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
-        self.mlp = LlamaMLP(config, layer_idx=layer_idx)
-        if layer_idx != 0: # [Modified]
-            self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = LlamaMLP(config)
         
+        if layer_idx != 0:
+            self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps) # [Modified]
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -663,8 +657,8 @@ class LlamaDecoderLayer(nn.Module):
         """
         residual = hidden_states
 
-        if self.layer_idx != 0: # [Modified]
-            hidden_states = self.input_layernorm(hidden_states)
+        if self.layer_idx != 0:
+            hidden_states = self.input_layernorm(hidden_states) # [Modified]
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -684,12 +678,7 @@ class LlamaDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if self.layer_idx == self.num_hidden_layers - 1: # [Modified]
-            # hidden_states size is (batch_size, seq_len, hidden_size*2)
-            # residual size is (batch_size, seq_len, hidden_size)
-            hidden_states = hidden_states + residual.repeat(1, 1, 2)
-        else:
-            hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
 
@@ -848,7 +837,7 @@ class LlamaModel(LlamaPreTrainedModel):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        # self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps) # [Modified]
+        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
@@ -965,7 +954,7 @@ class LlamaModel(LlamaPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        # hidden_states = self.norm(hidden_states) # [Modified]
+        hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
