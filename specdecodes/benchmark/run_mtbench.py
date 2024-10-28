@@ -7,9 +7,10 @@ import os
 import json
 import numpy as np
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
 from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
+from ..models import modeling_llama
 
 # Set random seed for reproducibility
 torch.manual_seed(0)
@@ -18,7 +19,7 @@ random.seed(0)
 def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=torch.float16, device="auto"):
     # Load tokenizer and LLM
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
-    llm = AutoModelForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
+    llm = modeling_llama.LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
 
     # Prepare SSM configuration
     draft_config = deepcopy(llm.config) if os.path.exists(ssm_path) else None
@@ -39,7 +40,9 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
         ssm_cls = SSM_Classic if mode == "sd-classic" else SSM_Eagle
         ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config, sampling_method=sd_method,
                                       eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
-        model.set_ssm(ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device))
+        ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ssm = torch.compile(ssm, mode="reduce-overhead")
+        model.set_ssm(ssm)
 
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
