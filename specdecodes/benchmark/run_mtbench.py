@@ -163,6 +163,12 @@ if __name__ == "__main__":
             args.layers, args.out_dir, dataset, log_file, args.max_new_tokens, 
             args.llm_offload, args.temp, str_to_torch_dtype(args.dtype), args.do_sample
         )
+        print(
+            f"Evaluation [{i}]:\n" \
+            f"\tThroughput: {avg_tput} tokens/sec\n" \
+            f"\tAccept Rate: {avg_accept_rate}"
+        )
+
         tput_list.append(avg_tput)
         accept_rate_list.append(avg_accept_rate)
     
