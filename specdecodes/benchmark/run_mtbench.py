@@ -132,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--repeat", type=int, default=3, help="Repeat evaluation.")
     parser.add_argument("--temp", type=float, default=0.7, help="Temperature for sampling.")
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling.")
-    parser.add_argument("--llm_offload", action="store_true", help="Offload LLM")
+    parser.add_argument("--llm-offload", action="store_true", help="Offload LLM")
 
     args = parser.parse_args()
 

@@ -5,6 +5,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+import gc
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
@@ -30,8 +31,10 @@ class SDWrapper(WrapperBase):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
+        elif hasattr(self.ssm, "model"):
+            lm_head = self.ssm.model.get_output_embeddings()
         else:
-            lm_head = self.llm.lm_head
+            lm_head = self.llm.get_output_embeddings()
             
         return self.ssm.speculate(
             input_ids,
@@ -180,6 +183,7 @@ class SDWrapper(WrapperBase):
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
+            gc.collect()
 
             # * verify
             sampled_tokens, hidden_indices, _ = self._verify(
