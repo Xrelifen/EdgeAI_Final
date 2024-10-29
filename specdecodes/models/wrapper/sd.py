@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import numpy as np
 import torch
 import torch.nn.functional as F
 from .base import WrapperBase
@@ -211,17 +212,32 @@ class ProfileSDWrapper(SDWrapper):
         self.out_dir = out_dir
         self.prefix = prefix
         
+        self.exp_log = {}
+        self.draft_time_per_iter = []
+        self.target_time_per_iter = []
+        self.verify_time_per_iter = []
+        
+    def _speculate(self, input_ids, hidden_states, past_key_values):
+        start_time = time.perf_counter()
+        root = super()._speculate(input_ids, hidden_states, past_key_values)
+        self.draft_time_per_iter.append(time.perf_counter()-start_time)
+        return root
+    
+    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+        start_time = time.perf_counter()
+        outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
+        self.target_time_per_iter.append(time.perf_counter()-start_time)
+        return outputs
     
     def _verify(self, root, logits, logits_warper, do_sample):
+        start_time = time.perf_counter()
         sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        self.verify_time_per_iter.append(time.perf_counter()-start_time)
         
-        # tokenize ids
-        nodes = list(preorder_iter(root))
-        for node in nodes:
-            node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
-        
-        # to compute TVD between p and q
-        # tvd = 0.5 * torch.sum(torch.abs(p - q))
+        # tokenize id to text for visualization
+        # nodes = list(preorder_iter(root))
+        # for node in nodes:
+        #     node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
         
         # profile data
         # json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
@@ -229,14 +245,11 @@ class ProfileSDWrapper(SDWrapper):
         # self.profile_data[self.iter_count] = {}
         # self.profile_data[self.iter_count]["draft_tree"] = json_graph
         # self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
-        if self.profile_data.get('iter') is None:
-            self.profile_data['iter'] = []
         
-        if self.profile_data.get('total_len') is None:
-            self.profile_data['total_len'] = []
-        
-        if self.profile_data.get('accept_len') is None:
-            self.profile_data['accept_len'] = []
+        # create profile data if not exist
+        self.profile_data['iter'] = self.profile_data.get('iter', [])
+        self.profile_data['total_len'] = self.profile_data.get('total_len', [])
+        self.profile_data['accept_len'] = self.profile_data.get('accept_len', [])
             
         sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
         self.profile_data['iter'].append(sampled_tokens_list)
@@ -272,8 +285,10 @@ class ProfileSDWrapper(SDWrapper):
             out_path = None
         
         # run generation
+        org_input_len = len(input_ids[0])
+        start_time = time.perf_counter()
         input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
-        
+        end_time = time.perf_counter()
         
         # compute stats
         total_sampled = self.sampled_count
@@ -324,5 +339,19 @@ class ProfileSDWrapper(SDWrapper):
         if self.out_dir is not None:
             with open(out_path, "w") as f:
                 json.dump(self.profile_data, f)
+                
+        # save exp_log
+        self.exp_log['avg_draft_time'] = np.mean(self.draft_time_per_iter)
+        self.exp_log['avg_target_time'] = np.mean(self.target_time_per_iter)
+        self.exp_log['avg_verify_time'] = np.mean(self.verify_time_per_iter)
+        self.exp_log['avg_sampled'] = avg_sampled
+        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        logging.info(
+            f"Average draft time: {self.exp_log['avg_draft_time']:.4f},"\
+            f"\tAverage target time: {self.exp_log['avg_target_time']:.4f},"\
+            f"\tAverage verify time: {self.exp_log['avg_verify_time']:.4f}"
+            f"\nGenerated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+        )
         
         return input_ids
