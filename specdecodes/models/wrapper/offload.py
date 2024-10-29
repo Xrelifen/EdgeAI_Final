@@ -187,31 +187,11 @@ class OffloadSDWrapper(SDWrapper):
             logging.info(f"[Warning] memory usage is too much")
 
         
-    def _speculate(self, inputs, past_key_values):
-        return self.ssm.speculate(
-            inputs,
-            past_key_values=past_key_values
-        ) 
+    def _speculate(self, input_ids, hidden_states, past_key_values):
+        return super()._speculate(input_ids=input_ids, hidden_states=hidden_states, past_key_values=past_key_values)
 
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
-        # Preparing llm's tree decoding data, also updates each node's index (node.ind).
-        tree_input_ids, tree_position_ids, tree_mask = build_tree_attention_data(root, position_offset=position_offset, dtype=dtype)
-
-        # Move to device
-        tree_input_ids = tree_input_ids.to(device)
-        tree_position_ids = tree_position_ids.to(device)
-        tree_mask = tree_mask.to(device)
-
-        # llm forward
-        outputs = self.llm(
-            tree_input_ids,
-            past_key_values=past_key_values,
-            attention_mask=tree_mask,
-            position_ids=tree_position_ids,
-            return_dict=True
-        )
-
-        return outputs
+        return super()._tree_decoding(root, past_key_values, position_offset, device, dtype=dtype)
 
     def _generate(
         self, 
@@ -220,115 +200,7 @@ class OffloadSDWrapper(SDWrapper):
         logits_warper: LogitsWarper,
         do_sample: bool,
     ):   
-        """
-        Generate sequence of tokens with speculative decoding.
-
-        This method consists of two main stages: prefill and decode.
-
-        Prefill Stage:
-        - Perform the model's initial forward pass.
-        - Sample a token and append it to the input_ids.
-
-        Decode Stage (with speculative decoding):
-        - Iterate through the following steps:
-            1. Perform SSM speculative sampling, returns sampled tokens in tree form.
-            2. Decode the sampled tokens in parallel with the language model (LLM), generating probabilities for each token.
-            3. Verify the sampled tokens by accepting or rejecting them, corresponding to the probabilities.
-            4. Update the key-value cache, input_ids, and hidden_states accordingly.
-
-        Args:
-            input_ids (torch.LongTensor): The input token IDs. 
-            stopping_criteria (StoppingCriteria): The criteria to stop the generation.
-            logits_warper (LogitsWarper): The warper to modify the logits.
-            do_sample (bool): Whether to sample tokens during generation. If False, the generation will be deterministic.
-
-        Returns:
-            input_ids (torch.LongTensor): The generated token IDs.
-        """    
-        assert self.llm is not None, "LLM model must be provided"
-        assert self.ssm is not None, "SSM model must be provided"
-        assert self.tokenizer is not None, "Tokenizer must be provided"   
-
-        # * clone input_ids 
-        input_ids = input_ids.clone()
-        org_input_len = len(input_ids[0])
-
-        # * prepare kv-cache
-        llm_past_key_values = TreeDynamicCache()
-        ssm_past_key_values = TreeDynamicCache()
-
-        # * prefill stage
-        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True)
-        
-        # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-        # (the clone itself is always small)
-        next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :] instead
-
-        # This is needed to properly delete outputs.logits which may be very large for first iteration
-        # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-        del outputs
-
-        next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
-        input_ids = torch.cat([input_ids, next_tokens], dim=-1)
-        
-        speculated_tokens_per_iter = []
-        draft_time_per_iter = []
-        target_time_per_iter = []
-
-        finished = False
-        start_time = time.perf_counter()
-        while not finished:
-            # * speculate
-            draft_start = time.perf_counter()
-            root = self._speculate(input_ids, ssm_past_key_values)
-            draft_time_per_iter.append(time.perf_counter()-draft_start)
-
-            # * tree decoding
-            prev_kv_len = llm_past_key_values.get_seq_length()
-
-            target_start = time.perf_counter()
-            outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=input_ids.device, dtype=self.llm.dtype)
-            
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # (the clone itself is always small)
-            next_token_logits = outputs.logits
-
-            # * verify
-            sampled_tokens, hidden_indices, _ = self._verify(
-                                                root, next_token_logits, 
-                                                logits_warper,
-                                                do_sample
-                                            )
-            target_time_per_iter.append(time.perf_counter()-target_start)
-
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs, root
-            gc.collect()
-            
-            sampled_tokens = sampled_tokens.to(input_ids.device)
-            hidden_indices = hidden_indices.to(input_ids.device)
-
-            speculated_tokens_per_iter.append(len(sampled_tokens[0]))
-            logging.info(f"new speculated number of token: +{len(sampled_tokens[0])}")
-
-            # * update input_ids, hidden_states, and kv-cache
-            # llm_past_key_values.crop(prev_kv_len)
-            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-            llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
-
-            # * check stopping criteria
-            finished = stopping_criteria(input_ids, None)
-        
-        end_time = time.perf_counter()
-
-        self.exp_log['accept_rate'] = np.mean(speculated_tokens_per_iter)
-        self.exp_log['avg_draft_time'] = np.mean(draft_time_per_iter)
-        self.exp_log['avg_target_time'] = np.mean(target_time_per_iter)
-        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
-        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
-
-        return input_ids               
+        return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)             
 
 class ProfileOffloadSDWrapper(OffloadSDWrapper):
     def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
@@ -339,18 +211,34 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
         
         self.out_dir = out_dir
         self.prefix = prefix
+
+        self.exp_log = {}
+        self.draft_time_per_iter = []
+        self.target_time_per_iter = []
+        self.verify_time_per_iter = []
         
     
+    def _speculate(self, input_ids, hidden_states, past_key_values):
+        start_time = time.perf_counter()
+        root = super()._speculate(input_ids, hidden_states, past_key_values)
+        self.draft_time_per_iter.append(time.perf_counter()-start_time)
+        return root
+    
+    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+        start_time = time.perf_counter()
+        outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
+        self.target_time_per_iter.append(time.perf_counter()-start_time)
+        return outputs
+    
     def _verify(self, root, logits, logits_warper, do_sample):
+        start_time = time.perf_counter()
         sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        self.verify_time_per_iter.append(time.perf_counter()-start_time)
         
-        # tokenize ids
-        nodes = list(preorder_iter(root))
-        for node in nodes:
-            node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
-        
-        # to compute TVD between p and q
-        # tvd = 0.5 * torch.sum(torch.abs(p - q))
+        # tokenize id to text for visualization
+        # nodes = list(preorder_iter(root))
+        # for node in nodes:
+        #     node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
         
         # profile data
         # json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
@@ -358,14 +246,11 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
         # self.profile_data[self.iter_count] = {}
         # self.profile_data[self.iter_count]["draft_tree"] = json_graph
         # self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
-        if self.profile_data.get('iter') is None:
-            self.profile_data['iter'] = []
         
-        if self.profile_data.get('total_len') is None:
-            self.profile_data['total_len'] = []
-        
-        if self.profile_data.get('accept_len') is None:
-            self.profile_data['accept_len'] = []
+        # create profile data if not exist
+        self.profile_data['iter'] = self.profile_data.get('iter', [])
+        self.profile_data['total_len'] = self.profile_data.get('total_len', [])
+        self.profile_data['accept_len'] = self.profile_data.get('accept_len', [])
             
         sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
         self.profile_data['iter'].append(sampled_tokens_list)
@@ -401,8 +286,10 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
             out_path = None
         
         # run generation
+        org_input_len = len(input_ids[0])
+        start_time = time.perf_counter()
         input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
-        
+        end_time = time.perf_counter()
         
         # compute stats
         total_sampled = self.sampled_count
@@ -453,5 +340,19 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
         if self.out_dir is not None:
             with open(out_path, "w") as f:
                 json.dump(self.profile_data, f)
+                
+        # save exp_log
+        self.exp_log['avg_draft_time'] = np.mean(self.draft_time_per_iter)
+        self.exp_log['avg_target_time'] = np.mean(self.target_time_per_iter)
+        self.exp_log['avg_verify_time'] = np.mean(self.verify_time_per_iter)
+        self.exp_log['avg_sampled'] = avg_sampled
+        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        logging.info(
+            f"Average draft time: {self.exp_log['avg_draft_time']:.4f},"\
+            f"\tAverage target time: {self.exp_log['avg_target_time']:.4f},"\
+            f"\tAverage verify time: {self.exp_log['avg_verify_time']:.4f}"
+            f"\nGenerated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+        )
         
-        return input_ids            
+        return input_ids

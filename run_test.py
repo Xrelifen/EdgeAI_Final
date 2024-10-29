@@ -6,8 +6,8 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ
 
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
@@ -99,12 +99,16 @@ def load_offload_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
 
     if mode == "sd-offload":
-        ssm = SSM_SX.from_pretrained(
+        ssm = SSM_Classic.from_pretrained(
             ssm_path,
             # config=draft_config,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
             sampling_method=sd_method,
+            tree_depth=12,
+            topk_len=16,
+            min_sample_prob=1e-2,
+            min_accept_prob=1e-2
         )
         ssm = ssm.to(device)
 

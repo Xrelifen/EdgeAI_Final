@@ -9,49 +9,78 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
-from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
+from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle, ProfileOffloadSDWrapper
 from ..models import modeling_llama
 
 # Set random seed for reproducibility
 torch.manual_seed(0)
 random.seed(0)
 
-def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=torch.float16, device="auto"):
+def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, out_dir=None, dtype=torch.float16, device="auto"):
     # Load tokenizer and LLM
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
-    llm = modeling_llama.LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
+    need_offload = "offload" in mode
 
-    # Prepare SSM configuration
-    draft_config = deepcopy(llm.config) if os.path.exists(ssm_path) else None
-    if draft_config:
-        draft_config.num_hidden_layers = layers
+    assert need_offload == llm_offload, "Offload Mode needs to be set when offload is included in sd-method" 
+
+    llm = None
+    
+    if not llm_offload:
+        llm = modeling_llama.LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
+
+        # Prepare SSM configuration
+        draft_config = deepcopy(llm.config) if os.path.exists(ssm_path) else None
+        if draft_config:
+            draft_config.num_hidden_layers = layers
+    else:
+        draft_config = None
 
     # Select model wrapper
     wrappers = {
         "naive": ProfileNaiveWrapper, # NaiveWrapper,
         "hf": HuggingFaceWrapper,
         "sd-classic": lambda: ProfileSDWrapper(out_dir=out_dir),
-        "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir)
+        "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir),
+        "sd-classic-offload": lambda: ProfileOffloadSDWrapper(out_dir=out_dir),
     }
     model = wrappers.get(mode, lambda: ValueError("Invalid mode"))()
 
     # Load SSM if required
     if mode.startswith("sd"):
-        ssm_cls = SSM_Classic if mode == "sd-classic" else SSM_Eagle
-        ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config, sampling_method=sd_method,
-                                      eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
-        ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ssm_cls = SSM_Classic if "sd-classic" in mode else SSM_Eagle
+        ssm = ssm_cls.from_pretrained(
+            ssm_path, 
+            config=draft_config, 
+            sampling_method=sd_method,
+            eos_token_id=tokenizer.eos_token_id,
+            tree_depth=12,
+            topk_len=16,
+            min_sample_prob=1e-2,
+            min_accept_prob=1e-2,
+            torch_dtype=dtype
+        )
+
+        if llm is not None:
+            ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        else:
+            ssm = ssm.to(device)
+
         ssm = torch.compile(ssm, mode="reduce-overhead")
         model.set_ssm(ssm)
 
+    if llm_offload: 
+        model.set_offload_llm(llm_path, device=device)
+    else:
+        model.set_llm(llm)
+
     model.set_tokenizer(tokenizer)
-    model.set_llm(llm)
     model.eval()
+
     return model, tokenizer
 
 def run_eval(llm_path, ssm_path, mode, sd_method, layers, out_dir, dataset, log_file,
-             max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False):
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir, dtype=dtype, device="cuda")
+             max_new_tokens, llm_offload=False, temp=0.6, dtype=torch.float16, do_sample=False):
+    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload, out_dir, dtype=dtype, device="cuda")
 
     # Warm up the model
     warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
@@ -103,6 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--repeat", type=int, default=3, help="Repeat evaluation.")
     parser.add_argument("--temp", type=float, default=0.7, help="Temperature for sampling.")
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling.")
+    parser.add_argument("--llm_offload", action="store_true", help="Offload LLM")
 
     args = parser.parse_args()
 
@@ -131,7 +161,7 @@ if __name__ == "__main__":
         avg_tput, avg_accept_rate = run_eval(
             args.llm_path, args.ssm_path, args.mode, args.sd_method, 
             args.layers, args.out_dir, dataset, log_file, args.max_new_tokens, 
-            args.temp, str_to_torch_dtype(args.dtype), args.do_sample
+            args.llm_offload, args.temp, str_to_torch_dtype(args.dtype), args.do_sample
         )
         tput_list.append(avg_tput)
         accept_rate_list.append(avg_accept_rate)
