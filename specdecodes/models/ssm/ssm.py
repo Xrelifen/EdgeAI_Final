@@ -250,8 +250,8 @@ class SSMBase(nn.Module):
         # self.min_accept_prob = 1e-8
         self.depth = 6 + 1
         self.topk_len = 5
-        self.min_sample_prob = 1e-2
-        self.min_accept_prob = 1e-2
+        self.min_sample_prob = 1e-5#1e-2
+        self.min_accept_prob = 1e-5#1e-2
     
     def init_sampling_method(self, sampling_method):
         if sampling_method == 'greedy':
@@ -323,10 +323,8 @@ class SSM_Classic(SSMBaseNEFT):
         _ = kwargs.pop("hidden_states", None)
         
         with torch.no_grad():
-            if hasattr(self.model, "embed_tokens"):
-                inputs_embeds = self.model.embed_tokens(input_ids)
-            else:
-                inputs_embeds = embed_tokens(input_ids)
+            embed_tokens = self.model.get_input_embeddings() if embed_tokens is None else embed_tokens
+            inputs_embeds = embed_tokens(input_ids)
 
         return self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)
     
@@ -452,10 +450,8 @@ class SSM_Eagle(SSMBaseNEFT):
         
     def forward(self, input_ids, hidden_states, embed_tokens=None, *model_args, **kwargs):
         with torch.no_grad():
-            if hasattr(self.model, "embed_tokens"):
-                inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
-            else:
-                inputs_embeds = embed_tokens(input_ids).to(hidden_states.dtype)
+            embed_tokens = self.model.get_input_embeddings() if embed_tokens is None else embed_tokens
+            inputs_embeds = embed_tokens(input_ids)
         
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
