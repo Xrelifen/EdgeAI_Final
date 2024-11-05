@@ -8,8 +8,15 @@ def invert_mask(mask, dtype):
     # Inversion using bitwise NOT and multiplication
     return (~mask).to(dtype) * torch.finfo(dtype).min
 
+def top_n_nodes(candidate_nodes, n):
+    n = min(n, len(candidate_nodes))
+    _, topk_indices = torch.topk(torch.tensor([node.global_prob for node in candidate_nodes]), n)
+    return [candidate_nodes[idx] for idx in topk_indices]
+
 def build_tree_attention_data(root, position_offset, dtype):
     candidate_nodes = list(levelorder_iter(root))
+    candidate_nodes = top_n_nodes(candidate_nodes, n=32)
+    
     candidate_len = len(candidate_nodes)
     
     # Assign indices to candidate nodes 
