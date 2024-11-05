@@ -331,7 +331,8 @@ class SSM_Classic(SSMBaseNEFT):
         _ = kwargs.pop("hidden_states", None)
         
         with torch.no_grad():
-            embed_tokens = self.model.get_input_embeddings() if embed_tokens is None else embed_tokens
+            if self.model.get_input_embeddings():
+                embed_tokens = self.model.get_input_embeddings()
             inputs_embeds = embed_tokens(input_ids)
 
         return self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)
@@ -569,9 +570,6 @@ class SSM_Eagle(SSMBaseNEFT):
         return root
     
 class SSM_ShrinkClassic(SSM_Classic):
-    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', keep_embeddings=False):
-        super().__init__(model, config, eos_token_id, sampling_method, keep_embeddings=True)
-    
     def init_additional_modules(self, config):
         self.limited_vocab_size = 8192
         self.lm_head = nn.Linear(config.hidden_size, self.limited_vocab_size, bias=False)

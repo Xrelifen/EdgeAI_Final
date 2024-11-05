@@ -15,7 +15,7 @@ def top_n_nodes(candidate_nodes, n):
 
 def build_tree_attention_data(root, position_offset, dtype):
     candidate_nodes = list(levelorder_iter(root))
-    candidate_nodes = top_n_nodes(candidate_nodes, n=32)
+    # candidate_nodes = top_n_nodes(candidate_nodes, n=32)
     
     candidate_len = len(candidate_nodes)
     
