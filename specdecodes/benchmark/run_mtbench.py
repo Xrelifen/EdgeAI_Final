@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
-from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
+from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle, SSM_ShrinkEagle
 from ..models import modeling_llama
 
 # Set random seed for reproducibility
@@ -31,17 +31,22 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
         "naive": ProfileNaiveWrapper, # NaiveWrapper,
         "hf": HuggingFaceWrapper,
         "sd-classic": lambda: ProfileSDWrapper(out_dir=out_dir),
-        "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir)
+        "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir),
+        "sd-shrinkeagle": lambda: ProfileSDWrapper(out_dir=out_dir),
     }
     model = wrappers.get(mode, lambda: ValueError("Invalid mode"))()
 
     # Load SSM if required
     if mode.startswith("sd"):
-        ssm_cls = SSM_Classic if mode == "sd-classic" else SSM_Eagle
+        ssms = {
+            "sd-classic": SSM_Classic,
+            "sd-eagle": SSM_Eagle,
+            "sd-shrinkeagle": SSM_ShrinkEagle,
+        }
+        ssm_cls = ssms.get(mode, lambda: ValueError("Invalid mode"))
         ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config, sampling_method=sd_method,
                                       eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
         ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        ssm = torch.compile(ssm, mode="reduce-overhead")
         model.set_ssm(ssm)
 
     model.set_tokenizer(tokenizer)
