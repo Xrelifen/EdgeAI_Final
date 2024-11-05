@@ -11,7 +11,7 @@ from bigtree import Node
 
 from .training_hooks import TrainingHook, NEFTuneHook
 from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
-from ..utils import invert_mask
+from ..utils import invert_mask, keep_top_n_nodes
 
 from ..llm.modeling_llama import ACT2FN, LlamaMLP
 from ..llm import modeling_llama_no_init_weights as modeling_llama
@@ -251,15 +251,12 @@ class SSMBase(nn.Module):
         # self.topk_len = 15
         # self.min_sample_prob = 1e-8
         # self.min_accept_prob = 1e-8
-        # self.depth = 6 + 1
-        # self.topk_len = 8
-        # self.min_sample_prob = 1e-2
-        # self.min_accept_prob = 1e-2
         
-        self.depth = 8 + 1
-        self.topk_len = 10
-        self.min_sample_prob = 2e-2
+        self.depth = 6 + 1
+        self.topk_len = 8
+        self.min_sample_prob = 1e-2
         self.min_accept_prob = 1e-2
+        self.max_tokens = -1 #64
     
     def init_sampling_method(self, sampling_method):
         if sampling_method == 'greedy':
@@ -440,7 +437,7 @@ class SSM_Classic(SSMBaseNEFT):
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
         
-        return root
+        return keep_top_n_nodes(root, self.max_tokens)
 
 
 class SSM_Eagle(SSMBaseNEFT):
@@ -567,7 +564,7 @@ class SSM_Eagle(SSMBaseNEFT):
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
         
-        return root
+        return keep_top_n_nodes(root, self.max_tokens)
     
 class SSM_ShrinkClassic(SSM_Classic):
     def init_additional_modules(self, config):
@@ -616,9 +613,8 @@ class SSM_ShrinkEagle(SSM_Eagle):
         input_ids = self.id_llm_to_ssm[input_ids]
         
         inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
-        hidden_states = inputs_embeds + self.extract(hidden_states) 
+        hidden_states = inputs_embeds + self.extract(hidden_states)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
-        # hidden_states = self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)[0]
         
         if not return_logits:
             return hidden_states
@@ -716,4 +712,5 @@ class SSM_ShrinkEagle(SSM_Eagle):
         
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
-        return root
+        
+        return keep_top_n_nodes(root, self.max_tokens)

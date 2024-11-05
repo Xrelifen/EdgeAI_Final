@@ -4,14 +4,12 @@ import os
 import time
 import numpy as np
 import torch
-import torch.nn.functional as F
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from bigtree import preorder_iter, levelorder_iter
-from bigtree import tree_to_nested_dict
+from bigtree import preorder_iter
 import prettytable as pt
 
 from .verify_utils import verify_step
