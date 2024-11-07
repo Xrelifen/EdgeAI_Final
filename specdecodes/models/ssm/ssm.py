@@ -661,11 +661,6 @@ class SSM_ShrinkEagle(SSM_Eagle):
         tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
         root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
         
-        # early exit if input token is limited_vocab_size-1
-        self.id_llm_to_ssm = self.id_llm_to_ssm.to(input_ids.device)
-        if self.id_llm_to_ssm[sample_token[0][0]] == self.limited_vocab_size-1:
-            return root
-        
         depth = 1 # depth starts from 1 in tree library
         prev_nodes = [root]
         while depth < self.depth:
@@ -684,7 +679,7 @@ class SSM_ShrinkEagle(SSM_Eagle):
                 hidden_states = self(
                     input_ids,
                     hidden_states=hidden_states,
-                    embed_tokens=embed_tokens, 
+                    embed_tokens=embed_tokens,
                     past_key_values=past_key_values,
                     position_ids=position_ids, 
                     attention_mask=invert_mask(tree_mask, dtype=dtype),
