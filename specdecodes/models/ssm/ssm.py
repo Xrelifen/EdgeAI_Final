@@ -597,15 +597,20 @@ class SSM_ShrinkClassic(SSM_Classic):
 class SSM_ShrinkEagle(SSM_Eagle):
     def init_additional_modules(self, config):
         self.limited_vocab_size = 8192
-        self.lm_head = nn.Linear(config.hidden_size, self.limited_vocab_size, bias=False)
         self.model.embed_tokens = nn.Embedding(self.limited_vocab_size, config.hidden_size, config.pad_token_id)
+        self.lm_head = nn.Linear(config.org_hidden_size, self.limited_vocab_size, bias=False)
+        
         # self.extract = Extractor(config)
-        self.extract = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        self.extract = nn.Linear(config.org_hidden_size, config.hidden_size, bias=False)
         
         self.id_ssm_to_llm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map.pt", weights_only=True)
         self.id_llm_to_ssm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_inverse.pt", weights_only=True)
         self.id_llm_freq_map = torch.load('/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_freq.pt', weights_only=True)
         
+        if config.hidden_size != config.org_hidden_size:
+            self.resize = nn.Linear(config.hidden_size, config.org_hidden_size, bias=False)
+        else:
+            self.resize = nn.Identity()
         
     def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):
         # convert input_ids to custom vocab
@@ -615,12 +620,12 @@ class SSM_ShrinkEagle(SSM_Eagle):
         inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
         hidden_states = inputs_embeds + self.extract(hidden_states)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+        hidden_states = self.resize(hidden_states)
         
         if not return_logits:
             return hidden_states
         else:
-            return self.lm_head(hidden_states), hidden_states
-        
+            return self.lm_head(hidden_states), hidden_states   
         
     @torch.no_grad()
     def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
@@ -655,6 +660,11 @@ class SSM_ShrinkEagle(SSM_Eagle):
         # initialize tree_mask and tree 
         tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
         root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
+        
+        # early exit if input token is limited_vocab_size-1
+        self.id_llm_to_ssm = self.id_llm_to_ssm.to(input_ids.device)
+        if self.id_llm_to_ssm[sample_token[0][0]] == self.limited_vocab_size-1:
+            return root
         
         depth = 1 # depth starts from 1 in tree library
         prev_nodes = [root]
@@ -691,11 +701,11 @@ class SSM_ShrinkEagle(SSM_Eagle):
 
             #* Append nodes to their parent nodes
             for node in next_nodes:
-                # prev_nodes[node.ind].append(node)
                 # remap with self.id_ssm_to_llm
-                next_id = self.id_ssm_to_llm[node.id]
-                node.id = next_id
-                if next_id != -1: 
+                node.id = self.id_ssm_to_llm[node.id]
+                
+                # ignore if node.id is limited_vocab_size-1
+                if node.id != self.limited_vocab_size-1:
                     prev_nodes[node.ind].append(node)
  
             #* Get the nodes as input for next iteration

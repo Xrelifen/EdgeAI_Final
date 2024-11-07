@@ -62,10 +62,6 @@ def load_model(
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
-        # compress
-        # draft_config.compress_hidden = True
-        # draft_config.compress_hidden_ratio = 0.5
-        
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
             ssm_path,
@@ -81,8 +77,8 @@ def load_model(
         model = ProfileSDWrapper(out_dir=None)
         
         # compress
-        # draft_config.compress_hidden = True
         # draft_config.compress_hidden_ratio = 0.5
+        # draft_config.compress_intermediate_ratio = 0.5
         
         # load SSM
         ssm = SSM_ShrinkEagle.from_pretrained(

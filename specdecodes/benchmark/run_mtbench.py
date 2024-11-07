@@ -25,6 +25,10 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
     draft_config = deepcopy(llm.config) if os.path.exists(ssm_path) else None
     if draft_config:
         draft_config.num_hidden_layers = layers
+        
+    # compress
+    # draft_config.compress_hidden_ratio = 0.5
+    # draft_config.compress_intermediate_ratio = 0.5
 
     # Select model wrapper
     wrappers = {
