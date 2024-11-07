@@ -202,7 +202,7 @@ def validate(
     if accelerator.is_main_process and run:
         logger.info(
             f'Validation Epoch [{epoch + 1}/{num_epochs}] '
-            f'Loss: {total_loss:.4f}, '
+            f'Loss: {avg_loss:.4f}, '
             f'Accuracy: {100 * total_correct / total_samples:.2f}%'
         )
         log_dict = {
