@@ -42,7 +42,7 @@ class CustomDataset(Dataset):
         # rename 'hidden_state' to 'hidden_states' after rebuilding the dataset
         hidden_states = data['hidden_state'][:self.max_len]
         input_ids = data['input_ids'][:self.max_len]
-        loss_mask = data["loss_mask"][:self.max_len].to(dtype=torch.bool)
+        loss_mask = data["loss_mask"][:self.max_len].to(dtype=torch.float16)
 
         length = hidden_states.shape[0]
         attention_mask = torch.ones(length, dtype=torch.bool, device=hidden_states.device)
@@ -134,7 +134,7 @@ def update_metrics(loss_mask, s_logits, t_logits, topk: List[int] = [1, 3, 5, 9]
     expect = (torch.sum(p_s * p_t, dim=-1) * loss_mask).sum().item()
     
     # Flatten tensors where loss_mask is True
-    mask_flat = loss_mask.view(-1)
+    mask_flat = loss_mask.view(-1) == 1
     p_s_flat = p_s.view(-1, p_s.shape[-1])[mask_flat]
     p_t_flat = p_t.view(-1, p_t.shape[-1])[mask_flat]
     

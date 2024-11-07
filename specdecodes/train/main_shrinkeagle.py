@@ -83,9 +83,17 @@ def train_one_epoch(
             with torch.no_grad():
                 loss_mask = data["loss_mask"]
                 check_ids = model.module.id_llm_to_ssm[data["input_ids"]]
-                # set loss mask to 0 if the token is not in the limited vocab (-1)
-                loss_mask = loss_mask * (check_ids != model.module.limited_vocab_size-1)
-
+                
+                # if token is in the limited vocab (-1): 
+                #   set loss mask to 0.1 if loss_mask is 1
+                #   else set loss mask to 0
+                in_vocab = check_ids != model.module.limited_vocab_size-1
+                not_in_vocab = check_ids == model.module.limited_vocab_size-1
+                
+                lamda = 0.1
+                loss_mask = (loss_mask * in_vocab) + lamda * (loss_mask * not_in_vocab)
+                
+                
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
                 loss_mask, s_hidden_states, t_hidden_states,
