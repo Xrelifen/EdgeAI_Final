@@ -53,10 +53,10 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
             config=draft_config, 
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
-            tree_depth=12,
+            tree_depth=16,
             topk_len=16,
-            min_sample_prob=1e-2,
-            min_accept_prob=1e-2,
+            min_sample_prob=1e-8,
+            min_accept_prob=1e-8,
             torch_dtype=dtype
         )
 
@@ -65,7 +65,8 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
         else:
             ssm = ssm.to(device)
 
-        ssm = torch.compile(ssm, mode="reduce-overhead")
+        # ssm = torch.compile(ssm, mode="reduce-overhead")
+        ssm = torch.compile(ssm)
         model.set_ssm(ssm)
 
     if llm_offload: 

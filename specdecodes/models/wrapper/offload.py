@@ -10,6 +10,8 @@ import numpy as np
 import logging
 import gc
 
+from torch.profiler import profile, record_function, ProfilerActivity
+
 from transformers import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
@@ -137,7 +139,7 @@ class OffloadSDWrapper(SDWrapper):
     def __init__(self, method="greedy"):
         super(OffloadSDWrapper, self).__init__(method=method)
 
-    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+    def set_offload_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
         device_map = {
             "model.embed_tokens": "cuda:0",
@@ -165,10 +167,11 @@ class OffloadSDWrapper(SDWrapper):
             decoder_layer_mem += param.numel() * param.element_size()
 
         decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
+        memory_limit = memory_limit / 1.2
 
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+            if estimated_mem <= memory_limit - 2 * decoder_layer_mem:
                 estimated_mem += decoder_layer_mem
                 device_map[f"model.layers.{i}"] = device
             else:
@@ -220,18 +223,24 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
     
     def _speculate(self, input_ids, hidden_states, past_key_values):
         start_time = time.perf_counter()
+        # with record_function("_speculate"):
+        #     root = super()._speculate(input_ids, hidden_states, past_key_values)
         root = super()._speculate(input_ids, hidden_states, past_key_values)
         self.draft_time_per_iter.append(time.perf_counter()-start_time)
         return root
     
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
         start_time = time.perf_counter()
+        # with record_function("_tree_decoding"):
+        #     outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
         outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
         self.target_time_per_iter.append(time.perf_counter()-start_time)
         return outputs
     
     def _verify(self, root, logits, logits_warper, do_sample):
         start_time = time.perf_counter()
+        # with record_function("_verify"):
+        #     sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
         sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
         self.verify_time_per_iter.append(time.perf_counter()-start_time)
         
@@ -290,6 +299,12 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
         start_time = time.perf_counter()
         input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
         end_time = time.perf_counter()
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        #     input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        # end_time = time.perf_counter()
+
+        # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        # prof.export_chrome_trace("trace.json")
         
         # compute stats
         total_sampled = self.sampled_count
