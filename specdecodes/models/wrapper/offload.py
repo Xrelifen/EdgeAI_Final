@@ -47,19 +47,27 @@ class OffloadWrapper(WrapperBase):
         estimated_mem = 0.0
         for param in self.llm.model.embed_tokens.parameters():
             estimated_mem += param.numel() * param.element_size()
+        for buffer in self.llm.model.embed_tokens.buffers():
+            estimated_mem += buffer.numel() * buffer.element_size()
+
         for param in self.llm.lm_head.parameters():
             estimated_mem += param.numel() * param.element_size()
+        for buffer in self.llm.lm_head.buffers():
+            estimated_mem += buffer.numel() * buffer.element_size()
         estimated_mem = estimated_mem / (1024 ** 3)
         
         decoder_layer_mem = 0.0
         for param in self.llm.model.layers[0].parameters():
             decoder_layer_mem += param.numel() * param.element_size()
+        for buffer in self.llm.lm_head.buffers():
+            decoder_layer_mem += buffer.numel() * buffer.element_size()
 
         decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
+        memory_limit = memory_limit / 1.2
 
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+            if estimated_mem <= memory_limit - decoder_layer_mem:
                 estimated_mem += decoder_layer_mem
                 device_map[f"model.layers.{i}"] = device
             else:
