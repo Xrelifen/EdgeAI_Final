@@ -1,5 +1,8 @@
+import logging
+import time
 import torch
 import logging
+import time
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
@@ -60,9 +63,31 @@ class NaiveWrapper(WrapperBase):
             
             # Stopping criteria
             finished = stopping_criteria(input_ids, None)
-        
-        end_time = time.perf_counter()
-        n_gen_token = len(input_ids[0][org_input_len:])
-        logging.info(f"Inference Speed of {self.llm.model.config._name_or_path}: {n_gen_token / (end_time-start_time)}")
+            
+        return input_ids
+    
+class ProfileNaiveWrapper(NaiveWrapper):
+    def __init__(self):
+        super(ProfileNaiveWrapper, self).__init__()
+        self.exp_log = {}
 
+    def _generate(
+        self,
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+    ):
+        # run generation
+        org_input_len = len(input_ids[0])
+        start_time = time.perf_counter()
+        input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        end_time = time.perf_counter()
+        
+        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        logging.info(
+            f"Generated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+        )
+            
         return input_ids

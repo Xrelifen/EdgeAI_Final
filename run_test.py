@@ -6,18 +6,11 @@ import time
 import os
 import logging
 
-from specdecodes.models import (
-    HuggingFaceWrapper, 
-    NaiveWrapper, 
-    SDWrapper, 
-    ProfileSDWrapper, 
-    OffloadSDWrapper, 
-    SharedKV_SDWrapper, 
-    SharedKV_ProfileSDWrapper,
-    OffloadWrapper
-) 
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
-from awq import AutoAWQForCausalLM
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ
+
+# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
+# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
 
 def load_model(
     llm_path: str,
@@ -49,11 +42,14 @@ def load_model(
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
         draft_config.num_hidden_layers = layers
+        
     else:
         draft_config = None
 
     if mode == "naive":
-        model = NaiveWrapper()
+        # model = NaiveWrapper()
+        model = ProfileNaiveWrapper()
+        
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
@@ -80,22 +76,12 @@ def load_model(
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
+        # compress
+        # draft_config.compress_hidden = True
+        # draft_config.compress_hidden_ratio = 0.5
+        
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
-        
-    elif mode == "sd-sharedkv":
-        # model = SharedKV_SDWrapper()
-        model = SharedKV_ProfileSDWrapper(out_dir=None)
-        
-        # load SSM
-        ssm = SSM_SharedKV.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,
@@ -125,22 +111,47 @@ def load_offload_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
 
     if mode == "sd-offload":
-        ssm = SSM_SX.from_pretrained(
+        ssm = SSM_Classic.from_pretrained(
+            ssm_path,
+            # config=draft_config,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+            sampling_method=sd_method,
+            tree_depth=12,
+            topk_len=16,
+            min_sample_prob=1e-2,
+            min_accept_prob=1e-2
+        )
+        ssm = ssm.to(device)
+
+        # Load offload model
+        # model = ProfileOffloadSDWrapper(out_dir='specdecodes/experiments/profile_data/llama3')
+        model = OffloadSDWrapper()
+        model.set_ssm(ssm)
+
+    elif mode == "sq-offload":
+        ssm = SSM_SQ.from_pretrained(
             ssm_path,
             # config=draft_config,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
             sampling_method=sd_method,
         )
+        grow_map = torch.load('../Sequoia/demo_tree_512_new.pt')
+        ssm.load_spectree_arch(grow_map['branches'])
+        
         ssm = ssm.to(device)
-
         # Load offload model
         model = OffloadSDWrapper()
         model.set_ssm(ssm)
+    
 
     elif mode == "offload":
         model = OffloadWrapper()
-        
+
+    else:
+        raise ValueError("Invalid mode.")
+
     model.set_tokenizer(tokenizer)
     model.set_offload_llm(llm_path)
     model.eval()
@@ -183,8 +194,7 @@ def main(args):
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
     input_message = "What's the best way to start learning a new language?"
-    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?" # beyblade is the correct spelling
-
+    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},
@@ -195,6 +205,9 @@ def main(args):
     start_time = time.time()
     output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     end_time = time.time()
+
+    for key, value in model.exp_log.items():
+        print(f"{key}: {value}")
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 

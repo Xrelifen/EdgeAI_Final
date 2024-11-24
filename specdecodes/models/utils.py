@@ -4,71 +4,68 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 
 from bigtree import levelorder_iter
 
-
 def invert_mask(mask, dtype): 
-    # assume input mask dtype is boolean
-    mask = mask.to(dtype=dtype) # torch.float16, torch.float32 support
-    mask = (1.0 - mask) * torch.finfo(dtype).min # 0.0 -> -inf, 1.0 -> 0.0
-    
-    return mask
-
+    # Inversion using bitwise NOT and multiplication
+    return (~mask).to(dtype) * torch.finfo(dtype).min
 
 def build_tree_attention_data(root, position_offset, dtype):
-    # Build the list of candidate nodes
     candidate_nodes = list(levelorder_iter(root))
     candidate_len = len(candidate_nodes)
     
-    # update node.ind for each node
+    # Assign indices to candidate nodes 
     for idx, node in enumerate(candidate_nodes):
         node.ind = idx
-    
-    # Build the tree mask
+
+    # Initialize tree mask
     tree_mask = torch.zeros((candidate_len, candidate_len), dtype=torch.bool)
-    
-    # Each child node has the same mask as its parent, with itself set to True
-    for idx, node in enumerate(candidate_nodes):
-        if node.parent is not None:
-            tree_mask[idx, :] = tree_mask[node.parent.ind, :]
-        tree_mask[idx, idx] = True
-    
-    # Append mask for previous tokens, which should be all filled with ones.
-    offset_mask = torch.ones([candidate_len, position_offset], dtype=torch.bool)
-    tree_mask = torch.concat((offset_mask, tree_mask), dim=1)
-    
+
+    # Set mask entries using ancestor indices
+    for node in candidate_nodes:
+        ancestor_indices = []
+        current_node = node
+        while current_node:
+            ancestor_indices.append(current_node.ind)
+            current_node = current_node.parent
+        tree_mask[node.ind, ancestor_indices] = True
+
+    # Append offset mask for previous tokens
+    offset_mask = torch.ones((candidate_len, position_offset), dtype=torch.bool)
+    tree_mask = torch.cat((offset_mask, tree_mask), dim=1)
+
     # Invert the mask
     tree_mask = invert_mask(tree_mask, dtype)
-    
-    # Reshape the mask to (1, 1, candidate_len, candidate_len) to match required shape
     tree_mask = tree_mask.unsqueeze(0).unsqueeze(0)
 
-    # tree_candidates = node id
+    # Prepare input and position IDs
     tree_input_ids = torch.tensor([node.id for node in candidate_nodes], dtype=torch.long).unsqueeze(0)
-    
-    # tree_position_id = node depth + offset
-    tree_position_ids = torch.tensor([(position_offset + node.depth - 1) for node in candidate_nodes], dtype=torch.long).unsqueeze(0)
-    
+    tree_position_ids = torch.tensor([position_offset + node.depth - 1 for node in candidate_nodes], dtype=torch.long).unsqueeze(0)
+
     return tree_input_ids, tree_position_ids, tree_mask
 
-
 def make_tree_attention_mask(
-        prefix_len :int,
-        gen_len :int,
-        ancestors :list[list[int]],
-        device ="cpu",
-        dtype = torch.float32
+        prefix_len: int,
+        gen_len: int,
+        ancestors: list[list[int]],
+        device="cpu",
+        dtype=torch.float32
     ) -> torch.FloatTensor:
-    tree_mask = torch.full((gen_len, gen_len + prefix_len), torch.finfo(dtype).min, dtype=dtype).to(device=device)
-    for idx, ancestor in enumerate(ancestors):
-        if len(ancestor) > 0:
-            tree_mask[idx][ancestor] = 0.0
-    return tree_mask[None, None, :, :]
+    mask = torch.zeros((gen_len, gen_len + prefix_len), dtype=torch.bool, device=device)
 
+    # Set mask by using advanced indexing
+    row_indices = []
+    col_indices = []
+    for idx, ancestor_list in enumerate(ancestors):
+        if ancestor_list:
+            row_indices.extend([idx] * len(ancestor_list))
+            col_indices.extend(ancestor_list)
 
-def get_residual(p: torch.Tensor, q:torch.Tensor):
-    residual = (p - q).relu_()
-    residual = residual / (residual.sum(dim=-1).unsqueeze(-1))
-    return residual
-    
+    if row_indices:
+        mask[row_indices, col_indices] = True
+
+    # Invert the mask
+    mask = invert_mask(mask, dtype)
+
+    return mask.unsqueeze(0).unsqueeze(0)
 
 class TreeDynamicCache(DynamicCache):
     def __init__(self, num_hidden_layers: Optional[int] = None) -> None:
