@@ -20,24 +20,38 @@ from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
+from awq import AutoAWQForCausalLM
+
 class OffloadWrapper(WrapperBase):
     def __init__(self):
         super(OffloadWrapper, self).__init__()
 
-    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+    def set_offload_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
         device_map = {
             "model.embed_tokens": "cuda:0",
             "model.rotary_emb": "cuda:0",
             "model.norm": "cuda:0",
             "lm_head": "cuda:0",
         }     
-
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            device_map="cpu", 
-            low_cpu_mem_usage=True, 
-            torch_dtype=torch.float16
-        )
+        print("memory_limit:", memory_limit)
+        
+        if 'autoawq' in llm_path:
+            self.llm = AutoAWQForCausalLM.from_quantized(
+                llm_path, 
+                # device_map="auto", 
+                use_ipex=True, # run in cpu
+                fuse_layers=False,
+                low_cpu_mem_usage=True
+            ).model
+            print("W4A16 model")
+        
+        else: 
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_path, 
+                device_map="cpu", 
+                low_cpu_mem_usage=True, 
+                torch_dtype=torch.float16
+            )
 
         estimated_mem = 0.0
         for param in self.llm.model.embed_tokens.parameters():
@@ -45,7 +59,6 @@ class OffloadWrapper(WrapperBase):
         for param in self.llm.lm_head.parameters():
             estimated_mem += param.numel() * param.element_size()
         estimated_mem = estimated_mem / (1024 ** 3)
-        
         decoder_layer_mem = 0.0
         for param in self.llm.model.layers[0].parameters():
             decoder_layer_mem += param.numel() * param.element_size()
@@ -66,6 +79,10 @@ class OffloadWrapper(WrapperBase):
                 param.data = param.data.cpu().pin_memory(device)
 
         self.llm = dispatch_model(self.llm, device_map=device_map)
+        for i, layer in enumerate(self.llm.model.layers):
+            for param in layer.parameters():
+                print(f"After dispatch, Layer {i}, param device: {param.device}")
+                
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
         logging.debug(f"Allocated Memory = {allocated_memory} GB")
         
@@ -132,7 +149,7 @@ class OffloadSDWrapper(SDWrapper):
     def __init__(self, method="greedy"):
         super(OffloadSDWrapper, self).__init__(method=method)
 
-    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+    def set_offload_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
         device_map = {
             "model.embed_tokens": "cuda:0",
@@ -140,15 +157,31 @@ class OffloadSDWrapper(SDWrapper):
             "model.norm": "cuda:0",
             "lm_head": "cuda:0",
         }
-
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            device_map="cpu", 
-            low_cpu_mem_usage=True, 
-            torch_dtype=torch.float16
-        )
+        print('memory_limit', memory_limit)
+        if 'autoawq' in llm_path:
+            # self.llm = AutoAWQForCausalLM.from_quantized(
+            #     llm_path, 
+            #     use_ipex=True, # run in cpu
+            #     fuse_layers=False,
+            #     low_cpu_mem_usage=True,
+            #     # max_memory=memory_map
+            # ).model
+            self.llm = AutoAWQForCausalLM.from_pretrained(
+                llm_path, 
+                device_map='cpu',
+                low_cpu_mem_usage=True,
+            ).model
+        else: 
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_path, 
+                device_map="cpu", 
+                low_cpu_mem_usage=True, 
+                torch_dtype=torch.float16
+            )
 
         estimated_mem = torch.cuda.memory_allocated(device)
+        logging.info(f"Init Allocated Memory = {estimated_mem} GB")
+        
         for param in self.llm.model.embed_tokens.parameters():
             estimated_mem += param.numel() * param.element_size()
         for param in self.llm.lm_head.parameters():
@@ -158,25 +191,38 @@ class OffloadSDWrapper(SDWrapper):
         decoder_layer_mem = 0.0
         for param in self.llm.model.layers[0].parameters():
             decoder_layer_mem += param.numel() * param.element_size()
-
+        for buffer in self.llm.model.layers[0].buffers():
+            decoder_layer_mem += buffer.numel() * buffer.element_size()
+            
         decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
+        memory_limit = memory_limit / 1.2
 
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+            # if estimated_mem <= memory_limit - 2 * decoder_layer_mem - 0.5:
+            if estimated_mem <= memory_limit - decoder_layer_mem:
                 estimated_mem += decoder_layer_mem
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
+        logging.info(f"[Check] device_map: {device_map}")
         
         # set pin_memory to reduce memory access time
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
-
+        
+        # FIXME: dispatch_model() fails to work with quantized models
         self.llm = dispatch_model(self.llm, device_map=device_map)
+        # print("=== After dispatch ===")
+        # for i, layer in enumerate(self.llm.model.layers):
+        #     for param in layer.parameters():
+        #         print(f"Layer {i} : {param.device}")
+        #         break
+            
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        logging.debug(f"Allocated Memory = {allocated_memory} GB")
+        logging.info(f"Allocated Memory = {allocated_memory} GB")
+        # logging.debug(f"Allocated Memory = {allocated_memory} GB")
         
         if allocated_memory > memory_limit:
             logging.info(f"[Warning] memory usage is too much")
@@ -254,7 +300,6 @@ class OffloadSDWrapper(SDWrapper):
 
         # * prefill stage
         outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True)
-        
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
         next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :] instead
@@ -283,7 +328,6 @@ class OffloadSDWrapper(SDWrapper):
 
             target_start = time.perf_counter()
             outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=input_ids.device, dtype=self.llm.dtype)
-            
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # (the clone itself is always small)
             next_token_logits = outputs.logits

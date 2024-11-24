@@ -17,7 +17,7 @@ from specdecodes.models import (
     OffloadWrapper
 ) 
 from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SharedKV, SSM_SX
-
+from awq import AutoAWQForCausalLM
 
 def load_model(
     llm_path: str,
@@ -32,12 +32,19 @@ def load_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # load LLM
-    llm = AutoModelForCausalLM.from_pretrained(
-        llm_path, 
-        torch_dtype=dtype,
-        low_cpu_mem_usage=True,
-        device_map=device
-    )
+    if 'autoawq' in llm_path:
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            low_cpu_mem_usage=True,
+            device_map=device
+        )
+    else:
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+            device_map=device
+        )
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
@@ -55,13 +62,18 @@ def load_model(
         model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
+        if 'autoawq' in llm_path:
+            ssm_device = llm.model.layers[-1].self_attn.q_proj.qweight.device
+        else:
+            ssm_device = llm.model.layers[-1].self_attn.q_proj.weight.device
+
         ssm = SSM_Classic.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ).to(ssm_device)
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
