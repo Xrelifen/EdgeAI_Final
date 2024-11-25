@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
-from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle, ProfileOffloadSDWrapper
+from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle, ProfileOffloadSDWrapper, OffloadWrapper
 from ..models import modeling_llama
 
 # Set random seed for reproducibility
@@ -39,6 +39,7 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
     wrappers = {
         "naive": ProfileNaiveWrapper, # NaiveWrapper,
         "hf": HuggingFaceWrapper,
+        "offload": OffloadWrapper,
         "sd-classic": lambda: ProfileSDWrapper(out_dir=out_dir),
         "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir),
         "sd-classic-offload": lambda: ProfileOffloadSDWrapper(out_dir=out_dir),
@@ -53,7 +54,7 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
             config=draft_config, 
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
-            tree_depth=16,
+            tree_depth=24,
             topk_len=16,
             min_sample_prob=1e-8,
             min_accept_prob=1e-8,
@@ -70,7 +71,7 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
         model.set_ssm(ssm)
 
     if llm_offload: 
-        model.set_offload_llm(llm_path, device=device)
+        model.set_offload_llm(llm_path, memory_limit=6.0, device=device)
     else:
         model.set_llm(llm)
 
@@ -81,7 +82,7 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload=False, o
 
 def run_eval(llm_path, ssm_path, mode, sd_method, layers, out_dir, dataset, log_file,
              max_new_tokens, llm_offload=False, temp=0.6, dtype=torch.float16, do_sample=False):
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload, out_dir, dtype=dtype, device="cuda")
+    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, llm_offload, out_dir, dtype=dtype, device="cuda:0")
 
     # Warm up the model
     warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
