@@ -12,7 +12,7 @@ import gc
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoConfig
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 from accelerate import dispatch_model
@@ -162,6 +162,9 @@ class OffloadSDWrapper(SDWrapper):
             low_cpu_mem_usage=True, 
             torch_dtype=torch.float16
         )
+        # print(self.llm)
+
+        llm_config = AutoConfig.from_pretrained(llm_path)
 
         estimated_mem = torch.cuda.memory_allocated(device)
         for param in self.llm.model.embed_tokens.parameters():
@@ -177,9 +180,23 @@ class OffloadSDWrapper(SDWrapper):
         decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
         memory_limit = memory_limit / 1.2
 
+        # Estimate Activation & kv-cache
+        # estimated_act = 0
+        # estimated_act += 2 * 256 * llm_config.hidden_size * llm_config.num_hidden_layers * 4  # QKVO
+        # estimated_act += 2 * 256 * llm_config.max_position_embeddings  # lm_head
+        # estimated_act += 2 * 256 * llm_config.intermediate_size * llm_config.num_hidden_layers  # mlp
+        # estimated_kv_cache = 2 * 512 * llm_config.hidden_size * llm_config.num_hidden_layers * 2  # KV-cache
+        # estimated_act /= (1024 ** 3)
+        # estimated_kv_cache /= (1924 ** 3)
+        
+        # print(f"Estimated Activation: {estimated_act} GB")
+        # print(f"Estimated KV-Cache: {estimated_kv_cache} GB")
+
+        # memory_limit = memory_limit - estimated_act - estimated_kv_cache
+
         # TODO: Check the memory usage to check how much layers to be offloaded
         for i in range(len(self.llm.model.layers)):
-            if estimated_mem <= memory_limit - 2 * decoder_layer_mem:
+            if estimated_mem <= memory_limit - decoder_layer_mem:
                 estimated_mem += decoder_layer_mem
                 device_map[f"model.layers.{i}"] = device
             else:
