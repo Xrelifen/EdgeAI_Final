@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 from accelerate import dispatch_model
+# from .my.big_modeling import dispatch_model
 from transformers.cache_utils import StaticCache, DynamicCache
 
 from bigtree import preorder_iter, levelorder_iter
@@ -189,6 +190,22 @@ class OffloadSDWrapper(SDWrapper):
                 device_map='cpu',
                 low_cpu_mem_usage=True,
             )
+            # Iterate over named buffers
+            import torch.nn as nn
+            buffer_keywords = ["qweight", "qzeros", "scales"]
+            for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
+                if any(keyword in name for keyword in buffer_keywords):
+                    # Extract the parent module and attribute name
+                    module_name, buffer_name = name.rsplit('.', 1)
+                    parent_module = dict(self.llm.named_modules())[module_name]
+                    
+                    # Unregister the buffer
+                    buffer_data = getattr(parent_module, buffer_name)
+                    delattr(parent_module, buffer_name)  # Remove it from the module
+
+                    # Register it as a trainable parameter
+                    parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
+
         else: 
             self.llm = AutoModelForCausalLM.from_pretrained(
                 llm_path, 
@@ -229,7 +246,8 @@ class OffloadSDWrapper(SDWrapper):
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
-        
+        estimated_mem = torch.cuda.memory_allocated(device)
+        logging.info(f"Before dispatch model = {estimated_mem / (1024 ** 3)} GB")
         # FIXME: dispatch_model() fails to work with quantized models
         self.llm = dispatch_model(self.llm, device_map=device_map)
         # print("=== After dispatch ===")
