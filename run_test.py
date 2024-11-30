@@ -6,7 +6,7 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
 from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ
 
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
@@ -125,8 +125,8 @@ def load_offload_model(
         ssm = ssm.to(device)
 
         # Load offload model
-        # model = ProfileOffloadSDWrapper(out_dir='specdecodes/experiments/profile_data/llama3')
-        model = OffloadSDWrapper()
+        model = ProfileOffloadSDWrapper()
+        # model = OffloadSDWrapper()
         model.set_ssm(ssm)
 
     elif mode == "sq-offload":
