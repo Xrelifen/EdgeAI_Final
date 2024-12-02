@@ -52,7 +52,7 @@ fi
 
 # args for train code
 NUM_PROCESSES=$(echo $CUDA_VISIBLE_DEVICES | tr "," "\n" | wc -l)
-args="--datadir $DATADIR --savedir $SAVEDIR --layers $LAYERS --data-ratio $DATA_RATIO --epochs $EPCOHS --lr $LR --bs $BATCH_SIZE"
+args="--datadir $DATADIR --savedir $SAVEDIR --data-ratio $DATA_RATIO --epochs $EPCOHS --lr $LR --bs $BATCH_SIZE"
 if [ $KEEP_EMBEDDINGS = True ]; then
   args="$args --keep-embeddings"
 fi
