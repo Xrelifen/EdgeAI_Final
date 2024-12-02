@@ -571,6 +571,62 @@ class SSM_Eagle(SSMBaseNEFT):
         past_key_values.crop(org_input_len)
         
         return keep_top_n_nodes(root, self.max_tokens)
+    
+class SSM_ShrinkClassic(SSM_Classic):
+    def init_additional_modules(self, config):
+        self.limited_vocab_size = 8192
+        self.lm_head = nn.Linear(config.hidden_size, self.limited_vocab_size, bias=False)
+        self.model.embed_tokens = nn.Embedding(self.limited_vocab_size, config.hidden_size, config.pad_token_id)
+        
+        self.id_ssm_to_llm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map.pt", weights_only=True)
+        self.id_llm_to_ssm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_inverse.pt", weights_only=True)
+        self.id_llm_freq_map = torch.load('/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_freq.pt', weights_only=True)
+        
+        
+    def forward(self, input_ids, embed_tokens=None, return_logits=False, *model_args, **kwargs):
+        # not using hidden_states
+        _ = kwargs.pop("hidden_states", None)
+        
+        # convert input_ids to custom vocab
+        self.id_llm_to_ssm = self.id_llm_to_ssm.to(input_ids.device)
+        input_ids = self.id_llm_to_ssm[input_ids]
+        
+        inputs_embeds = self.model.embed_tokens(input_ids)
+        hidden_states = self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)[0]
+    
+        if not return_logits:
+            return hidden_states
+        else:
+            return self.lm_head(hidden_states), hidden_states
+        
+# class SSM_Custom(SSM_Eagle):
+#     def init_additional_modules(self, config):
+#         self.model.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+#         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+#         self.id_ssm_to_llm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map.pt", weights_only=True)
+#         self.id_llm_to_ssm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_inverse.pt", weights_only=True)
+#         self.id_llm_freq_map = torch.load('/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_freq.pt', weights_only=True)
+        
+#         if config.hidden_size != config.org_hidden_size:
+#             self.resize = nn.Linear(config.hidden_size, config.org_hidden_size, bias=False)
+#         else:
+#             self.resize = nn.Identity()
+        
+#     def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):
+#         # convert input_ids to custom vocab
+#         self.id_llm_to_ssm = self.id_llm_to_ssm.to(hidden_states.device)
+#         input_ids = self.id_llm_to_ssm[input_ids]
+        
+#         inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
+#         hidden_states = inputs_embeds + self.extract(hidden_states)
+#         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+#         hidden_states = self.resize(hidden_states)
+        
+#         if not return_logits:
+#             return hidden_states
+#         else:
+#             return self.lm_head(hidden_states), hidden_states
         
 class SSM_Custom(SSMBaseNEFT):
     def init_custom_model(self, config):
@@ -711,6 +767,132 @@ class SSM_Custom(SSMBaseNEFT):
             #* Append nodes to their parent nodes
             for node in next_nodes:
                 prev_nodes[node.ind].append(node)
+ 
+            #* Get the nodes as input for next iteration
+            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
+            prev_nodes = next_nodes
+            
+            #* Depth increment
+            depth += 1
+            
+            #* Early stop if no nodes for next iteration
+            # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
+            if len(next_nodes) == 0:
+                break
+        
+        #* Crop the tree to the max_candidate_tokens
+        past_key_values.crop(org_input_len)
+        
+        return keep_top_n_nodes(root, self.max_tokens)
+    
+class SSM_ShrinkEagle(SSM_Eagle):
+    def init_additional_modules(self, config):
+        self.limited_vocab_size = 8192
+        self.model.embed_tokens = nn.Embedding(self.limited_vocab_size, config.hidden_size, config.pad_token_id)
+        self.lm_head = nn.Linear(config.org_hidden_size, self.limited_vocab_size, bias=False)
+        
+        # self.extract = Extractor(config)
+        self.extract = nn.Linear(config.org_hidden_size, config.hidden_size, bias=False)
+        
+        self.id_ssm_to_llm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map.pt", weights_only=True)
+        self.id_llm_to_ssm = torch.load("/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_inverse.pt", weights_only=True)
+        self.id_llm_freq_map = torch.load('/home/nctu/scott306lr/SpecDecodes/specdecodes/experiments/top_8192_id_map_freq.pt', weights_only=True)
+        
+        if config.hidden_size != config.org_hidden_size:
+            self.resize = nn.Linear(config.hidden_size, config.org_hidden_size, bias=False)
+        else:
+            self.resize = nn.Identity()
+        
+    def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):
+        # convert input_ids to custom vocab
+        self.id_llm_to_ssm = self.id_llm_to_ssm.to(hidden_states.device)
+        input_ids = self.id_llm_to_ssm[input_ids]
+        
+        inputs_embeds = self.model.embed_tokens(input_ids).to(hidden_states.dtype)
+        hidden_states = inputs_embeds + self.extract(hidden_states)
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+        hidden_states = self.resize(hidden_states)
+        
+        if not return_logits:
+            return hidden_states
+        else:
+            return self.lm_head(hidden_states), hidden_states   
+        
+    @torch.no_grad()
+    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
+        """This method is used to draft/guess the next tokens that the LLM may generate.
+
+        Args:
+            input_ids (Tensor): The input token ids.
+            hidden_states (Tensor): hidden_states from the previous iteration.
+            past_key_values (Cache): Cache object to store the past key-values generated by the model.
+            embed_tokens (Module): embedding from LLM.
+            lm_head (Module): lm_head from LLM.
+
+        Returns:
+            Node: The root node of the generated draft token tree.
+        """
+        
+        device = input_ids.device
+        if hasattr(self.model, "lm_head"):
+            dtype = self.model.lm_head.weight.dtype
+        else:
+            dtype = lm_head.weight.dtype
+        
+        # take out last token as sample_token
+        sample_token = input_ids[:, -1:]
+        
+        # remove the first token from input_ids (input_ids is shifted by 1)
+        input_ids = input_ids[:, 1:]
+        
+        # keep original length of input_ids
+        org_input_len = input_ids.shape[1] # offset of positon_id
+        
+        # initialize tree_mask and tree 
+        tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
+        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
+        
+        depth = 1 # depth starts from 1 in tree library
+        prev_nodes = [root]
+        while depth < self.depth:
+            #* Decode previous nodes
+            if depth == 1: # first iteration
+                kv_len = past_key_values.get_seq_length()
+                hidden_states = self(
+                    input_ids[:, kv_len:],
+                    hidden_states=hidden_states,
+                    embed_tokens=embed_tokens,
+                    past_key_values=past_key_values,
+                )[:, -1:]
+                
+            else:
+                hidden_states, input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, hidden_states, tree_mask, org_input_len, device=hidden_states.device)
+                hidden_states = self(
+                    input_ids,
+                    hidden_states=hidden_states,
+                    embed_tokens=embed_tokens,
+                    past_key_values=past_key_values,
+                    position_ids=position_ids, 
+                    attention_mask=invert_mask(tree_mask, dtype=dtype),
+                )
+            
+            logits = lm_head(hidden_states)[0]
+
+            #* Get the probabilities of each token
+            T = 1
+            sampled_probs = torch.softmax(logits/T, dim=-1)
+            
+            #* Sample/Select the next nodes
+            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth, min_accept_prob=self.min_accept_prob)
+
+            #* Append nodes to their parent nodes
+            for node in next_nodes:
+                # remap with self.id_ssm_to_llm
+                node.id = self.id_ssm_to_llm[node.id]
+                
+                # ignore if node.id is limited_vocab_size-1
+                if node.id != self.limited_vocab_size-1:
+                    prev_nodes[node.ind].append(node)
  
             #* Get the nodes as input for next iteration
             next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id

@@ -6,8 +6,9 @@ import time
 import os
 import logging
 
+import specdecodes.models.llm.modeling_llama as modeling_llama
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_ShrinkClassic, SSM_ShrinkEagle
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_Custom
 
 
 def load_model(
@@ -15,7 +16,6 @@ def load_model(
     ssm_path: str,
     mode: str,
     sd_method: str,
-    layers: int,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     ):
@@ -23,7 +23,8 @@ def load_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # load LLM
-    llm = AutoModelForCausalLM.from_pretrained(
+    # llm = AutoModelForCausalLM.from_pretrained(
+    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
         llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
@@ -32,7 +33,7 @@ def load_model(
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = layers
+        draft_config.num_hidden_layers = 1
         
     else:
         draft_config = None
@@ -62,6 +63,13 @@ def load_model(
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
+        # draft_config.head_dim = 64
+        # draft_config.hidden_size = 2048
+        # draft_config.intermediate_size = 8192
+        # draft_config.num_attention_heads = 32
+        # draft_config.num_key_value_heads = 8
+        
+        
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
             ssm_path,
@@ -69,19 +77,21 @@ def load_model(
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
+            keep_embeddings=True,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
     
-    elif mode == "sd-shrink-eagle":
+    elif mode == "sd-custom":
         # model = SDWrapper()
         model = ProfileSDWrapper(out_dir=None)
         
-        # compress
-        # draft_config.compress_hidden_ratio = 0.5
-        # draft_config.compress_intermediate_ratio = 0.5
+        # draft_config.num_attention_heads = 9
+        # draft_config.num_key_value_heads = 3
+        # draft_config.hidden_size = 576
+        # draft_config.intermediate_size = 1536
         
         # load SSM
-        ssm = SSM_ShrinkEagle.from_pretrained(
+        ssm = SSM_Custom.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,
@@ -111,7 +121,7 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
 
     # warm up
     if not args.no_warm_up:
@@ -209,12 +219,6 @@ if __name__ == "__main__":
         type=str,
         default="greedy",
         help="The mode of model generation.",
-    )
-    parser.add_argument(
-        "--layers",
-        type=int,
-        default=1,
-        help="The number of layers for SSM.",
     )
     parser.add_argument(
         "-nw",

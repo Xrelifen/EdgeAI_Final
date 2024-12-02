@@ -13,7 +13,7 @@ from accelerate.logging import get_logger
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
-from ..models import SSM_Eagle, LLM_First_Layers, LLM_Last_Layers
+from ..models import SSM_Eagle, LLM_First_Layers, LLM_Last_Layers, SSM_Custom
 from .train_utils import (
     list_files,
     CustomDataset,
@@ -36,10 +36,13 @@ def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logi
     t_logits = t_logits.float()
     
     # Calculate losses
-    vloss = calc_sl1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    # vloss = calc_sl1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    # ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
+    # loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+    # return loss, vloss, ploss
+    
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
-    loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
-    return loss, vloss, ploss
+    return ploss, ploss, ploss
 
 def train_one_epoch(
     model, llm_first, llm_last, train_loader, optimizer, scheduler,
@@ -59,15 +62,14 @@ def train_one_epoch(
             with torch.no_grad():
                 t_hidden_states = data["target"]
                 t_logits = llm_last(t_hidden_states)
-
+                
             # Student outputs
-            s_hidden_states = model(
+            s_logits, s_hidden_states = model(
                 input_ids=data["input_ids"],
                 hidden_states=data["hidden_states"],
-                embed_tokens=llm_first,
-                attention_mask=data["attention_mask"]
+                attention_mask=data["attention_mask"],
+                return_logits=True,
             )
-            s_logits = llm_last(s_hidden_states, head_only=True)
 
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
@@ -154,13 +156,12 @@ def validate(
         t_logits = llm_last(t_hidden_states)
 
         # Student outputs
-        s_hidden_states = model(
+        s_logits, s_hidden_states = model(
             input_ids=data["input_ids"],
             hidden_states=data["hidden_states"],
-            embed_tokens=llm_first,
-            attention_mask=data["attention_mask"]
+            attention_mask=data["attention_mask"],
+            return_logits=True,
         )
-        s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
         loss, vloss, ploss = calculate_loss(
@@ -321,29 +322,29 @@ def main(args):
     logger.info("Setting up model...")
     draft_config = deepcopy(config)
     draft_config.num_hidden_layers = 1
-    draft_config.use_cache = False
-    draft_config._attn_implementation = "sdpa"
-    
     # draft_config.head_dim = 64
     # draft_config.hidden_size = 2048
     # draft_config.intermediate_size = 8192
     # draft_config.num_attention_heads = 32
     # draft_config.num_key_value_heads = 8
     
-    # draft_config.num_attention_heads = 32
-    # draft_config.num_key_value_heads = 8
-    # draft_config.intermediate_size = 11008
-    # 4096 
+    # draft_config.hidden_size = 576
+    # draft_config.intermediate_size = 1536
+    # draft_config.hidden_size = 4096 // 4
+    # draft_config.intermediate_size = 11008 // 4
     
+    
+    draft_config.use_cache = False
+    draft_config._attn_implementation = "sdpa"
     if args.neftune:
         draft_config.neftune_noise_alpha = args.neftune_noise_alpha
 
     if args.pretrained:
         logger.info("Loading pretrained model...")
-        model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_Custom.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Eagle(config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_Custom(config=draft_config, keep_embeddings=args.keep_embeddings)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
@@ -352,16 +353,21 @@ def main(args):
     # if hasattr(model.model, "embed_tokens"):
     #     model.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
     #     model.model.embed_tokens.requires_grad_(False)
+        
+    # if hasattr(model, "lm_head"):
+    #     logger.info("Transferring lm_head...")
+    #     model.lm_head.weight.data = llm.lm_head.weight.data.clone()
+    #     model.lm_head.weight.requires_grad_(False)
 
-    # load llm's norm layer to draft model
-    # model.model.norm.weight.data = llm.model.norm.weight.data.clone()
+    # # load llm's norm layer to draft model
+    # model.model.norm.weight = llm.model.norm.weight.clone().detach()
     # model.model.norm.requires_grad_(False)
     
-    # load llm's last attention layer's data to draft model (not trainable)
+    # # load llm's last attention layer's data to draft model (not trainable)
     # load_index = -1
     # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
-    #     draft_param.data = llm_param.data.clone()
-    #     draft_param.requires_grad_(False)
+    #     draft_param.data = llm_param.data
+    #     draft_param.requires_grad = False
     
     # # load llm's first layer's data to draft model
     # load_index = -2
@@ -394,7 +400,7 @@ def main(args):
         fract_decay=wsd_fract_decay,
         init_div_factor=1e2,
         final_lr_factor=0,  # should be 0 here
-        decay_type='sqrt',
+        decay_type='linear',
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda_schedule)
 
