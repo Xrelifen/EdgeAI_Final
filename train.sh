@@ -2,7 +2,7 @@
 CUDA_VISIBLE_DEVICES=0,1,2,3
 LOGLEVEL=DEBUG
 PORT=29500
-while getopts ":d:l:" opt; do
+while getopts ":d:l:p:" opt; do
   case $opt in
     d) CUDA_VISIBLE_DEVICES=$OPTARG
     ;;
