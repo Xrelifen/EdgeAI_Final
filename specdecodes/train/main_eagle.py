@@ -40,6 +40,9 @@ def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logi
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
     loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
     return loss, vloss, ploss
+    
+    # loss = calc_ce_loss(loss_mask, s_logits, t_logits)
+    # return loss, loss, loss
 
 def train_one_epoch(
     model, llm_first, llm_last, train_loader, optimizer, scheduler,

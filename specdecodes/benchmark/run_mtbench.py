@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
-from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle, SSM_ShrinkEagle
+from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
 from ..models import modeling_llama
 
 # Set random seed for reproducibility
@@ -45,7 +45,6 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
         ssms = {
             "sd-classic": SSM_Classic,
             "sd-eagle": SSM_Eagle,
-            "sd-shrinkeagle": SSM_ShrinkEagle,
         }
         ssm_cls = ssms.get(mode, lambda: ValueError("Invalid mode"))
         ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config, sampling_method=sd_method,

@@ -199,11 +199,11 @@ class SSMBase(nn.Module):
             if not keep_embeddings:
                 if hasattr(self.model, "embed_tokens"): 
                     del self.model.embed_tokens
-                    self.model.embed_tokens = None
-                    
             self.config = config
         else:
             raise ValueError("Either model or config must be provided.")
+        
+        # Initialize additional modules
         self.init_additional_modules(config)
         
         # Draft parameters
@@ -268,6 +268,13 @@ class SSMBase(nn.Module):
             self.sample_nodes = heuristic_k_sampling
         else:
             raise ValueError("Sampling method not supported")
+        
+    def get_input_embeddings(self):
+        # If the model has input embeddings, return it. Otherwise, return None
+        if hasattr(self.model, "embed_tokens"):
+            return self.model.embed_tokens
+        else:
+            return None
         
     @torch.no_grad()
     def forward(self, input_ids, *model_args, **kwargs):
@@ -341,8 +348,8 @@ class SSM_Classic(SSMBaseNEFT):
         _ = kwargs.pop("hidden_states", None) #! Refactor this
         
         # with torch.no_grad():
-        if self.model.get_input_embeddings():
-            embed_tokens = self.model.get_input_embeddings()
+        if self.get_input_embeddings():
+            embed_tokens = self.get_input_embeddings()
         inputs_embeds = embed_tokens(input_ids)
 
         outputs = self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)
@@ -463,7 +470,8 @@ class SSM_Eagle(SSMBaseNEFT):
 
     def forward(self, input_ids, hidden_states, embed_tokens=None, *model_args, **kwargs):
         # with torch.no_grad():
-        embed_tokens = self.model.get_input_embeddings() if self.model.get_input_embeddings() is not None else embed_tokens
+        if self.get_input_embeddings():
+            embed_tokens = self.get_input_embeddings()
         inputs_embeds = embed_tokens(input_ids)
         
         hidden_states = self.fusion(hidden_states, inputs_embeds)
@@ -598,7 +606,7 @@ class SSM_Custom(SSMBaseNEFT):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
     def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):  
-        embed_tokens = self.model.get_input_embeddings()
+        embed_tokens = self.get_input_embeddings()
         inputs_embeds = embed_tokens(input_ids)
         
         # ft = self.fs(hidden_states, inputs_embeds)

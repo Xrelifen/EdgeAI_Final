@@ -14,7 +14,8 @@ done
 
 # Basic options
 LLM_PATH=meta-llama/Llama-2-7b-chat-hf
-SSM_PATH=~/checkpoints/eagle
+# SSM_PATH=~/checkpoints/eagle/ce/model_5/
+SSM_PATH=~/checkpoints/eagle/sl1-ce/model_5/
 # SSM_PATH=~/checkpoints/custom/model_20
 SEED=9991
 DO_WARMUP=True
@@ -29,7 +30,7 @@ MODE=sd-eagle
 SD_METHOD=greedy
 
 # args for run_test.py
-args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --layers $LAYERS --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
+args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
 if [ $DO_WARMUP = False ]; then
   args="$args -nw"
 fi

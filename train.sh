@@ -16,12 +16,13 @@ while getopts ":d:l:p:" opt; do
 done
 
 # Data options
-DATADIR=~/datasets/eagle/last1/sharegpt_0_6799_mufp16/gpu0/
+DATADIR=~/datasets/eagle/last1/sharegpt_0_67999_mufp16/gpu0/
 # DATADIR=~/datasets/eagle/no-norm/sharegpt_0_67999_mufp16/gpu0/
 DATA_RATIO=1
 
 # Model options
 SAVEDIR=~/checkpoints/eagle/sl1-ce/
+# SAVEDIR=~/checkpoints/eagle/ce/
 TRAIN_MODEL=eagle
 KEEP_EMBEDDINGS=False
 
@@ -31,7 +32,7 @@ KEEP_EMBEDDINGS=False
 
 # train options
 PRECISION=bf16
-EPCOHS=20
+EPCOHS=5
 LR=1e-4
 BATCH_SIZE=4
 
