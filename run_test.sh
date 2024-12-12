@@ -15,8 +15,8 @@ done
 # Basic options
 LLM_PATH=meta-llama/Llama-2-7b-chat-hf
 # SSM_PATH=~/checkpoints/eagle/ce/model_5/
-SSM_PATH=~/checkpoints/eagle/sl1-ce/model_5/
-# SSM_PATH=~/checkpoints/custom/model_20
+# SSM_PATH=~/checkpoints/eagle/sl1-ce/model_5/
+SSM_PATH=~/checkpoints/eagle/sl1ce/model_20/
 SEED=9991
 DO_WARMUP=True
 MAX_NEW_TOKENS=200
@@ -25,9 +25,13 @@ TEMPERATURE=0
 
 # mode options
 MODE=sd-eagle
+# MODE=naive
 
 # sd specific options
 SD_METHOD=greedy
+
+# NVTX_PROFILING=True
+NVTX_PROFILING=False
 
 # args for run_test.py
 args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
@@ -37,6 +41,13 @@ fi
 if [ $DO_SAMPLE = True ]; then
   args="$args --do-sample --temp $TEMPERATURE"
 fi
-
-# execute run_test.py
-LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args
+if [ $NVTX_PROFILING = True ]; then
+  # print the command to be executed
+  echo LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES nsys profile python run_test.py $args
+  LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES nsys profile python run_test.py $args
+else
+  # execute run_test.py
+  # print the command to be executed
+  echo LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args
+  LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args
+fi

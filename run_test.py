@@ -60,8 +60,8 @@ def load_model(
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
+        model = SDWrapper()
+        # model = ProfileSDWrapper(out_dir=None)
         
         # draft_config.head_dim = 64
         # draft_config.hidden_size = 2048
@@ -134,8 +134,10 @@ def main(args):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": input_message},
         ]
+        torch.cuda.nvtx.range_push("Warm up")
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
         _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+        torch.cuda.nvtx.range_pop()
 
     # generate response
     print("Generating response...")
@@ -152,7 +154,9 @@ def main(args):
     prompt = tokenizer.decode(input_ids[0])
     
     start_time = time.time()
+    torch.cuda.nvtx.range_push("generate")
     output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+    torch.cuda.nvtx.range_pop()
     end_time = time.time()
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
