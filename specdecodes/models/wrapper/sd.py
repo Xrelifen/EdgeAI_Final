@@ -59,6 +59,34 @@ class SDWrapper(WrapperBase):
         
         return outputs
     
+    def _new_tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
+        # Preparing llm's tree decoding data, also updates each node's index (node.ind).
+        node_data = tree.get_node_data()
+        tree_input_ids = node_data['token_ids']
+        tree_position_ids = node_data['depths'] + position_offset
+        tree_mask = tree.create_attention_mask(position_offset)
+        
+        # Move to device
+        tree_input_ids = tree_input_ids.to(device)
+        tree_position_ids = tree_position_ids.to(device)
+        tree_mask = tree_mask.to(device)
+        
+        # print("position_offset:", position_offset)
+        # print("tree_input_ids shape:", tree_input_ids.shape)
+        # print("tree_position_ids shape:", tree_position_ids.shape)
+        # print("tree_mask shape:", tree_mask.shape)
+        
+        # llm forward
+        outputs = self.llm(
+            tree_input_ids.unsqueeze(0),
+            past_key_values=past_key_values,
+            attention_mask=tree_mask,
+            position_ids=tree_position_ids.unsqueeze(0),
+            output_hidden_states=True,
+        )
+        
+        return outputs
+    
     def _verify(self, root, logits, logits_warper, do_sample):
         # Obtain LLM sample logits
         global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
@@ -101,6 +129,87 @@ class SDWrapper(WrapperBase):
         hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
         
         return sampled_tokens, hidden_indices, (total_len, accept_len)
+    
+    def new_verify_step(self, p, q, token_ids, sample_token_method):
+        # sampled_token_id = p.multinomial(num_samples=1)
+        # sampled_token_id = p.argmax()[None]
+        sampled_token_id = sample_token_method(p)
+        
+        if (sampled_token_id == token_ids).sum() > 0:
+            return sampled_token_id, None
+        
+        p = p / (1.0 - p[token_ids].sum())
+        p[token_ids] = 0
+        return None, p
+
+    def _new_verify(self, tree, logits, logits_warper, do_sample):
+        def sample_token_method(logits, return_probs=False):
+            return self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=return_probs)
+        
+        # Obtain LLM sample logits
+        global_p = sample_token_method(logits, return_probs=True).squeeze(0) # remove batch dim
+        
+        # Initialize variables
+        sampled_tokens = torch.tensor([], dtype=torch.long, device=tree.device)
+        hidden_indices = torch.tensor([], dtype=torch.long, device=tree.device)
+        total_len = 0
+        accept_len = 0
+        
+        # Iterate through draft tree, verify each node
+        node_data = tree.get_node_data()
+        token_ids = node_data['token_ids']
+        token_probs = node_data['cumulative_probabilities']
+        
+        cur_ind = torch.tensor([0], dtype=torch.long, device=tree.device)
+        children_inds = tree.get_children_indices(cur_ind)
+        children_token_ids = token_ids[children_inds]
+        # print("children_inds:", children_inds)
+        while children_inds.size(0) > 0:
+            total_len += 1
+            accept_token_id, new_p = self.new_verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, sample_token_method)
+                    
+            # Accept token if it is in the children
+            if accept_token_id is not None:
+                accept_len += 1
+                sampled_tokens = torch.cat([sampled_tokens, accept_token_id[None]])
+                hidden_indices = torch.cat([hidden_indices, cur_ind])
+                # print("children_inds:", children_inds)
+                # print("children_token_ids:", children_token_ids)
+                # print("accept_token_id:", accept_token_id)
+                cur_ind = children_inds[children_token_ids == accept_token_id]
+                # print("cur_ind:", cur_ind)
+                # print("Children token ids:", children_token_ids)
+                children_inds = tree.get_children_indices(cur_ind)
+                children_token_ids = token_ids[children_inds]
+                
+                # if accept_len > 20:
+                #     print("Accepting more than 20 tokens, breaking")
+                #     break
+            
+            # Reject token, update global_p and break
+            else:
+                global_p[cur_ind] = new_p
+                break
+            
+            
+        
+        # Generate bonus token
+        # Don't generate if eos token is the last token
+        if sampled_tokens.size(0) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id:
+            if not do_sample:
+                bonus_token = global_p[cur_ind].argmax()[None]
+            else:
+                bonus_token = global_p[cur_ind].multinomial(num_samples=1)
+            sampled_tokens = torch.cat([sampled_tokens, bonus_token])
+            hidden_indices = torch.cat([hidden_indices, cur_ind])
+        
+        # # Convert the sampled tokens and hidden indices to tensors
+        # sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
+        # hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
+        
+        print("Predicted:", self.tokenizer.batch_decode(sampled_tokens, clean_up_tokenization_spaces=False))
+        
+        return sampled_tokens[None], hidden_indices, (total_len, accept_len)
 
     def _generate(
         self,
@@ -146,7 +255,9 @@ class SDWrapper(WrapperBase):
         ssm_past_key_values = TreeDynamicCache()
 
         # * prefill stage
+        torch.cuda.nvtx.range_push("prefilling")
         outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
+        torch.cuda.nvtx.range_pop()
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
@@ -162,13 +273,18 @@ class SDWrapper(WrapperBase):
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
         finished = False
+        torch.cuda.nvtx.range_push("decoding")
         while not finished:
             # * speculate
-            root = self._speculate(input_ids, hidden_states, ssm_past_key_values)
+            torch.cuda.nvtx.range_push("speculate")
+            tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
+            torch.cuda.nvtx.range_pop()
 
             # * tree decoding
+            torch.cuda.nvtx.range_push("tree_decoding")
             prev_kv_len = llm_past_key_values.get_seq_length()
-            outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+            outputs = self._new_tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+            torch.cuda.nvtx.range_pop()
             
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # We keep the seq_len axis considering cases of multiple tokens.
@@ -180,23 +296,29 @@ class SDWrapper(WrapperBase):
             del outputs
 
             # * verify
-            sampled_tokens, hidden_indices, _ = self._verify(
-                                                root, next_token_logits, 
+            torch.cuda.nvtx.range_push("verify")
+            sampled_tokens, hidden_indices, _ = self._new_verify(
+                                                tree, next_token_logits, 
                                                 logits_warper,
                                                 do_sample
                                             )
+            torch.cuda.nvtx.range_pop()
             
             sampled_tokens = sampled_tokens.to(input_ids.device)
             hidden_indices = hidden_indices.to(hidden_states.device)
+            
 
             # * update input_ids, hidden_states, and kv-cache
+            torch.cuda.nvtx.range_push("update_cache")
             input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             hidden_states = hidden_states[:, hidden_indices].clone()
             llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
+            torch.cuda.nvtx.range_pop()
             
             # * check stopping criteria
             finished = stopping_criteria(input_ids, None)
         
+        torch.cuda.nvtx.range_pop()
         return input_ids
     
 
