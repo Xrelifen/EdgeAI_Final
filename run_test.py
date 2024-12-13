@@ -10,6 +10,7 @@ import specdecodes.models.llm.modeling_llama as modeling_llama
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
 from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_Custom
 
+import nvtx
 
 def load_model(
     llm_path: str,
@@ -134,10 +135,9 @@ def main(args):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": input_message},
         ]
-        torch.cuda.nvtx.range_push("Warm up")
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-        _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
-        torch.cuda.nvtx.range_pop()
+        with nvtx.annotate("Warm up"):
+            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
 
     # generate response
     print("Generating response...")
@@ -154,9 +154,8 @@ def main(args):
     prompt = tokenizer.decode(input_ids[0])
     
     start_time = time.time()
-    torch.cuda.nvtx.range_push("generate")
-    output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
-    torch.cuda.nvtx.range_pop()
+    with nvtx.annotate("Generate"):
+        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     end_time = time.time()
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
