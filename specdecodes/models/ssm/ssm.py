@@ -19,6 +19,8 @@ from ..llm.modeling_llama import ACT2FN, LlamaMLP, LlamaRMSNorm
 from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
 from ..llm import modeling_llama_no_in_norm
+
+import nvtx
      
      
 def load_custom_model(model, model_path):
@@ -703,86 +705,76 @@ class SSM_Eagle(SSMBaseNEFT):
             
             #* Decode previous nodes
             if i == 0: # first iteration
-                torch.cuda.nvtx.range_push("first forward")
-                kv_len = past_key_values.get_seq_length()
-                hidden_states = self(
-                    input_ids[:, kv_len:],
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens,
-                    past_key_values=past_key_values,
-                )[:, -1:]
-                torch.cuda.nvtx.range_pop()
+                with nvtx.annotate("first forward", color="red"):
+                    kv_len = past_key_values.get_seq_length()
+                    hidden_states = self(
+                        input_ids[:, kv_len:],
+                        hidden_states=hidden_states,
+                        embed_tokens=embed_tokens,
+                        past_key_values=past_key_values,
+                    )[:, -1:]
                 
             else:
-                torch.cuda.nvtx.range_push("leaf-1")
-                avail_data = tree.get_available_leaf_node_data()
-                # avail_indices = avail_data['available_leaf_indices']
-                leaf_probs = avail_data['cumulative_probabilities']
-                # avail_position = avail_data['depths']
-                avail_parent_indices = avail_data['parent_indices']
-                avail_token_ids = avail_data['token_ids']
-                torch.cuda.nvtx.range_pop()
+                with nvtx.annotate("leaf-1"):
+                    avail_data = tree.get_available_leaf_node_data()
+                    # avail_indices = avail_data['available_leaf_indices']
+                    leaf_probs = avail_data['cumulative_probabilities']
+                    # avail_position = avail_data['depths']
+                    avail_parent_indices = avail_data['parent_indices']
+                    avail_token_ids = avail_data['token_ids']
                 
-                torch.cuda.nvtx.range_push("hidden + positions")
-                prev_sampling_index = tree.get_node_extra_data(avail_parent_indices)
-                hidden_states = hidden_states[:, prev_sampling_index]
-                position_ids = tree.get_node_data()['depths'][prev_sampling_index] + org_input_len
-                torch.cuda.nvtx.range_pop()
+                with nvtx.annotate("hidden + positions"):
+                    prev_sampling_index = tree.get_node_extra_data(avail_parent_indices)
+                    hidden_states = hidden_states[:, prev_sampling_index]
+                    position_ids = tree.get_node_data()['depths'][prev_sampling_index] + org_input_len
                 
-                torch.cuda.nvtx.range_push("attn_mask")
-                # tree_attention_mask = tree.create_attention_mask(org_input_len)[:, :, avail_indices]
-                # print('org attention_mask shape:', tree_attention_mask.shape)
-                tree_attention_mask = tree_attention_mask[:, :, prev_sampling_index]
-                tree_attention_mask = torch.concat((tree_attention_mask, torch.eye(len(prev_sampling_index), device=device, dtype=torch.bool)[None, None]), dim=3)
-                torch.cuda.nvtx.range_pop()
-                # print('prev_sampling_index shape:', prev_sampling_index.shape)
-                # print('hidden_states shape:', hidden_states.shape)
-                # print('position_ids shape:', position_ids.shape)
-                # print('attention_mask shape:', tree_attention_mask.shape)
+                with nvtx.annotate("tree mask"):
+                    # tree_attention_mask = tree.create_attention_mask(org_input_len)[:, :, avail_indices]
+                    # print('org attention_mask shape:', tree_attention_mask.shape)
+                    tree_attention_mask = tree_attention_mask[:, :, prev_sampling_index]
+                    tree_attention_mask = torch.concat((tree_attention_mask, torch.eye(len(prev_sampling_index), device=device, dtype=torch.bool)[None, None]), dim=3)
+                    # print('prev_sampling_index shape:', prev_sampling_index.shape)
+                    # print('hidden_states shape:', hidden_states.shape)
+                    # print('position_ids shape:', position_ids.shape)
+                    # print('attention_mask shape:', tree_attention_mask.shape)
                 
-                torch.cuda.nvtx.range_push("forward")
-                hidden_states = self(
-                    avail_token_ids.unsqueeze(0),
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens,
-                    past_key_values=past_key_values,
-                    position_ids=position_ids.unsqueeze(0),
-                    attention_mask=invert_mask(tree_attention_mask, dtype=dtype),
-                )
-                torch.cuda.nvtx.range_pop()
+                with nvtx.annotate("forward", color="red"):
+                    hidden_states = self(
+                        avail_token_ids.unsqueeze(0),
+                        hidden_states=hidden_states,
+                        embed_tokens=embed_tokens,
+                        past_key_values=past_key_values,
+                        position_ids=position_ids.unsqueeze(0),
+                        attention_mask=invert_mask(tree_attention_mask, dtype=dtype),
+                    )
 
             #* Get the probabilities of each token
-            torch.cuda.nvtx.range_push("softmax")
-            # T = 1
-            # sampled_probs = torch.softmax(lm_head(hidden_states)[0]/T, dim=-1)
-            sampled_probs = torch.softmax(lm_head(hidden_states)[0], dim=-1)
-            torch.cuda.nvtx.range_pop()
+            with nvtx.annotate("softmax"):
+                sampled_probs = torch.softmax(lm_head(hidden_states)[0], dim=-1)
             
             #* Sample/Select the next nodes
-            torch.cuda.nvtx.range_push("sample nodes")
-            token_ids_array, probabilities_array, parent_indices_array, valid_flags = self.new_topk_sampling(
-                sampled_probs, 
-                leaf_probs, 
-                self.topk_len, 
-                self.min_accept_prob
-            )
-            parent_indices_array = tree.available_leaves[parent_indices_array]
-            torch.cuda.nvtx.range_pop()
+            with nvtx.annotate("sample nodes", color="green"):
+                token_ids_array, probabilities_array, parent_indices_array, valid_flags = self.new_topk_sampling(
+                    sampled_probs, 
+                    leaf_probs, 
+                    self.topk_len, 
+                    self.min_accept_prob
+                )
+                parent_indices_array = tree.available_leaves[parent_indices_array]
             
             #* Add new nodes
-            torch.cuda.nvtx.range_push("add nodes to tree")
-            tree.add_nodes(
-                token_ids=token_ids_array,
-                probabilities=probabilities_array,
-                parent_indices=parent_indices_array, 
-                valid_flags=valid_flags
-            )
-            torch.cuda.nvtx.range_pop()
+            with nvtx.annotate("add nodes", color="green"):
+                tree.add_nodes(
+                    token_ids=token_ids_array,
+                    probabilities=probabilities_array,
+                    parent_indices=parent_indices_array, 
+                    valid_flags=valid_flags
+                )
             
             #* Prune the tree to keep top n
-            # tree.print_tree_structure(show_probability=True)
-            tree.prune_to_top_n(self.max_tokens)
-            torch.cuda.nvtx.range_pop()
+            with nvtx.annotate("prune tree"):
+                tree.prune_to_top_n(self.max_tokens)
+                # tree.print_tree_structure(show_probability=True)
             
             #* Early stop if all leafs are pruned
             new_depth = tree.get_max_depth()
@@ -791,14 +783,10 @@ class SSM_Eagle(SSMBaseNEFT):
             old_depth = new_depth
         
         #* Discard the new calculated past_key_values after org_input_len
-        torch.cuda.nvtx.range_push("crop kv")
-        past_key_values.crop(org_input_len)
-        torch.cuda.nvtx.range_pop()
+        with nvtx.annotate("crop kv"):
+            past_key_values.crop(org_input_len)
         
-        # tree.print_tree_structure(show_probability=True)
-        # torch.cuda.nvtx.range_push("prune tree")
         # tree.prune_to_top_n(self.max_tokens)
-        # torch.cuda.nvtx.range_pop()
         # tree.print_tree_structure(show_probability=True)
         
         return tree

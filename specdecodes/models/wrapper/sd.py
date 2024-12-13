@@ -15,6 +15,8 @@ import prettytable as pt
 from .verify_utils import verify_step
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
+import nvtx
+
 
 class SDWrapper(WrapperBase):
     def __init__(self, method="greedy"):
@@ -255,9 +257,8 @@ class SDWrapper(WrapperBase):
         ssm_past_key_values = TreeDynamicCache()
 
         # * prefill stage
-        torch.cuda.nvtx.range_push("prefilling")
-        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
-        torch.cuda.nvtx.range_pop()
+        with nvtx.annotate("prefill", color="orange"):
+            outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
@@ -272,53 +273,48 @@ class SDWrapper(WrapperBase):
         next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
-        finished = False
-        torch.cuda.nvtx.range_push("decoding")
-        while not finished:
-            # * speculate
-            torch.cuda.nvtx.range_push("speculate")
-            tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
-            torch.cuda.nvtx.range_pop()
+        with nvtx.annotate("decoding"):
+            finished = False
+            while not finished:
+                # * speculate
+                with nvtx.annotate("speculate", color="cyan"):
+                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
 
-            # * tree decoding
-            torch.cuda.nvtx.range_push("tree_decoding")
-            prev_kv_len = llm_past_key_values.get_seq_length()
-            outputs = self._new_tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
-            torch.cuda.nvtx.range_pop()
-            
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # We keep the seq_len axis considering cases of multiple tokens.
-            next_token_logits = outputs.logits
-            hidden_states = outputs.hidden_states[-1].clone()
-            
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
+                # * tree decoding
+                with nvtx.annotate("tree_decoding", color="orange"):
+                    prev_kv_len = llm_past_key_values.get_seq_length()
+                    outputs = self._new_tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+                
+                # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+                # We keep the seq_len axis considering cases of multiple tokens.
+                next_token_logits = outputs.logits
+                hidden_states = outputs.hidden_states[-1].clone()
+                
+                # This is needed to properly delete outputs.logits which may be very large for first iteration
+                # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+                del outputs
 
-            # * verify
-            torch.cuda.nvtx.range_push("verify")
-            sampled_tokens, hidden_indices, _ = self._new_verify(
-                                                tree, next_token_logits, 
-                                                logits_warper,
-                                                do_sample
-                                            )
-            torch.cuda.nvtx.range_pop()
-            
-            sampled_tokens = sampled_tokens.to(input_ids.device)
-            hidden_indices = hidden_indices.to(hidden_states.device)
-            
+                # * verify
+                with nvtx.annotate("verify"):
+                    sampled_tokens, hidden_indices, _ = self._new_verify(
+                                                        tree, next_token_logits, 
+                                                        logits_warper,
+                                                        do_sample
+                                                    )
+                    
+                    sampled_tokens = sampled_tokens.to(input_ids.device)
+                    hidden_indices = hidden_indices.to(hidden_states.device)
+                
 
-            # * update input_ids, hidden_states, and kv-cache
-            torch.cuda.nvtx.range_push("update_cache")
-            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-            hidden_states = hidden_states[:, hidden_indices].clone()
-            llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
-            torch.cuda.nvtx.range_pop()
-            
-            # * check stopping criteria
-            finished = stopping_criteria(input_ids, None)
-        
-        torch.cuda.nvtx.range_pop()
+                # * update input_ids, hidden_states, and kv-cache
+                with nvtx.annotate("update_cache"):
+                    input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
+                    hidden_states = hidden_states[:, hidden_indices].clone()
+                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
+                
+                # * check stopping criteria
+                finished = stopping_criteria(input_ids, None)
+                
         return input_ids
     
 

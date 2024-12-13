@@ -30,8 +30,8 @@ MODE=sd-eagle
 # sd specific options
 SD_METHOD=greedy
 
-# NVTX_PROFILING=True
-NVTX_PROFILING=False
+NVTX_PROFILING=True
+# NVTX_PROFILING=False
 
 # args for run_test.py
 args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
