@@ -696,9 +696,8 @@ class SSM_Eagle(SSMBaseNEFT):
         tree = Tree(sample_token[0], device=device, prob_dtype=dtype)
         tree.set_node_extra_data(torch.tensor([0], device=device, dtype=torch.long), torch.tensor([0], device=device, dtype=torch.long))
         tree_attention_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        prev_sampling_index = None
-        old_depth = None
         leaf_probs = torch.tensor([1.0], device=device, dtype=dtype)
+        old_depth = None
         
         for i in range(self.depth):
             # print(f"Depth: {i+1}/{self.depth}")
