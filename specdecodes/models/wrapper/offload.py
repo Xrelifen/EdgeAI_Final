@@ -206,20 +206,20 @@ class OffloadSDWrapper(SDWrapper):
             # )
             
             # Iterate over named buffers
-            import torch.nn as nn
-            buffer_keywords = ["qweight", "qzeros", "scales"]
-            for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
-                if any(keyword in name for keyword in buffer_keywords):
-                    # Extract the parent module and attribute name
-                    module_name, buffer_name = name.rsplit('.', 1)
-                    parent_module = dict(self.llm.named_modules())[module_name]
+            # import torch.nn as nn
+            # buffer_keywords = ["qweight", "qzeros", "scales"]
+            # for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
+            #     if any(keyword in name for keyword in buffer_keywords):
+            #         # Extract the parent module and attribute name
+            #         module_name, buffer_name = name.rsplit('.', 1)
+            #         parent_module = dict(self.llm.named_modules())[module_name]
                     
-                    # Unregister the buffer
-                    buffer_data = getattr(parent_module, buffer_name)
-                    delattr(parent_module, buffer_name)  # Remove it from the module
+            #         # Unregister the buffer
+            #         buffer_data = getattr(parent_module, buffer_name)
+            #         delattr(parent_module, buffer_name)  # Remove it from the module
 
-                    # Register it as a trainable parameter
-                    parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
+            #         # Register it as a parameter
+            #         parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
 
         else: 
             self.llm = AutoModelForCausalLM.from_pretrained(
@@ -264,10 +264,16 @@ class OffloadSDWrapper(SDWrapper):
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
+            for buffer in layer.buffers():
+                buffer.data = buffer.data.cpu().pin_memory(device)
         estimated_mem = torch.cuda.memory_allocated(device)
         logging.info(f"Before dispatch model = {estimated_mem / (1024 ** 3)} GB")
         # TODO: prefetch next layer
-        self.llm = dispatch_model(self.llm, device_map=device_map)
+        if 'autoawq' in llm_path:
+            offload_buffers = ["qweight", "qzeros", "scales"]
+            self.llm = dispatch_model(self.llm, device_map=device_map, offload_buffers=offload_buffers)
+        else:
+            self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
         logging.info(f"Allocated Memory = {allocated_memory} GB")
         
