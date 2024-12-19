@@ -104,7 +104,7 @@ class SDWrapper(WrapperBase):
         # Convert the sampled tokens and hidden indices to tensors
         sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
         hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
-        
+        print(f"accept_len: {accept_len}")
         return sampled_tokens, hidden_indices, (total_len, accept_len)
 
     def _generate(

@@ -186,8 +186,8 @@ class OffloadSDWrapper(SDWrapper):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
         device_map = {
             "model.embed_tokens": "cuda:0",
-            "model.rotary_emb": "cuda:0",
             "model.norm": "cuda:0",
+            "model.rotary_emb": "cuda:0",
             "lm_head": "cuda:0",
         }
         logging.info(f'[Memory Limit]: {memory_limit} GB')
@@ -255,14 +255,18 @@ class OffloadSDWrapper(SDWrapper):
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
-        logging.info(f"[Check] device_map: {device_map}")
+        # logging.info(f"[Check] device_map:")
+        # for key, value in device_map.items():
+        #     logging.info(f"[Check] {key}: {value}")
+
         
         # set pin_memory to reduce memory access time
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
         estimated_mem = torch.cuda.memory_allocated(device)
-
+        logging.info(f"Before dispatch model = {estimated_mem / (1024 ** 3)} GB")
+        # TODO: prefetch next layer
         self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
         logging.info(f"Allocated Memory = {allocated_memory} GB")
