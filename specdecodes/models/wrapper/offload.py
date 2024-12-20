@@ -16,12 +16,14 @@ from transformers import AutoModelForCausalLM, AutoConfig
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 from accelerate import dispatch_model
+# from .my.big_modeling import dispatch_model
 from transformers.cache_utils import StaticCache, DynamicCache
 
 from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
 from ..utils import TreeDynamicCache, build_tree_attention_data
 
+from awq import AutoAWQForCausalLM
 import prettytable as pt
 
 class OffloadWrapper(WrapperBase):
@@ -29,22 +31,54 @@ class OffloadWrapper(WrapperBase):
         super(OffloadWrapper, self).__init__()
         self.pin_memory = pin_memory
 
-    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+    def set_offload_llm(self, llm_path, memory_limit=4.0, device="cuda:0"):
         device_map = {
             "model.embed_tokens": "cuda:0",
             "model.rotary_emb": "cuda:0",
             "model.norm": "cuda:0",
             "lm_head": "cuda:0",
         }     
+        logging.info(f'[Memory Limit]: {memory_limit} GB')
+        
+        if 'autoawq' in llm_path:
+            memory_map = {0: "0GiB", "cpu": "99GiB"}
+            self.llm = AutoAWQForCausalLM.from_quantized(
+                llm_path, 
+                fuse_layers=False,
+                low_cpu_mem_usage=True,
+                max_memory=memory_map
+            ).model
+            # self.llm = AutoModelForCausalLM.from_pretrained(
+            #     llm_path, 
+            #     device_map="cpu", 
+            #     low_cpu_mem_usage=True
+            # )
+            import torch.nn as nn
+            buffer_keywords = ["qweight", "qzeros", "scales"]
+            for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
+                if any(keyword in name for keyword in buffer_keywords):
+                    # Extract the parent module and attribute name
+                    module_name, buffer_name = name.rsplit('.', 1)
+                    parent_module = dict(self.llm.named_modules())[module_name]
+                    
+                    # Unregister the buffer
+                    buffer_data = getattr(parent_module, buffer_name)
+                    delattr(parent_module, buffer_name)  # Remove it from the module
 
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            device_map="cpu", 
-            low_cpu_mem_usage=True, 
-            torch_dtype=torch.float16
-        )
+                    # Register it as a trainable parameter
+                    parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
 
-        estimated_mem = 0.0
+        else: 
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_path, 
+                device_map="cpu", 
+                low_cpu_mem_usage=True, 
+                torch_dtype=torch.float16
+            )
+
+        estimated_mem = torch.cuda.memory_allocated(device)
+        logging.info(f"Init Allocated Memory = {estimated_mem / (1024 ** 3)} GB")
+        
         for param in self.llm.model.embed_tokens.parameters():
             estimated_mem += param.numel() * param.element_size()
         for buffer in self.llm.model.embed_tokens.buffers():
@@ -72,6 +106,7 @@ class OffloadWrapper(WrapperBase):
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
+        logging.info(f"[Check] device_map: {device_map}")
         
         # set pin_memory to reduce memory access time
         if self.pin_memory:
@@ -81,7 +116,7 @@ class OffloadWrapper(WrapperBase):
 
         self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        logging.debug(f"Allocated Memory = {allocated_memory} GB")
+        logging.info(f"Allocated Memory = {allocated_memory} GB")
         
         if allocated_memory > memory_limit:
             logging.info(f"[Warning] memory usage is too much")
@@ -151,22 +186,52 @@ class OffloadSDWrapper(SDWrapper):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
         device_map = {
             "model.embed_tokens": "cuda:0",
-            "model.rotary_emb": "cuda:0",
             "model.norm": "cuda:0",
+            "model.rotary_emb": "cuda:0",
             "lm_head": "cuda:0",
         }
+        logging.info(f'[Memory Limit]: {memory_limit} GB')
+        if 'autoawq' in llm_path:
+            memory_map = {0: "0GiB", "cpu": "99GiB"}
+            self.llm = AutoAWQForCausalLM.from_quantized(
+                llm_path, 
+                fuse_layers=False,
+                low_cpu_mem_usage=True,
+                max_memory=memory_map
+            ).model
+            # self.llm = AutoModelForCausalLM.from_pretrained(
+            #     llm_path, 
+            #     device_map='cpu',
+            #     low_cpu_mem_usage=True,
+            # )
+            
+            # Iterate over named buffers
+            # import torch.nn as nn
+            # buffer_keywords = ["qweight", "qzeros", "scales"]
+            # for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
+            #     if any(keyword in name for keyword in buffer_keywords):
+            #         # Extract the parent module and attribute name
+            #         module_name, buffer_name = name.rsplit('.', 1)
+            #         parent_module = dict(self.llm.named_modules())[module_name]
+                    
+            #         # Unregister the buffer
+            #         buffer_data = getattr(parent_module, buffer_name)
+            #         delattr(parent_module, buffer_name)  # Remove it from the module
 
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            device_map="cpu", 
-            low_cpu_mem_usage=True, 
-            torch_dtype=torch.float16
-        )
-        # print(self.llm)
+            #         # Register it as a parameter
+            #         parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
 
-        llm_config = AutoConfig.from_pretrained(llm_path)
+        else: 
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_path, 
+                device_map="cpu", 
+                low_cpu_mem_usage=True, 
+                torch_dtype=torch.float16
+            )
 
         estimated_mem = torch.cuda.memory_allocated(device)
+        logging.info(f"Init Allocated Memory = {estimated_mem / (1024 ** 3)} GB")
+        
         for param in self.llm.model.embed_tokens.parameters():
             estimated_mem += param.numel() * param.element_size()
         for param in self.llm.lm_head.parameters():
@@ -176,7 +241,9 @@ class OffloadSDWrapper(SDWrapper):
         decoder_layer_mem = 0.0
         for param in self.llm.model.layers[0].parameters():
             decoder_layer_mem += param.numel() * param.element_size()
-
+        for buffer in self.llm.model.layers[0].buffers():
+            decoder_layer_mem += buffer.numel() * buffer.element_size()
+            
         decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
         memory_limit = memory_limit / 1.2
 
@@ -201,15 +268,28 @@ class OffloadSDWrapper(SDWrapper):
                 device_map[f"model.layers.{i}"] = device
             else:
                 device_map[f"model.layers.{i}"] = "cpu"
+        # logging.info(f"[Check] device_map:")
+        # for key, value in device_map.items():
+        #     logging.info(f"[Check] {key}: {value}")
+
         
         # set pin_memory to reduce memory access time
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
-
-        self.llm = dispatch_model(self.llm, device_map=device_map)
+            for buffer in layer.buffers():
+                buffer.data = buffer.data.cpu().pin_memory(device)
+        estimated_mem = torch.cuda.memory_allocated(device)
+        logging.info(f"Before dispatch model = {estimated_mem / (1024 ** 3)} GB")
+        
+        # TODO: prefetch next layer
+        if 'autoawq' in llm_path:
+            offload_buffers = ["qweight", "qzeros", "scales"]
+            self.llm = dispatch_model(self.llm, device_map=device_map, offload_buffers=offload_buffers)
+        else:
+            self.llm = dispatch_model(self.llm, device_map=device_map)
         allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        logging.debug(f"Allocated Memory = {allocated_memory} GB")
+        logging.info(f"Allocated Memory = {allocated_memory} GB")
         
         if allocated_memory > memory_limit:
             logging.info(f"[Warning] memory usage is too much")

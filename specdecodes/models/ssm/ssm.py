@@ -18,7 +18,9 @@ from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
 from ..llm import modeling_llama_no_in_norm
 
-     
+import time
+import numpy as np
+import logging  
      
 def load_custom_model(model, model_path):
     # Load the model
@@ -393,7 +395,9 @@ class SSM_Classic(SSMBaseNEFT):
         
         depth = 1 # depth starts from 1 in tree library
         prev_nodes = [root]
+        time_list = []
         while depth < self.depth:
+            # print(f"CURRENT DEPTH: {depth}\n")
             #* Decode previous nodes
             if depth == 1: # first iteration
                 kv_len = past_key_values.get_seq_length()
@@ -408,6 +412,7 @@ class SSM_Classic(SSMBaseNEFT):
                     logits = lm_head(outputs.last_hidden_state[:, -1:])
             else:
                 input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, tree_mask, org_input_len, device=logits.device)
+                t1 = time.time()
                 outputs = self(
                     input_ids,
                     past_key_values=past_key_values,
@@ -415,6 +420,8 @@ class SSM_Classic(SSMBaseNEFT):
                     embed_tokens=embed_tokens,
                     attention_mask=invert_mask(tree_mask, dtype=dtype)
                 )
+                t2 = time.time()
+                time_list.append(t2-t1)
                 if hasattr(self.model, "lm_head"):
                     logits = outputs.logits
                 else:
@@ -446,10 +453,12 @@ class SSM_Classic(SSMBaseNEFT):
             # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
             if len(next_nodes) == 0:
                 break
-        
+        # logging.info(f"########## ssm latency: {np.mean(time_list)} ##########")
         #* Crop the tree to the max_candidate_tokens
         past_key_values.crop(org_input_len)
-        
+        # print(self.depth)
+        # print(root)
+
         return root
 
 
@@ -806,3 +815,40 @@ class SSM_SQ(SSMBase):
         # print(f"Tree Depth: {tree_depth}")
 
         return root
+
+from ...lib.utils.unsafe_import import model_from_hf_path
+class SSM_QTIP(SSM_Classic):
+    @classmethod
+    def from_pretrained(
+        cls, 
+        pretrained_model_name_or_path,
+        *model_args,
+        config = None,
+        torch_dtype=torch.float32,
+        **model_kwargs
+    ):
+        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
+        eos_token_id = model_kwargs.pop("eos_token_id", None)
+        sampling_method = model_kwargs.pop("sampling_method", "greedy")
+        tree_depth = model_kwargs.pop("tree_depth", 6+1)
+        topk_len = model_kwargs.pop("topk_len", 5)
+        min_sample_prob = model_kwargs.pop("min_sample_prob", 1e-2)
+        min_accept_prob = model_kwargs.pop("min_accept_prob", 1e-2)
+        
+        ssm, model_str = model_from_hf_path(pretrained_model_name_or_path, )
+        model = cls(
+            model=ssm, 
+            config=config, 
+            eos_token_id=eos_token_id, 
+            sampling_method=sampling_method, 
+            tree_depth=tree_depth,
+            topk_len=topk_len,
+            min_sample_prob=min_sample_prob,
+            min_accept_prob=min_accept_prob,
+            *model_args, 
+            **model_kwargs
+        )
+        
+        # Convert the model to the desired dtype and return
+        model
+        return model

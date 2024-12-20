@@ -7,7 +7,7 @@ import os
 import logging
 
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ
+from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ, SSM_QTIP
 
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
@@ -25,12 +25,19 @@ def load_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # load LLM
-    llm = AutoModelForCausalLM.from_pretrained(
-        llm_path, 
-        torch_dtype=dtype,
-        low_cpu_mem_usage=True,
-        device_map=device
-    )
+    if 'autoawq' in llm_path:
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            low_cpu_mem_usage=True,
+            device_map=device
+        )
+    else:
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+            device_map=device
+        )
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
@@ -51,13 +58,18 @@ def load_model(
         model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
+        if 'autoawq' in llm_path:
+            ssm_device = llm.model.layers[-1].self_attn.q_proj.qweight.device
+        else:
+            ssm_device = llm.model.layers[-1].self_attn.q_proj.weight.device
+
         ssm = SSM_Classic.from_pretrained(
             ssm_path,
             config=draft_config,
             sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        ).to(ssm_device)
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
@@ -99,22 +111,41 @@ def load_offload_model(
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
 
     if mode == "sd-offload":
-        ssm = SSM_Classic.from_pretrained(
-            ssm_path,
-            # config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-            sampling_method=sd_method,
-            tree_depth=16,
-            topk_len=16,
-            min_sample_prob=1e-8,
-            min_accept_prob=1e-8
-        )
+        estimated_mem_1 = torch.cuda.memory_allocated(device)
+        logging.info(f"Before loading ssm = {estimated_mem_1 / (1024 ** 3)} GB")
+        if "QTIP" in ssm_path:
+            ssm = SSM_QTIP.from_pretrained(
+                ssm_path,
+                # config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                sampling_method=sd_method,
+                tree_depth=12,
+                topk_len=16,
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
+            )
+        else:
+            ssm = SSM_Classic.from_pretrained(
+                ssm_path,
+                # config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                sampling_method=sd_method,
+                tree_depth=12,
+                topk_len=16,
+                min_sample_prob=1e-2,
+                min_accept_prob=1e-2
+            )
+
         ssm = ssm.to(device)
+        estimated_mem_2 = torch.cuda.memory_allocated(device)
+        logging.info(f"After loading ssm = {estimated_mem_2 / (1024 ** 3)} GB")
+        logging.info(f"ssm mem usage = {(estimated_mem_2-estimated_mem_1) / (1024 ** 3)} GB")
 
         # Load offload model
-        model = ProfileOffloadSDWrapper()
-        # model = OffloadSDWrapper()
+        # model = ProfileOffloadSDWrapper()
+        model = OffloadSDWrapper()
         model.set_ssm(ssm)
 
     elif mode == "sq-offload":
