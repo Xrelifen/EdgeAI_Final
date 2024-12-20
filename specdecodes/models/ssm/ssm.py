@@ -830,7 +830,7 @@ class SSM_QTIP(SSM_Classic):
         # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
         eos_token_id = model_kwargs.pop("eos_token_id", None)
         sampling_method = model_kwargs.pop("sampling_method", "greedy")
-        tree_depth = model_kwargs.pop("tree_depth", 6+1)
+        tree_depth = model_kwargs.pop("tree_depth", 11+1)
         topk_len = model_kwargs.pop("topk_len", 5)
         min_sample_prob = model_kwargs.pop("min_sample_prob", 1e-2)
         min_accept_prob = model_kwargs.pop("min_accept_prob", 1e-2)
