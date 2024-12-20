@@ -6,7 +6,7 @@ import time
 import os
 import logging
 
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
 from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ, SSM_QTIP
 
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
@@ -122,8 +122,8 @@ def load_offload_model(
                 sampling_method=sd_method,
                 tree_depth=12,
                 topk_len=16,
-                min_sample_prob=1e-2,
-                min_accept_prob=1e-2
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
             )
         else:
             ssm = SSM_Classic.from_pretrained(
@@ -172,7 +172,7 @@ def load_offload_model(
         raise ValueError("Invalid mode.")
 
     model.set_tokenizer(tokenizer)
-    model.set_offload_llm(llm_path)
+    model.set_offload_llm(llm_path, memory_limit=8.0)
     model.eval()
 
     return model, tokenizer
