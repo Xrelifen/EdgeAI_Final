@@ -816,7 +816,7 @@ class SSM_SQ(SSMBase):
 
         return root
 
-from ...lib.utils.unsafe_import import model_from_hf_path
+from .lib.utils.unsafe_import import model_from_hf_path
 class SSM_QTIP(SSM_Classic):
     @classmethod
     def from_pretrained(

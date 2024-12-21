@@ -7,7 +7,7 @@ import accelerate
 import torch
 import transformers
 
-from ...model.llama import LlamaForCausalLM
+from ...modeling_llama_qtip import LlamaForCausalLM
 
 
 def model_from_hf_path(path, max_mem_ratio=0.7, device_map=None):
