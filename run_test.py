@@ -105,7 +105,8 @@ def load_offload_model(
     mode: str,
     sd_method: str,
     dtype: torch.dtype = torch.float16,
-    device="cuda:0"    
+    device="cuda:0",
+    tree_depth=12    
 ):
     # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
@@ -120,7 +121,7 @@ def load_offload_model(
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
                 sampling_method=sd_method,
-                tree_depth=12,
+                tree_depth=tree_depth,
                 topk_len=16,
                 min_sample_prob=1e-8,
                 min_accept_prob=1e-8
@@ -132,7 +133,7 @@ def load_offload_model(
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
                 sampling_method=sd_method,
-                tree_depth=12,
+                tree_depth=tree_depth,
                 topk_len=16,
                 min_sample_prob=1e-2,
                 min_accept_prob=1e-2
@@ -189,7 +190,7 @@ def main(args):
     # load model
     print("Loading model...")
     if "offload" in args.mode:
-        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
+        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, tree_depth = args.depth)
     else:
         model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
 
@@ -323,6 +324,13 @@ if __name__ == "__main__":
         type=int,
         default=42,
         help="Random seed.",
+    )
+    parser.add_argument(
+        "-d",
+        "--depth",
+        type=int,
+        default=12,
+        help="Draft tree depth.",
     )
     args = parser.parse_args()
     
