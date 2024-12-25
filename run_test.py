@@ -63,13 +63,30 @@ def load_model(
         else:
             ssm_device = llm.model.layers[-1].self_attn.q_proj.weight.device
 
-        ssm = SSM_Classic.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(ssm_device)
+        if "QTIP" in ssm_path:
+            ssm = SSM_QTIP.from_pretrained(
+                ssm_path,
+                # config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                sampling_method=sd_method,
+                tree_depth=tree_depth,
+                topk_len=16,
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
+            )
+        else:
+            ssm = SSM_Classic.from_pretrained(
+                ssm_path,
+                # config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                sampling_method=sd_method,
+                tree_depth=tree_depth,
+                topk_len=16,
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
+            )
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
@@ -135,8 +152,8 @@ def load_offload_model(
                 sampling_method=sd_method,
                 tree_depth=tree_depth,
                 topk_len=16,
-                min_sample_prob=1e-2,
-                min_accept_prob=1e-2
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
             )
 
         ssm = ssm.to(device)
