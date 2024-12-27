@@ -149,11 +149,11 @@ class SDWrapper(WrapperBase):
             return self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=return_probs)
         
         # Obtain LLM sample logits
-        global_p = sample_token_method(logits, return_probs=True).squeeze(0) # remove batch dim
+        global_p = sample_token_method(logits, return_probs=True).squeeze(0).to(device='cpu', non_blocking=True) # remove batch dim
         
         # Initialize variables
-        sampled_tokens = torch.tensor([], dtype=torch.long, device=tree.device)
-        hidden_indices = torch.tensor([], dtype=torch.long, device=tree.device)
+        sampled_tokens = torch.tensor([], dtype=torch.long, device='cpu')
+        hidden_indices = torch.tensor([], dtype=torch.long, device='cpu')
         total_len = 0
         accept_len = 0
         
@@ -162,10 +162,11 @@ class SDWrapper(WrapperBase):
         token_ids = node_data['token_ids']
         token_probs = node_data['cumulative_probabilities']
         
-        cur_ind = torch.tensor([0], dtype=torch.long, device=tree.device)
+        cur_ind = torch.tensor([0], dtype=torch.long, device='cpu')
         children_inds = tree.get_children_indices(cur_ind)
         children_token_ids = token_ids[children_inds]
-        # print("children_inds:", children_inds)
+        
+        torch.cuda.synchronize() # synchronize before starting the loop
         while children_inds.size(0) > 0:
             total_len += 1
             accept_token_id, new_p = self.new_verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, sample_token_method)
