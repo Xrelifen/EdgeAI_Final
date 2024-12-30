@@ -8,7 +8,7 @@ import logging
 
 import specdecodes.models.llm.modeling_llama as modeling_llama
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_Custom
+from specdecodes.models import SSM_Classic, SSM_Eagle
 
 import nvtx
 
@@ -47,8 +47,8 @@ def load_model(
         model = HuggingFaceWrapper()
         
     elif mode == "sd-classic":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
+        model = SDWrapper()
+        # model = ProfileSDWrapper(out_dir=None)
         
         # load SSM
         ssm = SSM_Classic.from_pretrained(
@@ -79,25 +79,6 @@ def load_model(
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
             keep_embeddings=True,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
-    
-    elif mode == "sd-custom":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
-        
-        # draft_config.num_attention_heads = 9
-        # draft_config.num_key_value_heads = 3
-        # draft_config.hidden_size = 576
-        # draft_config.intermediate_size = 1536
-        
-        # load SSM
-        ssm = SSM_Custom.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            sampling_method=sd_method,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
         
