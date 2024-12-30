@@ -289,9 +289,9 @@ class SSM_Classic(SSMBaseNEFT):
             device=device,
         )
 
-        # 4) Initialize parent probabilities & base for position ids
+        # 4) Initialize parent probabilities & position ids
         parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
-        position_ids_base = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
@@ -333,7 +333,7 @@ class SSM_Classic(SSMBaseNEFT):
                 thread_worker.put_expansion(worker_expansion)
                 
             with nvtx.annotate("position"):
-                position_ids = position_ids_base + depth_i
+                position_ids += 1
                 
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
@@ -411,9 +411,9 @@ class SSM_Eagle(SSMBaseNEFT):
             device=device,
         )
 
-        # 4) Initialize parent probabilities & base for position ids
+        # 4) Initialize parent probabilities & position ids
         parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
-        position_ids_base = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
@@ -462,7 +462,7 @@ class SSM_Eagle(SSMBaseNEFT):
                 hidden_states = torch.gather(hidden_states, dim=1, index=parent_indices_expanded)
 
             with nvtx.annotate("position"):
-                position_ids = position_ids_base + depth_i
+                position_ids += 1
             
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
