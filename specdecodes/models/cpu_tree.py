@@ -14,7 +14,6 @@ class TreeNode:
         depth (int): Depth in the tree (0 for root).
         token_id (int): The token ID.
         cumulative_probability (float): The cumulative probability up to this node.
-        extra_data (int): Any extra integer data associated with the node.
         has_been_sampled (bool): Whether this node has already been sampled.
     """
     __slots__ = (
@@ -23,7 +22,6 @@ class TreeNode:
         'depth',
         'token_id',
         'cumulative_probability',
-        'extra_data',
         'has_been_sampled'
     )
     
@@ -33,14 +31,12 @@ class TreeNode:
         token_id: int,
         cumulative_probability: float,
         depth: int,
-        extra_data: int = -1
     ):
         self.parent = parent
         self.children: List[int] = []
         self.depth = depth
         self.token_id = token_id
         self.cumulative_probability = cumulative_probability
-        self.extra_data = extra_data
         self.has_been_sampled = False
 
 
@@ -74,7 +70,6 @@ class Tree:
             token_id=root_token_id,
             cumulative_probability=1.0,
             depth=0,
-            extra_data=-1
         )
         self.nodes.append(root)
         
@@ -84,41 +79,29 @@ class Tree:
     def add_nodes(
         self, 
         token_ids: torch.Tensor, 
-        probabilities: torch.Tensor, 
+        token_probs: torch.Tensor, 
         local_parent_indices: torch.Tensor,
-        # valid_flags: torch.Tensor
     ):
         """
         Add new child nodes (one per valid position) to the tree.
         """
-        # # Indices of valid new positions
-        # valid_indices = valid_flags.nonzero(as_tuple=False).squeeze(-1)
-        # num_new_nodes = valid_indices.numel()
-        num_new_nodes = token_ids.size(0)
-        # if num_new_nodes == 0:
-        #     # No valid expansions; mark current leaves as sampled
-        #     for leaf_idx in self.available_leaves:
-        #         self.nodes[leaf_idx].has_been_sampled = True
-        #     self.available_leaves = []
-        #     return
+        batch_size, num_new_nodes = token_ids.shape
+        assert batch_size == 1, "Currently only batch_size=1 is supported."
 
         # Mark existing leaves as sampled
         for leaf_idx in self.available_leaves:
             self.nodes[leaf_idx].has_been_sampled = True
 
-        # Gather subset
-        # valid_parents = local_parent_indices[valid_indices].tolist()
-        # valid_tokens = token_ids[valid_indices].tolist()
-        # valid_probs = probabilities[valid_indices].tolist()
-        valid_parents = local_parent_indices.tolist()
-        valid_tokens = token_ids.tolist()
-        valid_probs = probabilities.tolist()
+        # Gather subset, assuming batch_size=1
+        parents = local_parent_indices[0].tolist()
+        tokens = token_ids[0].tolist()
+        probs = token_probs[0].tolist()
 
         # Create new nodes
         old_size = self.current_size
         new_nodes = []
         new_leaves = []
-        for i, (loc_par, t_id, prob) in enumerate(zip(valid_parents, valid_tokens, valid_probs)):
+        for i, (loc_par, t_id, prob) in enumerate(zip(parents, tokens, probs)):
             parent_idx = self.available_leaves[loc_par]
             parent_node = self.nodes[parent_idx]
 
@@ -127,7 +110,6 @@ class Tree:
                 token_id=t_id,
                 cumulative_probability=prob,
                 depth=parent_node.depth + 1,
-                extra_data=-1
             )
             new_nodes.append(node)
             parent_node.children.append(old_size + i)
@@ -154,8 +136,6 @@ class Tree:
         )
 
         # top-k
-        # NOTE: If you expect many thousands of nodes, topk is O(n log k), 
-        # which is typically faster than a full sort O(n log n).
         keep_vals, keep_idx = torch.topk(probs, k=n, sorted=False)
 
         # Convert to Python set
@@ -186,7 +166,6 @@ class Tree:
                 token_id=old_node.token_id,
                 cumulative_probability=old_node.cumulative_probability,
                 depth=old_node.depth,
-                extra_data=old_node.extra_data
             )
             new_node.has_been_sampled = old_node.has_been_sampled
             new_nodes.append(new_node)
@@ -216,82 +195,6 @@ class Tree:
 
         return torch.tensor(nodes_to_keep, dtype=torch.long)
 
-    def get_available_leaf_node_data(self) -> Dict[str, torch.Tensor]:
-        """
-        Retrieve data for current available leaves.
-        """
-        leaf_data = {
-            'available_leaf_indices': [],
-            'token_ids': [],
-            'cumulative_probabilities': [],
-            'depths': [],
-            'parent_indices': [],
-            'extra_data': [],
-        }
-        leaves = self.available_leaves
-        for leaf_idx in leaves:
-            nd = self.nodes[leaf_idx]
-            leaf_data['available_leaf_indices'].append(leaf_idx)
-            leaf_data['token_ids'].append(nd.token_id)
-            leaf_data['cumulative_probabilities'].append(nd.cumulative_probability)
-            leaf_data['depths'].append(nd.depth)
-            leaf_data['parent_indices'].append(nd.parent if nd.parent is not None else -1)
-            leaf_data['extra_data'].append(nd.extra_data)
-
-        return {
-            k: torch.tensor(
-                v,
-                dtype=(self.prob_dtype if 'probabilities' in k else torch.long),
-                device='cpu'
-            )
-            for k, v in leaf_data.items()
-        }
-
-    def get_node_data(self) -> Dict[str, torch.Tensor]:
-        """
-        Retrieve data for all nodes currently in the tree.
-        """
-        token_ids = []
-        cum_probs = []
-        depths = []
-        parents = []
-        extra_data = []
-        sampled = []
-
-        for nd in self.nodes:
-            token_ids.append(nd.token_id)
-            cum_probs.append(nd.cumulative_probability)
-            depths.append(nd.depth)
-            parents.append(nd.parent if nd.parent is not None else -1)
-            extra_data.append(nd.extra_data)
-            sampled.append(nd.has_been_sampled)
-
-        return {
-            'token_ids': torch.tensor(token_ids, dtype=torch.long),
-            'cumulative_probabilities': torch.tensor(cum_probs, dtype=self.prob_dtype),
-            'depths': torch.tensor(depths, dtype=torch.long),
-            'parent_indices': torch.tensor(parents, dtype=torch.long),
-            'extra_data': torch.tensor(extra_data, dtype=torch.long),
-            'has_been_sampled': torch.tensor(sampled, dtype=torch.bool)
-        }
-
-    def set_node_extra_data(self, node_indices: torch.Tensor, data: torch.Tensor):
-        """
-        Assign extra integer data to specified nodes.
-        """
-        node_indices = node_indices.tolist()
-        data_list = data.tolist()
-        for idx, d in zip(node_indices, data_list):
-            self.nodes[idx].extra_data = d
-
-    def get_node_extra_data(self, node_indices: torch.Tensor) -> torch.Tensor:
-        """
-        Retrieve extra integer data from specified nodes.
-        """
-        node_indices = node_indices.tolist()
-        result = [self.nodes[idx].extra_data for idx in node_indices]
-        return torch.tensor(result, dtype=torch.long)
-
     def get_children_indices(self, node_index: int) -> torch.Tensor:
         """
         Retrieve all direct children of a given node index.
@@ -307,44 +210,6 @@ class Tree:
             dtype=torch.long,
             device='cpu'
         )
-    
-    def get_available_leaf_node_data(self) -> Dict[str, torch.Tensor]:
-        """
-        Retrieve data for all current available leaves (unsampled).
-        
-        Returns:
-            Dict[str, torch.Tensor]: A dictionary containing tensors of:
-                'available_leaf_indices', 'token_ids', 
-                'cumulative_probabilities', 'depths', 
-                'parent_indices', and 'extra_data'.
-        """
-        leaf_data = {
-            'available_leaf_indices': [],
-            'token_ids': [],
-            'cumulative_probabilities': [],
-            'depths': [],
-            'parent_indices': [],
-            'extra_data': []
-        }
-        
-        for leaf_idx in self.available_leaves:
-            node = self.nodes[leaf_idx]
-            leaf_data['available_leaf_indices'].append(leaf_idx)
-            leaf_data['token_ids'].append(node.token_id)
-            leaf_data['cumulative_probabilities'].append(node.cumulative_probability)
-            leaf_data['depths'].append(node.depth)
-            leaf_data['parent_indices'].append(node.parent) # if node.parent is not None else -1)
-            leaf_data['extra_data'].append(node.extra_data)
-        
-        # Convert lists to tensors
-        return {
-            key: torch.tensor(
-                val,
-                dtype=(self.prob_dtype if 'probabilities' in key else torch.long),
-                device='cpu'
-            )
-            for key, val in leaf_data.items()
-        }
 
     def get_node_data(self) -> Dict[str, torch.Tensor]:
         """
@@ -352,54 +217,26 @@ class Tree:
         
         Returns:
             Dict[str, torch.Tensor]: A dictionary with keys:
-                'token_ids', 'cumulative_probabilities', 'depths',
-                'parent_indices', 'extra_data', 'has_been_sampled'.
+                'token_ids', 'cumulative_probabilities', 
+                'depths', 'parent_indices'
         """
         token_ids = []
         cum_probs = []
         depths = []
         parents = []
-        extra_data = []
-        sampled = []
         
         for node in self.nodes:
             token_ids.append(node.token_id)
             cum_probs.append(node.cumulative_probability)
             depths.append(node.depth)
             parents.append(node.parent if node.parent is not None else -1)
-            extra_data.append(node.extra_data)
-            sampled.append(node.has_been_sampled)
         
         return {
             'token_ids': torch.tensor(token_ids, dtype=torch.long, device='cpu'),
             'cumulative_probabilities': torch.tensor(cum_probs, dtype=self.prob_dtype, device='cpu'),
             'depths': torch.tensor(depths, dtype=torch.long, device='cpu'),
             'parent_indices': torch.tensor(parents, dtype=torch.long, device='cpu'),
-            'extra_data': torch.tensor(extra_data, dtype=torch.long, device='cpu'),
-            'has_been_sampled': torch.tensor(sampled, dtype=torch.bool, device='cpu')
         }
-    
-    def get_node_indices(self) -> torch.Tensor:
-        """
-        Return a CPU tensor of all valid node indices (0 to current_size - 1).
-        """
-        return torch.arange(self.current_size, device='cpu')
-    
-    def get_available_leaf_position_ids(self) -> torch.Tensor:
-        """
-        Return a 1D CPU tensor of position IDs for all available leaves.
-        
-        Args:
-            offset (int): An optional offset to add to each depth value.
-        
-        Returns:
-            torch.Tensor: 1D tensor of position IDs.
-        """
-        return torch.tensor(
-            [node.depth for node in self.nodes if not node.has_been_sampled],
-            dtype=torch.long,
-            device='cpu'
-        )
         
     def get_max_depth(self) -> torch.Tensor:
         """
@@ -462,34 +299,6 @@ class Tree:
         
         # Final shape: [batch=1, heads=1, seq_len=num_nodes, hidden=(prefix_length + num_nodes)]
         return inverted_mask.unsqueeze(0).unsqueeze(0)
-
-    def set_node_extra_data(self, node_indices: torch.Tensor, data: torch.Tensor):
-        """
-        Assign extra integer data to the specified nodes.
-        
-        Args:
-            node_indices (torch.Tensor): A 1D tensor of node indices.
-            data (torch.Tensor): A 1D tensor of data values to assign.
-        """
-        node_indices = node_indices.to('cpu').tolist()
-        data_list = data.to('cpu').tolist()
-        
-        for idx, d in zip(node_indices, data_list):
-            self.nodes[idx].extra_data = d
-
-    def get_node_extra_data(self, node_indices: torch.Tensor) -> torch.Tensor:
-        """
-        Retrieve the extra integer data from the specified nodes.
-        
-        Args:
-            node_indices (torch.Tensor): A 1D tensor of node indices.
-        
-        Returns:
-            torch.Tensor: A 1D CPU tensor of extra_data values.
-        """
-        node_indices = node_indices.to('cpu').tolist()
-        result = [self.nodes[idx].extra_data for idx in node_indices]
-        return torch.tensor(result, dtype=torch.long, device='cpu')
 
     def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = False):
         """

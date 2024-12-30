@@ -132,10 +132,11 @@ class SDWrapper(WrapperBase):
         
         return sampled_tokens, hidden_indices, (total_len, accept_len)
     
-    def new_verify_step(self, p, q, token_ids, sample_token_method):
-        # sampled_token_id = p.multinomial(num_samples=1)
-        # sampled_token_id = p.argmax()[None]
-        sampled_token_id = sample_token_method(p)
+    def new_verify_step(self, p, q, token_ids, do_sample):
+        if not do_sample:
+            sampled_token_id = p.argmax()
+        else:
+            sampled_token_id = p.multinomial(num_samples=1).squeeze(-1)
         
         if (sampled_token_id == token_ids).sum() > 0:
             return sampled_token_id, None
@@ -169,40 +170,30 @@ class SDWrapper(WrapperBase):
         torch.cuda.synchronize() # synchronize before starting the loop
         while children_inds.size(0) > 0:
             total_len += 1
-            accept_token_id, new_p = self.new_verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, sample_token_method)
+            #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
+            accept_token_id, new_p = self.new_verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, do_sample)
                     
             # Accept token if it is in the children
             if accept_token_id is not None:
                 accept_len += 1
                 sampled_tokens = torch.cat([sampled_tokens, accept_token_id[None]])
                 hidden_indices = torch.cat([hidden_indices, cur_ind])
-                # print("children_inds:", children_inds)
-                # print("children_token_ids:", children_token_ids)
-                # print("accept_token_id:", accept_token_id)
                 cur_ind = children_inds[children_token_ids == accept_token_id]
-                # print("cur_ind:", cur_ind)
-                # print("Children token ids:", children_token_ids)
                 children_inds = tree.get_children_indices(cur_ind)
                 children_token_ids = token_ids[children_inds]
-                
-                # if accept_len > 20:
-                #     print("Accepting more than 20 tokens, breaking")
-                #     break
             
             # Reject token, update global_p and break
             else:
                 global_p[cur_ind] = new_p
                 break
-            
-            
         
-        # Generate bonus token
-        # Don't generate if eos token is the last token
+        # Generate bonus token, don't generate if eos token is the last token
         if sampled_tokens.size(0) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id:
+            #TODO: Remove unnecessary shape modification operations
             if not do_sample:
                 bonus_token = global_p[cur_ind].argmax()[None]
             else:
-                bonus_token = global_p[cur_ind].multinomial(num_samples=1)
+                bonus_token = global_p[cur_ind].multinomial(num_samples=1).squeeze(-1)
             sampled_tokens = torch.cat([sampled_tokens, bonus_token])
             hidden_indices = torch.cat([hidden_indices, cur_ind])
         
@@ -309,6 +300,8 @@ class SDWrapper(WrapperBase):
 
                 # * update input_ids, hidden_states, and kv-cache
                 with nvtx.annotate("update_cache"):
+                    # print("input_ids shape:", input_ids.shape) # (1, 141)
+                    # print("sampled_tokens shape:", sampled_tokens.shape) # (1, 6)
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
                     hidden_states = hidden_states[:, hidden_indices].clone()
                     llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)

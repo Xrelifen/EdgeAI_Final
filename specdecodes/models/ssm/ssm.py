@@ -2,26 +2,24 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.utils import is_torchdynamo_compiling
 from safetensors.torch import load_model
 import math, os
 from typing import List, Tuple
 from torch import Tensor
-
-
-from bigtree import Node
-from ..cpu_tree import Tree, TreeBuilderWorker
+import nvtx
 
 from .training_hooks import TrainingHook, NEFTuneHook
-from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
-from ..utils import invert_mask, keep_top_n_nodes
+#! Currently not used
+# from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
+from ..utils import invert_mask
 
 from ..llm.modeling_llama import ACT2FN, LlamaMLP, LlamaRMSNorm
 from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
 from ..llm import modeling_llama_no_in_norm
 
-import nvtx
-     
+from ..cpu_tree import Tree, TreeBuilderWorker
      
 def load_custom_model(model, model_path):
     # Load the model
@@ -49,144 +47,6 @@ class MergeLinear(nn.Module):
         # swapped (x, emb) to (emb, x) to match official implementation of Eagle
         return self.fc(torch.cat((emb, x), dim=-1))
 
-class MergeFFN(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x, emb):
-        if self.config.pretraining_tp > 1:
-            slice = self.intermediate_size // self.config.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(emb, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(emb)) * self.up_proj(x))
-
-        return x + down_proj
-    
-class FeatureSampler(nn.Module):
-    def __init__(self, in_size, intermediate_size, out_size, hidden_act='silu', pretraining_tp=1):
-        super().__init__()
-        self.in_size = in_size
-        self.out_size = out_size
-        self.intermediate_size = intermediate_size
-        self.hidden_act = hidden_act
-        self.pretraining_tp = pretraining_tp
-        self.gate_proj = nn.Linear(self.in_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.in_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.out_size, bias=False)
-        self.act_fn = ACT2FN[self.hidden_act]
-
-    def forward(self, x, emb):
-        if self.pretraining_tp > 1:
-            slice = self.intermediate_size // self.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(emb, gate_proj_slices[i]) for i in range(self.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(emb)) * self.up_proj(x))
-
-        return x + down_proj
-    
-class Extractor(nn.Module):
-    def __init__(self, in_size, intermediate_size, out_size, hidden_act='silu', pretraining_tp=1):
-        super().__init__()
-        self.org_hidden_size = in_size
-        self.hidden_size = out_size
-        self.intermediate_size = intermediate_size
-        self.hidden_act = hidden_act
-        self.gate_proj = nn.Linear(self.org_hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.org_hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[self.hidden_act]
-        self.pretraining_tp = pretraining_tp
-
-    def forward(self, x):
-        if self.pretraining_tp > 1:
-            slice = self.intermediate_size // self.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(x, gate_proj_slices[i]) for i in range(self.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-        return down_proj
-
-class Inserter(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size # reduced hidden size
-        self.org_hidden_size = config.org_hidden_size # reduced hidden size
-        self.intermediate_size = config.org_intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.org_hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x, hidden_states):
-        if self.config.pretraining_tp > 1:
-            slice = self.intermediate_size // self.config.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(hidden_states, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(hidden_states, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
-
-        return x + down_proj
-
-    
 class SSMBase(nn.Module):
     def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', keep_embeddings=False):
         super().__init__()
@@ -252,26 +112,22 @@ class SSMBase(nn.Module):
         pass
 
     def init_draft_parameters(self):
-        # self.depth = 9 + 1
-        # self.topk_len = 15
-        # self.min_sample_prob = 1e-8
-        # self.min_accept_prob = 1e-8
-        
-        self.depth = 6 + 1
-        self.topk_len = 8
-        self.min_sample_prob = 1e-2
-        self.min_accept_prob = 1e-2
-        self.max_tokens = 32#-1 #64
+        self.depth = 5 + 1
+        self.topk_len = 6
+        self.min_accept_prob = 1e-2 #! Not used
+        self.max_tokens = 32
     
+    #! Currently not used
     def init_sampling_method(self, sampling_method):
-        if sampling_method == 'greedy':
-            self.sample_nodes = topk_sampling
-        elif sampling_method == 'stochastic':
-            self.sample_nodes = k_sampling
-        elif sampling_method == 'hstochastic':
-            self.sample_nodes = heuristic_k_sampling
-        else:
-            raise ValueError("Sampling method not supported")
+        pass
+    #     if sampling_method == 'greedy':
+    #         self.sample_nodes = topk_sampling
+    #     elif sampling_method == 'stochastic':
+    #         self.sample_nodes = k_sampling
+    #     elif sampling_method == 'hstochastic':
+    #         self.sample_nodes = heuristic_k_sampling
+    #     else:
+    #         raise ValueError("Sampling method not supported")
         
     def get_input_embeddings(self):
         # If the model has input embeddings, return it. Otherwise, return None
@@ -306,6 +162,53 @@ class SSMBase(nn.Module):
         
         else:
             return torch.softmax(logits, dim=-1)
+        
+        
+    @torch.no_grad()
+    def topk_sampling(
+        self,
+        sampled_probs: torch.Tensor, 
+        parent_probs: torch.Tensor, 
+        sample_k: int,
+        sample_min_prob: float
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        # batch_size, N_available_leaves = parent_probs.shape
+        batch_size, N_available_leaves, vocab_size = sampled_probs.shape
+
+        with nvtx.annotate("sampling_0"):
+            # Ensure input tensors are contiguous (Not sure if this is needed)
+            sampled_probs = sampled_probs.contiguous()
+            parent_probs = parent_probs.contiguous()
+
+        with nvtx.annotate("sampling_1"):
+            # Expand the sampled_probs to [batch_size, N_available_leaves, vocab_size]
+            global_probs = sampled_probs * parent_probs.unsqueeze(-1)
+
+        with nvtx.annotate("sampling_2"):
+            # Flatten the global_probs to [N_available_leaves * vocab_size]
+            flattened_probs = global_probs.view(batch_size, -1)  # Shape: [N_available_leaves * vocab_size]
+
+        with nvtx.annotate("sampling_3"):
+            # Perform top-k sampling
+            topk_probs, topk_indices = torch.topk(
+                flattened_probs, sample_k, dim=1, sorted=True#False#largest=True, sorted=True
+            )  # Both shape: [sample_k]
+        
+        with nvtx.annotate("sampling_4"):
+            # Check if there is any probs above min_prob threshold. If not, valid_flag will be False
+            # valid_flag = topk_probs.max() > sample_min_prob
+            valid_flag = True
+
+        with nvtx.annotate("sampling_5"):
+            # Compute parent indices
+            parent_indices = (topk_indices // vocab_size).long()  # Shape: [sample_k]
+        
+        with nvtx.annotate("sampling_6"):
+            # Compute token ids
+            token_ids = (topk_indices % vocab_size).long()  # Shape: [sample_k]
+
+        return token_ids, topk_probs, parent_indices, valid_flag
 
 
 class SSMBaseNEFT(SSMBase):
@@ -333,136 +236,134 @@ class SSMBaseNEFT(SSMBase):
         for handle in self._forward_hook_handles:
             handle.deactivate_hook()
 
+class TreeMaskCache(nn.Module):
+    def __init__(self, prefix_len: int, max_sample_tokens: int, max_tokens: int, dtype: str, device: str):
+        super().__init__()
+        self.prefix_len = prefix_len
+        self.max_sample_tokens = max_sample_tokens
+        self.max_cache_len = prefix_len + max_tokens
+        self.dtype = dtype
+        self.device = device
 
+        self.tree_mask_cache = torch.ones(
+            [1, 1, 1, self.prefix_len], 
+            device=device, 
+            dtype=torch.bool,
+        )
+
+    def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
+        self.tree_mask_cache = self.tree_mask_cache[:, :, parent_indices[0]]
+        eye_block = torch.eye(parent_indices.shape[1], device=self.device, dtype=torch.bool)[None, None]
+        self.tree_mask_cache = torch.concat((self.tree_mask_cache, eye_block), dim=3)
+    
+        return invert_mask(self.tree_mask_cache, dtype=self.dtype)
+
+    
 class SSM_Classic(SSMBaseNEFT):
-    def init_custom_model(self, config):
-        config.org_hidden_size = 4096
-        config.org_intermediate_size = config.intermediate_size
-        return modeling_llama.LlamaForCausalLM(config)
-    
-    def init_additional_modules(self, config):
-        self.model.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-    
-    #! Two cases: for loading from pretrained model, it is LlamaForCausalLM, for loading from config, it is LlamaModel
-    #! Try to refactor this, so that both uses LlamaModel.
-    
-    def forward(self, input_ids, embed_tokens=None, return_logits=False, *model_args, **kwargs):
+    def forward(self, input_ids, *model_args, **kwargs):
         # not using hidden_states
         _ = kwargs.pop("hidden_states", None) #! Refactor this
-        
-        # with torch.no_grad():
-        if self.get_input_embeddings():
-            embed_tokens = self.get_input_embeddings()
-        inputs_embeds = embed_tokens(input_ids)
 
-        outputs = self.model(inputs_embeds=inputs_embeds, *model_args, **kwargs)
-        return outputs
-    
-    @torch.no_grad()
-    def _update_tree_attention_data(self, depth, nodes, tree_mask, position_offset, device):
-        indices = torch.tensor([node.ind for node in nodes])
-        
-        input_ids = torch.tensor([node.id for node in nodes], device=device)[None]
-        
-        position_ids = torch.zeros(len(nodes), device=device)[None] + (position_offset + depth)
-        
-        # Generating tree masks for the new nodes, don't have to consider the old nodes
-        tree_mask = tree_mask[:, :, indices]
-        tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
-
-        return input_ids, position_ids, tree_mask
+        logits = self.model(input_ids, *model_args, **kwargs).logits
+        return logits
     
     @torch.no_grad()
     def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
-        """This method is used to draft/guess the next tokens that the LLM may generate.
-
-        Args:
-            inputs (list): A list of two tensors: hidden_states and input_ids.
-            past_key_values (Cache): Cache object to store the past key-values generated by the model.
-            embed_tokens (Module): embedding from LLM.
-            lm_head (Module): lm_head from LLM.
-
-        Returns:
-            Node: The root node of the generated draft token tree.
-        """
-        
+        # 1) Obtain necessary parameters
         device = input_ids.device
-        if hasattr(self.model, "lm_head"):
-            dtype = self.model.lm_head.weight.dtype
-        else:
-            dtype = lm_head.weight.dtype
+        dtype = self.model.lm_head.weight.dtype
+        batch_size, org_input_len = input_ids.shape
+        assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
         
-        # take out last token as sample_token
-        sample_token = input_ids[:, -1:]
+        # 2) Create Tree used for target model inference later
+        root_id = input_ids[0, -1]
+        thread_worker = TreeBuilderWorker(root_id, dtype, self.max_tokens)
+        thread_worker.start()
         
-        # keep original length of input_ids
-        org_input_len = input_ids.shape[1] # offset of positon_id
+        # 3) Initialize tree mask cache for draft model inference
+        tree_mask_cache = TreeMaskCache(
+            prefix_len=org_input_len,
+            max_sample_tokens=self.topk_len,
+            max_tokens=self.max_tokens,
+            dtype=dtype,
+            device=device,
+        )
+
+        # 4) Initialize parent probabilities & base for position ids
+        parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
+        position_ids_base = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+
+        # 5) First forward pass
+        with nvtx.annotate("first forward", color="red"):
+            kv_len = past_key_values.get_seq_length()
+            logits = self(
+                input_ids[:, kv_len:],
+                past_key_values=past_key_values,
+            )[:, -1:] # keep only the last hidden state
+
+        with nvtx.annotate("softmax"):
+            sampled_probs = torch.softmax(logits, dim=-1)
         
-        # initialize tree_mask and tree 
-        tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
-        
-        depth = 1 # depth starts from 1 in tree library
-        prev_nodes = [root]
-        while depth < self.depth:
-            #* Decode previous nodes
-            if depth == 1: # first iteration
-                kv_len = past_key_values.get_seq_length()
-                outputs = self(
-                    input_ids[:, kv_len:],
-                    embed_tokens=embed_tokens,
-                    past_key_values=past_key_values,
+        # 6) Main loop
+        for depth_i in range(1, self.depth):
+            # --------------------------------------
+            # A. Compute token distribution & Sample
+            # --------------------------------------
+            with nvtx.annotate("sample nodes", color="green"):
+                token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
+                    sampled_probs,
+                    parent_probs,
+                    self.topk_len, 
+                    self.min_accept_prob
                 )
-                if hasattr(self.model, "lm_head"):
-                    logits = outputs.logits[:, -1:].clone()
-                else:
-                    logits = lm_head(outputs.last_hidden_state[:, -1:])
-            else:
-                input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, tree_mask, org_input_len, device=logits.device)
-                outputs = self(
-                    input_ids,
+                parent_probs = child_probs
+            
+            # with nvtx.annotate("early stop"):
+            #     # if depth_i > 3:
+            #     valid_flag = sampled_probs.max() > self.min_sample_prob
+            #     if not valid_flag:
+            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         break
+            
+            # --------------------------------------
+            # B. Add new nodes to the CPU tree
+            # --------------------------------------
+            with nvtx.annotate("add nodes", color="green"):
+                worker_expansion = (token_ids, child_probs, parent_indices) #, valid_flags)
+                thread_worker.put_expansion(worker_expansion)
+                
+            with nvtx.annotate("position"):
+                position_ids = position_ids_base + depth_i
+                
+            with nvtx.annotate("tree mask"):
+                tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
+            
+            with nvtx.annotate("forward", color="red"):
+                logits = self(
+                    token_ids,
                     past_key_values=past_key_values,
-                    position_ids=position_ids, 
-                    embed_tokens=embed_tokens,
-                    attention_mask=invert_mask(tree_mask, dtype=dtype)
+                    position_ids=position_ids,
+                    attention_mask=tree_attention_mask,
+                    *model_args,
+                    **kwargs
                 )
-                if hasattr(self.model, "lm_head"):
-                    logits = outputs.logits
-                else:
-                    logits = lm_head(outputs.last_hidden_state)
 
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
-
-            #* Get the probabilities of each token
-            T = 1
-            sampled_probs = torch.softmax(logits[0]/T, dim=-1)
-            
-            #* Sample/Select the next nodes
-            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth, min_accept_prob=self.min_accept_prob)
-
-            #* Append nodes to their parent nodes
-            for node in next_nodes:
-                prev_nodes[node.ind].append(node)
- 
-            #* Get the nodes as input for next iteration
-            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
-            prev_nodes = next_nodes
-            
-            #* Depth increment
-            depth += 1
-            
-            #* Early stop if no nodes for next iteration
-            # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
-            if len(next_nodes) == 0:
-                break
+            with nvtx.annotate("softmax"):
+                sampled_probs = torch.softmax(logits, dim=-1)
         
-        #* Crop the tree to the max_candidate_tokens
-        past_key_values.crop(org_input_len)
+        # Discard new calcs in KV cache after original input length
+        with nvtx.annotate("crop kv"):
+            past_key_values.crop(org_input_len)
+
+        # Obtain the final tree
+        thread_worker.close_queue()
+        thread_worker.join()
+        tree = thread_worker.get_tree()
         
-        return keep_top_n_nodes(root, self.max_tokens)
+        # Prune to top-n
+        tree.prune_to_top_n(self.max_tokens)
+        
+        return tree
 
 
 class SSM_Eagle(SSMBaseNEFT):
@@ -483,76 +384,38 @@ class SSM_Eagle(SSMBaseNEFT):
         return hidden_states
     
     @torch.no_grad()
-    def new_topk_sampling(
-        self,
-        sampled_probs: torch.Tensor, 
-        leaf_probs: torch.Tensor, 
-        sample_k: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        
-        with nvtx.annotate("sampling_0"):
-            # Ensure input tensors are contiguous (Not sure if this is needed)
-            sampled_probs = sampled_probs.contiguous()
-            leaf_probs = leaf_probs.contiguous()
-
-        with nvtx.annotate("sampling_1"):
-            # Compute global probabilities per leaf entirely on GPU using broadcasting
-            global_probs = sampled_probs * leaf_probs[:, None]  # Shape: [N_available_leaves, vocab_size]
-
-        with nvtx.annotate("sampling_2"):
-            # Flatten the global_probs to [N_available_leaves * vocab_size]
-            flattened_probs = global_probs.view(-1)  # Shape: [N_available_leaves * vocab_size]
-
-        with nvtx.annotate("sampling_3"):
-            # Perform top-k sampling
-            topk_probs, topk_indices = torch.topk(
-                flattened_probs, sample_k, dim=0, largest=True, sorted=True
-            )  # Both shape: [sample_k]
-        
-        # with nvtx.annotate("sampling_4"):
-        #     # Apply min_prob threshold
-        #     # valid_flags = topk_probs > sample_min_prob  # Shape: [sample_k]
-        #     # valid_flags = None
-
-        with nvtx.annotate("sampling_5"):
-            # Compute parent indices
-            N_available_leaves, vocab_size = sampled_probs.shape
-            parent_indices = (topk_indices // vocab_size).long()  # Shape: [sample_k]
-        
-        with nvtx.annotate("sampling_6"):
-            # Compute token ids
-            token_ids = (topk_indices % vocab_size).long()  # Shape: [sample_k]
-
-        return token_ids, topk_probs, parent_indices#, valid_flags
-    
-    @torch.no_grad()
     def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
+        # 1-1) Obtain necessary parameters
         device = input_ids.device
         if hasattr(self.model, "lm_head"):
             dtype = self.model.lm_head.weight.dtype
         else:
             dtype = lm_head.weight.dtype
         
-        
-        # 1) Remove the first token from input_ids (shift by 1)
+        # 1-2) Remove the first token from input_ids (shift by 1)
         input_ids = input_ids[:, 1:]
         batch_size, org_input_len = input_ids.shape
         assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
         
-        # 2) Create Tree for pruning and validation after the loop
+        # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
         thread_worker = TreeBuilderWorker(root_id, dtype, self.max_tokens)
         thread_worker.start()
         
-        # 3) Initialize root'sattention mask & leaf probabilities, for the first forward pass
-        tree_attention_mask = torch.ones(
-            [1, 1, 1, org_input_len], 
-            device=device, 
-            dtype=torch.bool,
+        # 3) Initialize tree mask cache for draft model inference
+        tree_mask_cache = TreeMaskCache(
+            prefix_len=org_input_len,
+            max_sample_tokens=self.topk_len,
+            max_tokens=self.max_tokens,
+            dtype=dtype,
+            device=device,
         )
-        leaf_probs = torch.tensor([1.0], device=device, dtype=dtype)
 
-        # 4) First forward pass
+        # 4) Initialize parent probabilities & base for position ids
+        parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
+        position_ids_base = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+
+        # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
             kv_len = past_key_values.get_seq_length()
             hidden_states = self(
@@ -563,74 +426,61 @@ class SSM_Eagle(SSMBaseNEFT):
             )[:, -1:] # keep only the last hidden state
 
         with nvtx.annotate("softmax"):
-            sampled_probs = torch.softmax(lm_head(hidden_states)[0], dim=-1)
+            sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
         
-        # 5) Main loop
+        # 6) Main loop
         for depth_i in range(1, self.depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
             with nvtx.annotate("sample nodes", color="green"):
-                token_ids_array, probabilities_array, parent_indices_array = self.new_topk_sampling( # , valid_flags = self.new_topk_sampling(
+                token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
                     sampled_probs,
-                    leaf_probs,
+                    parent_probs,
                     self.topk_len, 
-                    #self.min_accept_prob
+                    self.min_accept_prob
                 )
-                        
-            # if valid_flags.sum() == 0:
-            #     break
+                parent_probs = child_probs
+            
+            # with nvtx.annotate("early stop"):
+            #     # if depth_i > 3:
+            #     valid_flag = sampled_probs.max() > self.min_sample_prob
+            #     if not valid_flag:
+            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         break
             
             # --------------------------------------
             # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
-                # tree.add_nodes(
-                #     token_ids=token_ids_array,
-                #     probabilities=probabilities_array,
-                #     local_parent_indices=parent_indices_array,
-                #     valid_flags=valid_flags
-                # )
-                worker_expansion = (token_ids_array, probabilities_array, parent_indices_array) #, valid_flags)
+                worker_expansion = (token_ids, child_probs, parent_indices) #, valid_flags)
                 thread_worker.put_expansion(worker_expansion)
                 
             with nvtx.annotate("filter"):
-                token_ids_array = token_ids_array.unsqueeze(0)
-                hidden_states = hidden_states[:, parent_indices_array]
-                
+                # Expand parent_indices to match hidden_states along the last dimension
+                parent_indices_expanded = parent_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
+                hidden_states = torch.gather(hidden_states, dim=1, index=parent_indices_expanded)
+
             with nvtx.annotate("position"):
-                position_ids = torch.zeros(len(parent_indices_array), device=device)[None] + (depth_i + org_input_len)
-                
-            with nvtx.annotate("early stop"):
-                # if all nodes in probabilities_array are below threshold, break  (cudaStreamSynchronize appears)
-                # with nvtx.annotate("early stop"):
-                #     if probabilities_array.max() < self.min_accept_prob:
-                #         break
-                
-                # Just for testing purposes
-                if len(parent_indices_array) == 0:
-                    # Should never enter this line, since the shape of parent_indices_array is always the same, and it is always > 0
-                    break
+                position_ids = position_ids_base + depth_i
             
             with nvtx.annotate("tree mask"):
-                tree_attention_mask = tree_attention_mask[:, :, parent_indices_array]
-                eye_block = torch.eye(len(parent_indices_array), device=device, dtype=torch.bool)[None, None]
-                tree_attention_mask = torch.concat((tree_attention_mask, eye_block), dim=3)
+                tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
             with nvtx.annotate("forward", color="red"):
                 hidden_states = self(
-                    token_ids_array,
+                    token_ids,
                     hidden_states=hidden_states,
                     embed_tokens=embed_tokens,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
-                    attention_mask=invert_mask(tree_attention_mask, dtype=dtype),
+                    attention_mask=tree_attention_mask,
                     *model_args,
                     **kwargs
                 )
 
             with nvtx.annotate("softmax"):
-                sampled_probs = torch.softmax(lm_head(hidden_states)[0], dim=-1)
+                sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
@@ -643,163 +493,5 @@ class SSM_Eagle(SSMBaseNEFT):
         
         # Prune to top-n
         tree.prune_to_top_n(self.max_tokens)
-        # tree.print_tree_structure(show_probability=True)
         
         return tree
-        
-class SSM_Custom(SSMBaseNEFT):
-    def init_custom_model(self, config):
-        # config.org_hidden_size = 4096
-        # config.org_intermediate_size = config.intermediate_size
-        
-        # return modeling_llama.LlamaModel(config)
-        return modeling_llama_eagle.LlamaModel(config)
-
-    def init_additional_modules(self, config):
-        # self.fs = FeatureSampler(config.org_hidden_size, 11008, config.org_hidden_size, config.hidden_act, config.pretraining_tp)
-        # self.compress = nn.Linear(config.org_hidden_size, config.hidden_size, bias=True)
-        # self.compress = Extractor(config.org_hidden_size, config.intermediate_size, config.hidden_size, config.hidden_act)
-        
-        self.model.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
-        # self.hidden_embed = nn.Embedding(config.hidden_size, config.hidden_size)
-        # self.hidden_head = nn.Linear(config.org_hidden_size, config.hidden_size, bias=False)
-        
-        # self.fusion = MergeLinear(config)
-        
-        # self.extract = nn.Linear(config.hidden_size, config.org_hidden_size, bias=False)
-        
-        # self.extract = Extractor(config.org_hidden_size, 11008, config.org_hidden_size, config.hidden_act)
-        # self.extract = Extractor(config.hidden_size, config.intermediate_size, config.org_hidden_size, config.hidden_act)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
-    def forward(self, input_ids, hidden_states, embed_tokens=None, return_logits=False, *model_args, **kwargs):  
-        embed_tokens = self.get_input_embeddings()
-        inputs_embeds = embed_tokens(input_ids)
-        
-        # ft = self.fs(hidden_states, inputs_embeds)
-        # res = hidden_states - ft
-        
-        # res = hidden_states
-        # hidden_ids = F.gumbel_softmax(self.hidden_head(hidden_states), tau=1).argmax(dim=-1)
-        # hidden_states = self.hidden_embed(hidden_ids)
-        
-        # res = hidden_states
-        # hidden_states = inputs_embeds + self.compress(hidden_states)
-        # hidden_states = self.fusion(hidden_states, inputs_embeds)
-        # hidden_states = self.compress(ft)
-        hidden_states = inputs_embeds # don't use hidden_states
-        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
-        # hidden_states = self.extract(hidden_states)
-            
-        # if not return_logits:
-        #     return hidden_ids
-        # else:
-        #     return self.lm_head(hidden_states), hidden_ids
-        
-        if not return_logits:
-            return hidden_states
-        else:
-            return self.lm_head(hidden_states), hidden_states
-    
-    @torch.no_grad()
-    def _update_tree_attention_data(self, depth, nodes, hidden_states, tree_mask, position_offset, device):
-        indices = torch.tensor([node.ind for node in nodes])
-
-        input_hidden = hidden_states[:, indices].to(device)
-        
-        input_ids = torch.tensor([node.id for node in nodes], device=device)[None]
-        
-        position_ids = torch.zeros(len(nodes), device=device)[None] + (position_offset + depth)
-        
-        # Generating tree masks for the new nodes, don't have to consider the old nodes
-        tree_mask = tree_mask[:, :, indices]
-        tree_mask = torch.concat((tree_mask, torch.eye(len(nodes), device=device, dtype=torch.bool)[None, None]), dim=3)
-
-        return input_hidden, input_ids, position_ids, tree_mask
-    
-    @torch.no_grad()
-    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
-        """This method is used to draft/guess the next tokens that the LLM may generate.
-
-        Args:
-            input_ids (Tensor): The input token ids.
-            hidden_states (Tensor): hidden_states from the previous iteration.
-            past_key_values (Cache): Cache object to store the past key-values generated by the model.
-            embed_tokens (Module): embedding from LLM.
-            lm_head (Module): lm_head from LLM.
-
-        Returns:
-            Node: The root node of the generated draft token tree.
-        """
-        
-        device = input_ids.device
-        if hasattr(self.model, "lm_head"):
-            dtype = self.model.lm_head.weight.dtype
-        else:
-            dtype = lm_head.weight.dtype
-        
-        # take out last token as sample_token
-        sample_token = input_ids[:, -1:]
-        
-        # remove the first token from input_ids (input_ids is shifted by 1)
-        input_ids = input_ids[:, 1:]
-        
-        # keep original length of input_ids
-        org_input_len = input_ids.shape[1] # offset of positon_id
-        
-        # initialize tree_mask and tree 
-        tree_mask = torch.ones([1, 1, 1, org_input_len], device=device, dtype=torch.bool)
-        root = Node("1", id=sample_token[0][0].item(), prob=1, global_prob=1, ind=-1)
-        
-        depth = 1 # depth starts from 1 in tree library
-        prev_nodes = [root]
-        while depth < self.depth:
-            #* Decode previous nodes
-            if depth == 1: # first iteration
-                kv_len = past_key_values.get_seq_length()
-                hidden_states = self(
-                    input_ids[:, kv_len:],
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens,
-                    past_key_values=past_key_values,
-                )[:, -1:]
-                
-            else:
-                hidden_states, input_ids, position_ids, tree_mask = self._update_tree_attention_data(depth, prev_nodes, hidden_states, tree_mask, org_input_len, device=hidden_states.device)
-                hidden_states = self(
-                    input_ids,
-                    hidden_states=hidden_states,
-                    embed_tokens=embed_tokens, 
-                    past_key_values=past_key_values,
-                    position_ids=position_ids, 
-                    attention_mask=invert_mask(tree_mask, dtype=dtype),
-                )
-
-            #* Get the probabilities of each token
-            T = 1
-            sampled_probs = torch.softmax(self.lm_head(hidden_states)[0]/T, dim=-1)
-            # sampled_probs = torch.softmax(F.linear(hidden_states, self.model.embed_tokens.weight)[0]/T, dim=-1)
-            
-            #* Sample/Select the next nodes
-            next_nodes = self.sample_nodes(sampled_probs, prev_nodes, num_samples=self.topk_len, step=depth, min_accept_prob=self.min_accept_prob)
-
-            #* Append nodes to their parent nodes
-            for node in next_nodes:
-                prev_nodes[node.ind].append(node)
- 
-            #* Get the nodes as input for next iteration
-            next_nodes = [node for node in next_nodes if node.id != self.eos_token_id and node.global_prob > self.min_sample_prob] # don't sample nodes after eos_token_id
-            prev_nodes = next_nodes
-            
-            #* Depth increment
-            depth += 1
-            
-            #* Early stop if no nodes for next iteration
-            # TODO: Also break if total_global_prob < threshold, where it does not benefit to continue
-            if len(next_nodes) == 0:
-                break
-        
-        #* Crop the tree to the max_candidate_tokens
-        past_key_values.crop(org_input_len)
-        
-        return keep_top_n_nodes(root, self.max_tokens)
