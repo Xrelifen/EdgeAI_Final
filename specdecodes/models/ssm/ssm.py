@@ -236,27 +236,56 @@ class SSMBaseNEFT(SSMBase):
         for handle in self._forward_hook_handles:
             handle.deactivate_hook()
 
+# class TreeMaskCache(nn.Module):
+#     def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
+#         super().__init__()
+#         self.prefix_len = prefix_len
+#         self.sample_len = sample_len
+#         self.max_cache_len = prefix_len + sample_len * max_sample_cnt
+#         self.dtype = dtype
+#         self.device = device
+
+#     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
+#         self.tree_mask_cache = self.tree_mask_cache[:, :, parent_indices[0]]
+#         eye_block = torch.eye(parent_indices.shape[1], device=self.device, dtype=torch.bool)[None, None]
+#         self.tree_mask_cache = torch.concat((self.tree_mask_cache, eye_block), dim=3)
+    
+#         return invert_mask(self.tree_mask_cache, dtype=self.dtype)
+
 class TreeMaskCache(nn.Module):
-    def __init__(self, prefix_len: int, max_sample_tokens: int, max_tokens: int, dtype: str, device: str):
+    def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
         super().__init__()
         self.prefix_len = prefix_len
-        self.max_sample_tokens = max_sample_tokens
-        self.max_cache_len = prefix_len + max_tokens
+        self.sample_len = sample_len
+        self.max_cache_len = prefix_len + sample_len * max_sample_cnt
         self.dtype = dtype
         self.device = device
-
-        self.tree_mask_cache = torch.ones(
-            [1, 1, 1, self.prefix_len], 
-            device=device, 
+        
+        self.tree_mask_cache = torch.zeros(
+            [1, 1, self.sample_len, self.max_cache_len],
+            device=device,
             dtype=torch.bool,
         )
+        if not is_torchdynamo_compiling():
+            # Mark the buffer's address as static for optimization purposes
+            torch._dynamo.mark_static_address(self.tree_mask_cache)
+        
+        # set the first prefix_len elements to True
+        self.tree_mask_cache[:, :, 0, :self.prefix_len] = True
+        
+        # set the current length to prefix_len
+        self.current_len = prefix_len
 
+        # create an eye block for later use
+        self.eye_block = torch.eye(self.sample_len, device=device, dtype=torch.bool)[None, None]
+        
+        
     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
-        self.tree_mask_cache = self.tree_mask_cache[:, :, parent_indices[0]]
-        eye_block = torch.eye(parent_indices.shape[1], device=self.device, dtype=torch.bool)[None, None]
-        self.tree_mask_cache = torch.concat((self.tree_mask_cache, eye_block), dim=3)
-    
-        return invert_mask(self.tree_mask_cache, dtype=self.dtype)
+        self.tree_mask_cache[..., :self.current_len] = self.tree_mask_cache[..., parent_indices[0], :self.current_len]
+        self.tree_mask_cache[..., self.current_len:self.current_len+self.sample_len] = self.eye_block
+        self.current_len += self.sample_len
+        
+        return invert_mask(self.tree_mask_cache[..., :self.current_len], dtype=self.dtype)
 
     
 class SSM_Classic(SSMBaseNEFT):
@@ -283,8 +312,8 @@ class SSM_Classic(SSMBaseNEFT):
         # 3) Initialize tree mask cache for draft model inference
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
-            max_sample_tokens=self.topk_len,
-            max_tokens=self.max_tokens,
+            sample_len=self.topk_len,
+            max_sample_cnt=self.topk_len*self.depth,
             dtype=dtype,
             device=device,
         )
@@ -405,8 +434,8 @@ class SSM_Eagle(SSMBaseNEFT):
         # 3) Initialize tree mask cache for draft model inference
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
-            max_sample_tokens=self.topk_len,
-            max_tokens=self.max_tokens,
+            sample_len=self.topk_len,
+            max_sample_cnt=self.topk_len*self.depth,
             dtype=dtype,
             device=device,
         )
