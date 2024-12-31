@@ -30,8 +30,8 @@ MODE=sd-eagle
 # sd specific options
 SD_METHOD=greedy
 
-NVTX_PROFILING=True
-# NVTX_PROFILING=False
+# NVTX_PROFILING=True
+NVTX_PROFILING=False
 
 # args for run_test.py
 args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
@@ -48,6 +48,6 @@ if [ $NVTX_PROFILING = True ]; then
 else
   # execute run_test.py
   # print the command to be executed
-  echo LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args
-  LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args
+  echo LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args --profile
+  LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py $args --profile
 fi

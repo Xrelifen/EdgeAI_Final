@@ -247,6 +247,12 @@ class Tree:
         else:
             max_d = 0
         return torch.tensor(max_d, dtype=torch.long, device='cpu')
+    
+    def size(self) -> int:
+        """
+        Return the current number of nodes in the tree.
+        """
+        return self.current_size
 
     def create_attention_mask(self, prefix_length: int = 0, device: str = 'cpu') -> torch.Tensor:
         """
@@ -300,7 +306,7 @@ class Tree:
         # Final shape: [batch=1, heads=1, seq_len=num_nodes, hidden=(prefix_length + num_nodes)]
         return inverted_mask.unsqueeze(0).unsqueeze(0)
 
-    def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = False):
+    def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = True):
         """
         Print a text-based representation of the tree.
         
