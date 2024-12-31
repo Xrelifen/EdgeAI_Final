@@ -9,7 +9,6 @@ from .base import WrapperBase
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from bigtree import preorder_iter
 import prettytable as pt
 
 from .verify_utils import verify_step
@@ -40,28 +39,8 @@ class SDWrapper(WrapperBase):
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
         )
-        
-    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
-        # Preparing llm's tree decoding data, also updates each node's index (node.ind).
-        tree_input_ids, tree_position_ids, tree_mask = build_tree_attention_data(root, position_offset=position_offset, dtype=dtype)
-        
-        # Move to device
-        tree_input_ids = tree_input_ids.to(device)
-        tree_position_ids = tree_position_ids.to(device)
-        tree_mask = tree_mask.to(device)
-        
-        # llm forward
-        outputs = self.llm(
-            tree_input_ids,
-            past_key_values=past_key_values,
-            attention_mask=tree_mask,
-            position_ids=tree_position_ids,
-            output_hidden_states=True,
-        )
-        
-        return outputs
-    
-    def _new_tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
+
+    def _tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
         # Preparing llm's tree decoding data, also updates each node's index (node.ind).
         node_data = tree.get_node_data()
         tree_input_ids = node_data['token_ids']
@@ -69,16 +48,12 @@ class SDWrapper(WrapperBase):
         tree_mask = tree.create_attention_mask(position_offset)
         
         # Move to device
-        tree_input_ids = tree_input_ids.to(device)
-        tree_position_ids = tree_position_ids.to(device)
-        tree_mask = tree_mask.to(device)
-        
-        # print("position_offset:", position_offset)
-        # print("tree_input_ids shape:", tree_input_ids.shape)
-        # print("tree_position_ids shape:", tree_position_ids.shape)
-        # print("tree_mask shape:", tree_mask.shape)
+        tree_input_ids = tree_input_ids.to(device, non_blocking=True)
+        tree_position_ids = tree_position_ids.to(device, non_blocking=True)
+        tree_mask = tree_mask.to(device, non_blocking=True)
         
         # llm forward
+        #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
         outputs = self.llm(
             tree_input_ids.unsqueeze(0),
             past_key_values=past_key_values,
@@ -89,63 +64,17 @@ class SDWrapper(WrapperBase):
         
         return outputs
     
-    def _verify(self, root, logits, logits_warper, do_sample):
-        # Obtain LLM sample logits
-        global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
-        
-        # Initialize variables
-        sampled_tokens = []
-        hidden_indices = []
-        total_len = 0
-        accept_len = 0
-        
-        # Iterate through draft tree, verify each node
-        cur = root
-        while cur.children:
-            total_len += 1
-            accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur, do_sample)
-                    
-            # Accept token if it is in the children
-            if accept_token_id is not None:
-                accept_len += 1
-                sampled_tokens.append(accept_token_id)
-                hidden_indices.append(cur.ind)
-                cur = next(node for node in cur.children if node.id == accept_token_id)
-            # Reject token, update global_p and break
-            else:
-                global_p[cur.ind] = new_p
-                break
-        
-        # Generate bonus token
-        # Don't generate if eos token is the last token
-        if not sampled_tokens or sampled_tokens[-1] != self.ssm.eos_token_id:
-            if not do_sample:
-                bonus_token = global_p[cur.ind].argmax().item()
-            else:
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
-            sampled_tokens.append(bonus_token)
-            hidden_indices.append(cur.ind)
-        
-        # Convert the sampled tokens and hidden indices to tensors
-        sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
-        hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
-        
-        return sampled_tokens, hidden_indices, (total_len, accept_len)
-    
-    def new_verify_step(self, p, q, token_ids, do_sample):
-        if not do_sample:
-            sampled_token_id = p.argmax()
-        else:
-            sampled_token_id = p.multinomial(num_samples=1).squeeze(-1)
-        
-        if (sampled_token_id == token_ids).sum() > 0:
+    def _verify_step(self, p, q, token_ids, do_sample):
+        sampled_token_id = p.argmax() if not do_sample else p.multinomial(1).squeeze(-1)
+        if torch.any(sampled_token_id == token_ids):
             return sampled_token_id, None
         
-        p = p / (1.0 - p[token_ids].sum())
-        p[token_ids] = 0
+        denom = 1.0 - p[token_ids].sum()
+        p.div_(denom) if denom >= 1e-9 else p.zero_() # numerical stability
+        p[token_ids].zero_()
         return None, p
 
-    def _new_verify(self, tree, logits, logits_warper, do_sample):
+    def _verify(self, tree, logits, logits_warper, do_sample):
         def sample_token_method(logits, return_probs=False):
             return self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=return_probs)
         
@@ -171,7 +100,7 @@ class SDWrapper(WrapperBase):
         while children_inds.size(0) > 0:
             total_len += 1
             #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
-            accept_token_id, new_p = self.new_verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, do_sample)
+            accept_token_id, new_p = self._verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, do_sample)
                     
             # Accept token if it is in the children
             if accept_token_id is not None:
@@ -194,14 +123,9 @@ class SDWrapper(WrapperBase):
                 bonus_token = global_p[cur_ind].argmax()[None]
             else:
                 bonus_token = global_p[cur_ind].multinomial(num_samples=1).squeeze(-1)
+
             sampled_tokens = torch.cat([sampled_tokens, bonus_token])
             hidden_indices = torch.cat([hidden_indices, cur_ind])
-        
-        # # Convert the sampled tokens and hidden indices to tensors
-        # sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
-        # hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
-        
-        print("Predicted:", self.tokenizer.batch_decode(sampled_tokens, clean_up_tokenization_spaces=False))
         
         return sampled_tokens[None], hidden_indices, (total_len, accept_len)
 
@@ -275,11 +199,11 @@ class SDWrapper(WrapperBase):
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = llm_past_key_values.get_seq_length()
-                    outputs = self._new_tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+                    outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
                 
                 # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
                 # We keep the seq_len axis considering cases of multiple tokens.
-                next_token_logits = outputs.logits
+                next_token_logits = outputs.logits.clone()
                 hidden_states = outputs.hidden_states[-1].clone()
                 
                 # This is needed to properly delete outputs.logits which may be very large for first iteration
@@ -288,14 +212,14 @@ class SDWrapper(WrapperBase):
 
                 # * verify
                 with nvtx.annotate("verify"):
-                    sampled_tokens, hidden_indices, _ = self._new_verify(
+                    sampled_tokens, hidden_indices, _ = self._verify(
                                                         tree, next_token_logits, 
                                                         logits_warper,
                                                         do_sample
                                                     )
                     
-                    sampled_tokens = sampled_tokens.to(input_ids.device)
-                    hidden_indices = hidden_indices.to(hidden_states.device)
+                    sampled_tokens = sampled_tokens.to(input_ids.device, non_blocking=True)
+                    hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
                 
 
                 # * update input_ids, hidden_states, and kv-cache
@@ -339,9 +263,9 @@ class ProfileSDWrapper(SDWrapper):
         self.target_time_per_iter.append(time.perf_counter()-start_time)
         return outputs
     
-    def _verify(self, root, logits, logits_warper, do_sample):
+    def _verify(self, tree, logits, logits_warper, do_sample):
         start_time = time.perf_counter()
-        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, logits, logits_warper, do_sample)
         self.verify_time_per_iter.append(time.perf_counter()-start_time)
         
         # tokenize id to text for visualization
@@ -367,7 +291,7 @@ class ProfileSDWrapper(SDWrapper):
         self.profile_data['accept_len'].append(accept_len)
         # logging
         logging.debug(
-            f"Total: {len(list(preorder_iter(root)))},"\
+            f"Total: {tree.size()},"\
             f"\tPredicted ({accept_len}/{total_len}): {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
         )
         

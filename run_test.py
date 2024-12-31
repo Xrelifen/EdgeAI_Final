@@ -17,6 +17,7 @@ def load_model(
     ssm_path: str,
     mode: str,
     sd_method: str,
+    profile_mode: bool = False,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     ):
@@ -40,15 +41,13 @@ def load_model(
         draft_config = None
 
     if mode == "naive":
-        # model = NaiveWrapper()
-        model = ProfileNaiveWrapper()
+        model = ProfileNaiveWrapper() if profile_mode else NaiveWrapper()
         
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
     elif mode == "sd-classic":
-        model = SDWrapper()
-        # model = ProfileSDWrapper(out_dir=None)
+        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
         
         # load SSM
         ssm = SSM_Classic.from_pretrained(
@@ -61,15 +60,7 @@ def load_model(
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
-        model = SDWrapper()
-        # model = ProfileSDWrapper(out_dir=None)
-        
-        # draft_config.head_dim = 64
-        # draft_config.hidden_size = 2048
-        # draft_config.intermediate_size = 8192
-        # draft_config.num_attention_heads = 32
-        # draft_config.num_key_value_heads = 8
-        
+        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
         
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
@@ -93,7 +84,6 @@ def load_model(
     return model, tokenizer
 
 def main(args):
-    
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -103,7 +93,7 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.profile)
 
     # warm up
     if not args.no_warm_up:
@@ -203,6 +193,11 @@ if __name__ == "__main__":
         type=str,
         default="greedy",
         help="The mode of model generation.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile the model.",
     )
     parser.add_argument(
         "-nw",
