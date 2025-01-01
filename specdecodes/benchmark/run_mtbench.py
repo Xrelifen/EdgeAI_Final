@@ -16,7 +16,7 @@ from ..models import modeling_llama
 torch.manual_seed(0)
 random.seed(0)
 
-def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=torch.float16, device="auto"):
+def load_model(llm_path, ssm_path, mode, layers, out_dir=None, dtype=torch.float16, device="auto"):
     # Load tokenizer and LLM
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     llm = modeling_llama.LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
@@ -47,7 +47,7 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
             "sd-eagle": SSM_Eagle,
         }
         ssm_cls = ssms.get(mode, lambda: ValueError("Invalid mode"))
-        ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config, sampling_method=sd_method,
+        ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config,
                                       eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
         ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
@@ -57,9 +57,9 @@ def load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir=None, dtype=
     model.eval()
     return model, tokenizer
 
-def run_eval(llm_path, ssm_path, mode, sd_method, layers, out_dir, dataset, log_file,
+def run_eval(llm_path, ssm_path, mode, layers, out_dir, dataset, log_file,
              max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False):
-    model, tokenizer = load_model(llm_path, ssm_path, mode, sd_method, layers, out_dir, dtype=dtype, device="cuda")
+    model, tokenizer = load_model(llm_path, ssm_path, mode, layers, out_dir, dtype=dtype, device="cuda")
 
     # Warm up the model
     warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
@@ -101,7 +101,6 @@ if __name__ == "__main__":
     parser.add_argument("--llm-path", "-llm", required=True, help="Path to LLM weights.")
     parser.add_argument("--ssm-path", "-ssm", default="", help="Path to SSM weights.")
     parser.add_argument("--mode", default="naive", help="Model mode.")
-    parser.add_argument("--sd-method", default="greedy", help="Sampling method for SD.")
     parser.add_argument("--layers", type=int, default=1, help="Number of SSM layers.")
     parser.add_argument("--out-dir", default="specdecodes/experiments/mt_bench/", help="Output directory.")
     parser.add_argument("--log-dir", default="specdecodes/experiments/result/", help="Experiment log directory.")
@@ -137,7 +136,7 @@ if __name__ == "__main__":
     for i in range(args.repeat):
         log_file = os.path.join(log_dir, f"{i}.jsonl")
         avg_tput, avg_accept_rate = run_eval(
-            args.llm_path, args.ssm_path, args.mode, args.sd_method, 
+            args.llm_path, args.ssm_path, args.mode,
             args.layers, args.out_dir, dataset, log_file, args.max_new_tokens, 
             args.temp, str_to_torch_dtype(args.dtype), args.do_sample
         )
