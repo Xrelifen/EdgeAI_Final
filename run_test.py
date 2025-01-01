@@ -16,7 +16,6 @@ def load_model(
     llm_path: str,
     ssm_path: str,
     mode: str,
-    sd_method: str,
     profile_mode: bool = False,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
@@ -53,7 +52,6 @@ def load_model(
         ssm = SSM_Classic.from_pretrained(
             ssm_path,
             config=draft_config,
-            sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
@@ -66,7 +64,6 @@ def load_model(
         ssm = SSM_Eagle.from_pretrained(
             ssm_path,
             config=draft_config,
-            sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
             keep_embeddings=True,
@@ -93,7 +90,7 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.profile)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.profile)
 
     # warm up
     if not args.no_warm_up:
@@ -186,12 +183,6 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="naive",
-        help="The mode of model generation.",
-    )
-    parser.add_argument(
-        "--sd-method",
-        type=str,
-        default="greedy",
         help="The mode of model generation.",
     )
     parser.add_argument(
