@@ -306,7 +306,7 @@ class SSM_Classic(SSMBaseNEFT):
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
-        thread_worker = TreeBuilderWorker(root_id, dtype, self.max_tokens)
+        thread_worker = TreeBuilderWorker(root_id=root_id, prob_dtype=dtype)
         thread_worker.start()
         
         # 3) Initialize tree mask cache for draft model inference
@@ -358,7 +358,7 @@ class SSM_Classic(SSMBaseNEFT):
             # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
-                worker_expansion = (token_ids, child_probs, parent_indices) #, valid_flags)
+                worker_expansion = (token_ids, child_probs, parent_indices)
                 thread_worker.put_expansion(worker_expansion)
                 
             with nvtx.annotate("position"):
@@ -428,7 +428,7 @@ class SSM_Eagle(SSMBaseNEFT):
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
-        thread_worker = TreeBuilderWorker(root_id, dtype, self.max_tokens)
+        thread_worker = TreeBuilderWorker(root_id=root_id, prob_dtype=dtype)
         thread_worker.start()
         
         # 3) Initialize tree mask cache for draft model inference
@@ -482,7 +482,7 @@ class SSM_Eagle(SSMBaseNEFT):
             # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
-                worker_expansion = (token_ids, child_probs, parent_indices) #, valid_flags)
+                worker_expansion = (token_ids, child_probs, parent_indices)
                 thread_worker.put_expansion(worker_expansion)
                 
             with nvtx.annotate("filter"):
