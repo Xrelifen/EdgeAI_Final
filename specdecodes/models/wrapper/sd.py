@@ -11,8 +11,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 
 import prettytable as pt
 
-from .verify_utils import verify_step
-from ..utils import TreeDynamicCache, build_tree_attention_data
+from ..utils import TreeDynamicCache
 
 import nvtx
 
@@ -224,8 +223,6 @@ class SDWrapper(WrapperBase):
 
                 # * update input_ids, hidden_states, and kv-cache
                 with nvtx.annotate("update_cache"):
-                    # print("input_ids shape:", input_ids.shape) # (1, 141)
-                    # print("sampled_tokens shape:", sampled_tokens.shape) # (1, 6)
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
                     hidden_states = hidden_states[:, hidden_indices].clone()
                     llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
