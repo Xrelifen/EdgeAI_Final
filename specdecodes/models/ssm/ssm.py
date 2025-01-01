@@ -112,10 +112,10 @@ class SSMBase(nn.Module):
         pass
 
     def init_draft_parameters(self):
-        self.depth = 5 + 1
-        self.topk_len = 6
+        self.depth = 6 + 1
+        self.topk_len = 10
         self.min_accept_prob = 1e-2 #! Not used
-        self.max_tokens = 32
+        self.max_tokens = 64
     
     #! Currently not used
     def init_sampling_method(self, sampling_method):
