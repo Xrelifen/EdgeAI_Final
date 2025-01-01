@@ -27,14 +27,11 @@ TEMPERATURE=0
 MODE=sd-eagle
 # MODE=naive
 
-# sd specific options
-SD_METHOD=greedy
-
 # NVTX_PROFILING=True
 NVTX_PROFILING=False
 
 # args for run_test.py
-args="--mode $MODE --sd-method $SD_METHOD -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
+args="--mode $MODE -llm $LLM_PATH -ssm $SSM_PATH --seed $SEED --max-new-tokens $MAX_NEW_TOKENS"
 if [ $DO_WARMUP = False ]; then
   args="$args -nw"
 fi
