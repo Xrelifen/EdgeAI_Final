@@ -10,16 +10,11 @@ from torch import Tensor
 import nvtx
 
 from .training_hooks import TrainingHook, NEFTuneHook
-#! Currently not used
-# from .sampling_utils import topk_sampling, k_sampling, heuristic_k_sampling
-from ..utils import invert_mask
 
-from ..llm.modeling_llama import ACT2FN, LlamaMLP, LlamaRMSNorm
+from ..utils import invert_mask
 from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..llm import modeling_llama_no_in_norm
-
-from ..cpu_tree import Tree, TreeBuilderWorker
+from ..cpu_tree import TreeBuilderWorker
      
 def load_custom_model(model, model_path):
     # Load the model
@@ -36,7 +31,6 @@ def load_custom_model(model, model_path):
     assert len(missing_keys) == 0 and len(unexpected_keys) == 0, f"Missing keys: {missing_keys}, Unexpected keys: {unexpected_keys}"
     
     return model
-
 
 class MergeLinear(nn.Module):
     def __init__(self, in_shape, out_shape):
@@ -72,7 +66,6 @@ class SSMBase(nn.Module):
         
         # Draft parameters
         self.init_draft_parameters()
-        self.init_sampling_method(sampling_method)
         
     @classmethod
     def from_pretrained(
@@ -116,18 +109,6 @@ class SSMBase(nn.Module):
         self.topk_len = 10
         self.min_accept_prob = 1e-2 #! Not used
         self.max_tokens = 64
-    
-    #! Currently not used
-    def init_sampling_method(self, sampling_method):
-        pass
-    #     if sampling_method == 'greedy':
-    #         self.sample_nodes = topk_sampling
-    #     elif sampling_method == 'stochastic':
-    #         self.sample_nodes = k_sampling
-    #     elif sampling_method == 'hstochastic':
-    #         self.sample_nodes = heuristic_k_sampling
-    #     else:
-    #         raise ValueError("Sampling method not supported")
         
     def get_input_embeddings(self):
         # If the model has input embeddings, return it. Otherwise, return None
@@ -162,7 +143,6 @@ class SSMBase(nn.Module):
         
         else:
             return torch.softmax(logits, dim=-1)
-        
         
     @torch.no_grad()
     def topk_sampling(
@@ -235,22 +215,6 @@ class SSMBaseNEFT(SSMBase):
         """Deactivates/de-registers forward hooks for the model (if needed)."""
         for handle in self._forward_hook_handles:
             handle.deactivate_hook()
-
-# class TreeMaskCache(nn.Module):
-#     def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
-#         super().__init__()
-#         self.prefix_len = prefix_len
-#         self.sample_len = sample_len
-#         self.max_cache_len = prefix_len + sample_len * max_sample_cnt
-#         self.dtype = dtype
-#         self.device = device
-
-#     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
-#         self.tree_mask_cache = self.tree_mask_cache[:, :, parent_indices[0]]
-#         eye_block = torch.eye(parent_indices.shape[1], device=self.device, dtype=torch.bool)[None, None]
-#         self.tree_mask_cache = torch.concat((self.tree_mask_cache, eye_block), dim=3)
-    
-#         return invert_mask(self.tree_mask_cache, dtype=self.dtype)
 
 class TreeMaskCache(nn.Module):
     def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
@@ -347,6 +311,9 @@ class SSM_Classic(SSMBaseNEFT):
                 )
                 parent_probs = child_probs
             
+            # --------------------------------------
+            # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
+            # --------------------------------------
             # with nvtx.annotate("early stop"):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
@@ -355,7 +322,7 @@ class SSM_Classic(SSMBaseNEFT):
             #         break
             
             # --------------------------------------
-            # B. Add new nodes to the CPU tree
+            # C. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 worker_expansion = (token_ids, child_probs, parent_indices)
