@@ -1,9 +1,6 @@
 import torch
 from typing import Tuple, Dict, List, Optional
 
-import threading
-import queue
-
 class TreeNode:
     __slots__ = (
         'parent',
@@ -65,38 +62,57 @@ class Tree:
         self.current_size = 1
         self.available_leaves: List[int] = [0]
 
+    # Add nodes to the tree once, in a batched manner
     def add_nodes(
         self, 
-        token_ids: torch.Tensor, 
-        token_probs: torch.Tensor, 
-        local_parent_indices: torch.Tensor,
+        token_ids: torch.Tensor,    # shape: [1, total_depth, num_samples]
+        token_probs: torch.Tensor,  # shape: [1, total_depth, num_samples]
+        local_parent_indices: torch.Tensor,  # shape: [1, total_depth, num_samples]
     ):
-        batch_size, num_new_nodes = token_ids.shape
+        batch_size, total_depth, num_samples = token_ids.shape
         assert batch_size == 1, "Currently only batch_size=1 is supported."
 
-        # Mark existing leaves as sampled
-        for leaf_idx in self.available_leaves:
-            self.nodes[leaf_idx].has_been_sampled = True
+        # Convert data to cpu and list
+        local_parent_indices = local_parent_indices.to('cpu', non_blocking=True)
+        token_ids = token_ids.to('cpu', non_blocking=True)
+        token_probs = token_probs.to('cpu', non_blocking=True)
+        
+        torch.cuda.synchronize()
+        local_parent_indices = local_parent_indices.tolist()
+        token_ids = token_ids.tolist()
+        token_probs = token_probs.tolist()
 
-        p_inds = local_parent_indices[0].tolist()
-        t_ids = token_ids[0].tolist()
-        probs = token_probs[0].tolist()
-        old_size = self.current_size
-        new_leaves = []
-        new_nodes = []
+        for d in range(total_depth):
+            # Mark current leaves as sampled
+            for leaf_idx in self.available_leaves:
+                self.nodes[leaf_idx].has_been_sampled = True
+                
+            p_inds = local_parent_indices[0][d]
+            t_ids = token_ids[0][d]
+            probs = token_probs[0][d]
 
-        for i, (p_idx, t_id, pr) in enumerate(zip(p_inds, t_ids, probs)):
-            parent_idx = self.available_leaves[p_idx]
-            parent_node = self.nodes[parent_idx]
-            node = TreeNode(parent_idx, t_id, pr, parent_node.depth + 1)
-            parent_node.children.append(old_size + i)
-            new_leaves.append(old_size + i)
-            new_nodes.append(node)
+            new_nodes = []
+            new_leaves = []
+            old_size = self.current_size
 
-        # Extend
-        self.nodes.extend(new_nodes)
-        self.current_size += num_new_nodes
-        self.available_leaves = new_leaves
+            # Create new nodes
+            for i, (p_idx, t_id, pr) in enumerate(zip(p_inds, t_ids, probs)):
+                parent_idx = self.available_leaves[p_idx]
+                parent_node = self.nodes[parent_idx]
+                node = TreeNode(
+                    parent=parent_idx,
+                    token_id=t_id,
+                    cumulative_probability=pr,
+                    depth=parent_node.depth + 1,
+                )
+                parent_node.children.append(old_size + i)
+                new_leaves.append(old_size + i)
+                new_nodes.append(node)
+
+            # Add to the tree and update leaves
+            self.nodes.extend(new_nodes)
+            self.current_size += len(new_nodes)
+            self.available_leaves = new_leaves
 
     def prune_to_top_n(self, n: int) -> torch.Tensor:
         if n == -1 or self.current_size <= n:
@@ -224,60 +240,3 @@ class Tree:
 
     def __repr__(self):
         return f"LinkedCPUTree(num_nodes={self.current_size}, device='cpu')"
-    
-
-class TreeBuilderWorker(threading.Thread):
-    """
-    A background worker that:
-      1) Receives GPU-based expansions via a Queue.
-      2) Converts them to CPU in this thread.
-      3) Updates a CPU-based Tree with each expansion.
-    Once a sentinel `None` is placed on the queue, it stops.
-    """
-
-    def __init__(
-        self,
-        root_id: int,
-        tree: Tree = None,
-        prob_dtype: torch.dtype = torch.float32,
-    ):
-        super().__init__()
-        if tree is not None:
-            self.tree = tree
-        else:
-            self.tree = Tree(root_token_id=root_id, prob_dtype=prob_dtype)
-        self.expansion_queue = queue.Queue()
-        self.queue_closed = False
-
-    def run(self):
-        while True:
-            # Block until an expansion is available
-            expansion = self.expansion_queue.get()  # blocks indefinitely
-            if expansion is None:
-                break  # Sentinel => done
-
-            # expansion is (token_ids_gpu, probs_gpu, parents_gpu, valid_flags_gpu).
-            token_ids_cpu, probs_cpu, parents_cpu = [ #, valid_flags_cpu = [
-                x.to('cpu', non_blocking=True) for x in expansion
-            ]
-            torch.cuda.synchronize()
-            
-            # Update the CPU-based tree
-            self.tree.add_nodes(token_ids_cpu, probs_cpu, parents_cpu)
-
-    def close_queue(self):
-        """
-        Indicate no more expansions will arrive by sending a sentinel (None).
-        """
-        self.queue_closed = True
-        self.expansion_queue.put(None)
-
-    def put_expansion(self, expansion):
-        if self.queue_closed:
-            raise ValueError("Queue is already closed.")
-        self.expansion_queue.put(expansion)
-
-    def get_tree(self):
-        if not self.queue_closed:
-            raise ValueError("Queue must be closed before retrieving the tree.")
-        return self.tree

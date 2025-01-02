@@ -14,7 +14,7 @@ from .training_hooks import TrainingHook, NEFTuneHook
 from ..utils import invert_mask
 from ..llm import modeling_llama_no_init_weights as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..cpu_tree import TreeBuilderWorker
+from ..cpu_tree import Tree
      
 def load_custom_model(model, model_path):
     # Load the model
@@ -120,7 +120,7 @@ class SSMBase(nn.Module):
         pass
 
     def init_draft_parameters(self):
-        self.depth = 6 + 1
+        self.max_depth = 6 + 1
         self.topk_len = 10
         self.min_accept_prob = 1e-2 #! Not used
         self.max_tokens = 64
@@ -204,6 +204,41 @@ class SSMBase(nn.Module):
             token_ids = (topk_indices % vocab_size).long()  # Shape: [sample_k]
 
         return token_ids, topk_probs, parent_indices, valid_flag
+    
+    # @torch.no_grad()
+    # def topk_sampling(
+    #     self,
+    #     sampled_probs: torch.Tensor,
+    #     parent_probs: torch.Tensor,
+    #     sample_k: int,
+    #     sample_min_prob: float,
+    # ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+    #     bsz, n_leaves, vocab = sampled_probs.shape
+    #     sampled_probs = sampled_probs.contiguous()
+    #     parent_probs  = parent_probs.contiguous()
+
+    #     with nvtx.annotate("partial_topk"):
+    #         # 1) Partial top-k over vocab dimension
+    #         ptk_vals, ptk_ids = torch.topk(sampled_probs, k=sample_k, dim=-1)
+    #         # 2) Multiply by parent_probs
+    #         global_probs = ptk_vals * parent_probs.unsqueeze(-1)
+
+    #     with nvtx.annotate("final_topk"):
+    #         # 3) Flatten & final top-k
+    #         flat_probs = global_probs.view(bsz, -1)
+    #         top_probs, top_idx = torch.topk(flat_probs, sample_k, dim=1, sorted=False)
+    #         parent_idx = top_idx // sample_k
+    #         child_idx  = top_idx % sample_k
+
+    #     with nvtx.annotate("gather_ids"):
+    #         # 4) Gather final token_ids
+    #         rows = torch.arange(bsz, device=sampled_probs.device).unsqueeze(-1)
+    #         token_ids = ptk_ids[rows, parent_idx, child_idx]
+
+    #     # Decide on valid_flag (simplified here)
+    #     valid_flag = True  # or use top_probs.max(dim=1) > sample_min_prob, etc.
+
+    #     return token_ids, top_probs, parent_idx, valid_flag
 
 
 class SSMBaseNEFT(SSMBase):
@@ -231,12 +266,81 @@ class SSMBaseNEFT(SSMBase):
         for handle in self._forward_hook_handles:
             handle.deactivate_hook()
 
+#TODO: Compare this implementation's speed using torch.compile
+# class TreeData(nn.Module):
+#     def __init__(self, root_id: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
+#         super().__init__()
+#         self.root_id = root_id
+#         self.sample_len = sample_len
+#         self.max_sample_depth = max_sample_depth
+#         self.dtype = dtype
+#         self.device = device
+        
+#         self.token_ids_data = torch.zeros(
+#             [1, max_sample_depth, sample_len],
+#             device=device,
+#             dtype=torch.long,
+#         )
+#         self.child_probs_data = torch.zeros(
+#             [1, max_sample_depth, sample_len],
+#             device=device,
+#             dtype=dtype,
+#         )
+#         self.parent_indices_data = torch.zeros(
+#             [1, max_sample_depth, sample_len],
+#             device=device,
+#             dtype=torch.long,
+#         )   
+#         if not is_torchdynamo_compiling():
+#             # Mark the buffer's address as static for optimization purposes
+#             torch._dynamo.mark_static_address(self.token_ids_data)
+#             torch._dynamo.mark_static_address(self.child_probs_data)
+#             torch._dynamo.mark_static_address(self.parent_indices_data)
+            
+#         self.current_depth = 0
+        
+#     def update(self, token_ids: torch.Tensor, child_probs: torch.Tensor, parent_indices: torch.Tensor) -> torch.Tensor:
+#         self.token_ids_data[:, self.current_depth].copy_(token_ids)
+#         self.child_probs_data[:, self.current_depth].copy_(child_probs)
+#         self.parent_indices_data[:, self.current_depth].copy_(parent_indices)
+#         self.current_depth += 1
+    
+#     def get_data(self):
+#         return (self.token_ids_data, self.child_probs_data, self.parent_indices_data)
+
+class TreeData(nn.Module):
+    def __init__(self, root_id: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
+        super().__init__()
+        self.root_id = root_id
+        self.sample_len = sample_len
+        self.max_sample_depth = max_sample_depth
+        self.dtype = dtype
+        self.device = device
+        
+        self.token_ids_data = []
+        self.child_probs_data = []
+        self.parent_indices_data = []
+        
+    def update(self, token_ids: torch.Tensor, child_probs: torch.Tensor, parent_indices: torch.Tensor) -> torch.Tensor:
+        self.token_ids_data.append(token_ids)
+        self.child_probs_data.append(child_probs)
+        self.parent_indices_data.append(parent_indices)
+    
+    def get_data(self):
+        self.token_ids_data = torch.cat(self.token_ids_data, dim=0).unsqueeze(0)
+        self.child_probs_data = torch.cat(self.child_probs_data, dim=0).unsqueeze(0)
+        self.parent_indices_data = torch.cat(self.parent_indices_data, dim=0).unsqueeze(0)
+        
+        return (self.token_ids_data, self.child_probs_data, self.parent_indices_data)
+
+
 class TreeMaskCache(nn.Module):
-    def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
+    def __init__(self, prefix_len: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
         super().__init__()
         self.prefix_len = prefix_len
         self.sample_len = sample_len
-        self.max_cache_len = prefix_len + sample_len * max_sample_cnt
+        self.max_sample_depth = max_sample_depth
+        self.max_cache_len = prefix_len + sample_len * max_sample_depth
         self.dtype = dtype
         self.device = device
         
@@ -285,14 +389,19 @@ class SSM_Classic(SSMBaseNEFT):
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
-        thread_worker = TreeBuilderWorker(root_id=root_id, prob_dtype=dtype)
-        thread_worker.start()
+        tree_data = TreeData(
+            root_id,
+            sample_len=self.topk_len,
+            max_sample_depth=self.max_depth,
+            dtype=dtype,
+            device=device,
+        )
         
         # 3) Initialize tree mask cache for draft model inference
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
             sample_len=self.topk_len,
-            max_sample_cnt=self.topk_len*self.depth,
+            max_sample_depth=self.max_depth,
             dtype=dtype,
             device=device,
         )
@@ -313,7 +422,7 @@ class SSM_Classic(SSMBaseNEFT):
             sampled_probs = torch.softmax(logits, dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.depth):
+        for depth_i in range(1, self.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -333,15 +442,14 @@ class SSM_Classic(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
             #         break
             
             # --------------------------------------
             # C. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
-                worker_expansion = (token_ids, child_probs, parent_indices)
-                thread_worker.put_expansion(worker_expansion)
+                tree_data.update(token_ids, child_probs, parent_indices)
                 
             with nvtx.annotate("position"):
                 position_ids += 1
@@ -367,15 +475,16 @@ class SSM_Classic(SSMBaseNEFT):
             past_key_values.crop(org_input_len)
 
         # Obtain the final tree
-        thread_worker.close_queue()
-        thread_worker.join()
-        tree = thread_worker.get_tree()
+        tree = Tree(root_id, dtype)
+        tree.add_nodes(*tree_data.get_data())
         
         # Prune to top-n
         tree.prune_to_top_n(self.max_tokens)
         
         return tree
 
+
+# torch.set_float32_matmul_precision('high')
 
 class SSM_Eagle(SSMBaseNEFT):
     def init_custom_model(self, config):
@@ -410,21 +519,28 @@ class SSM_Eagle(SSMBaseNEFT):
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
-        thread_worker = TreeBuilderWorker(root_id=root_id, prob_dtype=dtype)
-        thread_worker.start()
-        
-        # 3) Initialize tree mask cache for draft model inference
-        tree_mask_cache = TreeMaskCache(
-            prefix_len=org_input_len,
+        tree_data = TreeData(
+            root_id,
             sample_len=self.topk_len,
-            max_sample_cnt=self.topk_len*self.depth,
+            max_sample_depth=self.max_depth,
             dtype=dtype,
             device=device,
         )
+        
+        # 3) Initialize tree mask cache for draft model inference
+        with nvtx.annotate("init tree mask cache"):
+            tree_mask_cache = TreeMaskCache(
+                prefix_len=org_input_len,
+                sample_len=self.topk_len,
+                max_sample_depth=self.max_depth,
+                dtype=dtype,
+                device=device,
+            )
 
         # 4) Initialize parent probabilities & position ids
-        parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
-        position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        with nvtx.annotate("init parent_probs & position_ids"):
+            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
+            position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
@@ -440,7 +556,7 @@ class SSM_Eagle(SSMBaseNEFT):
             sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.depth):
+        for depth_i in range(1, self.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -457,15 +573,14 @@ class SSM_Eagle(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
             #         break
             
             # --------------------------------------
             # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
-                worker_expansion = (token_ids, child_probs, parent_indices)
-                thread_worker.put_expansion(worker_expansion)
+                tree_data.update(token_ids, child_probs, parent_indices)
                 
             with nvtx.annotate("filter"):
                 # Expand parent_indices to match hidden_states along the last dimension
@@ -498,9 +613,8 @@ class SSM_Eagle(SSMBaseNEFT):
             past_key_values.crop(org_input_len)
 
         # Obtain the final tree
-        thread_worker.close_queue()
-        thread_worker.join()
-        tree = thread_worker.get_tree()
+        tree = Tree(root_id, dtype)
+        tree.add_nodes(*tree_data.get_data())
         
         # Prune to top-n
         tree.prune_to_top_n(self.max_tokens)
