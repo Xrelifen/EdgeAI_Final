@@ -199,7 +199,7 @@ def main(args):
         ]
         with nvtx.annotate("Warm up"):
             input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
 
     # generate response
     print("Generating response...")
@@ -217,7 +217,7 @@ def main(args):
     
     start_time = time.time()
     with nvtx.annotate("Generate"):
-        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
     end_time = time.time()
 
     for key, value in model.exp_log.items():
@@ -330,6 +330,11 @@ if __name__ == "__main__":
         type=int,
         default=12,
         help="Draft tree depth.",
+    )
+    parser.add_argument(
+        "--use-static-tree-cache",
+        action="store_true",
+        help="Use static tree cache.",
     )
     args = parser.parse_args()
     

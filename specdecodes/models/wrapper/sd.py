@@ -11,7 +11,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 
 import prettytable as pt
 
-from ..utils import TreeDynamicCache
+from ..utils import TreeDynamicCache, TreeStaticCache
 
 import nvtx
 
@@ -24,7 +24,7 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
     
-    def _speculate(self, input_ids, hidden_states, past_key_values):
+    def _speculate(self, input_ids, hidden_states, past_key_values, use_static_tree_cache=False):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
@@ -39,6 +39,7 @@ class SDWrapper(WrapperBase):
             past_key_values=past_key_values,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
+            use_static_tree_cache=use_static_tree_cache,
         )
 
     def _tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
@@ -128,6 +129,7 @@ class SDWrapper(WrapperBase):
             sampled_tokens = torch.cat([sampled_tokens, bonus_token])
             hidden_indices = torch.cat([hidden_indices, cur_ind])
         
+        print(f"accept_len: {accept_len}")
         return sampled_tokens[None], hidden_indices, (total_len, accept_len)
 
     def _generate(
@@ -136,6 +138,7 @@ class SDWrapper(WrapperBase):
         stopping_criteria: StoppingCriteria,
         logits_warper: LogitsWarper,
         do_sample: bool,
+        use_static_tree_cache: bool = False,
     ):
         """
         Generate sequence of tokens with speculative decoding.
@@ -170,9 +173,22 @@ class SDWrapper(WrapperBase):
         input_ids = input_ids.clone()
 
         # * prepare kv-cache
-        llm_past_key_values = TreeDynamicCache()
-        ssm_past_key_values = TreeDynamicCache()
+        if use_static_tree_cache:
+            logging.info("Using static tree cache")
+            llm_past_key_values = TreeDynamicCache()
+            ssm_past_key_values = TreeStaticCache(
+                max_cache_len= 1024,
+                config=self.ssm.model.config,
+                device=input_ids.device,
+                dtype=self.ssm.model.dtype, # NOTE: dtype=self.ssm.dtype may not be a good write. It is fine when using QTIP model.
+                max_batch_size=1,
+            )
+        else:
+            logging.info("Using dynamic tree cache")
+            llm_past_key_values = TreeDynamicCache()
+            ssm_past_key_values = TreeDynamicCache()
 
+        # TODO: In offload mode, maybe we dont need to run llm prefill stage first...?
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
             outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
@@ -195,7 +211,7 @@ class SDWrapper(WrapperBase):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
+                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values, use_static_tree_cache=use_static_tree_cache)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
@@ -250,7 +266,7 @@ class ProfileSDWrapper(SDWrapper):
         self.target_time_per_iter = []
         self.verify_time_per_iter = []
         
-    def _speculate(self, input_ids, hidden_states, past_key_values):
+    def _speculate(self, input_ids, hidden_states, past_key_values, use_static_tree_cache=False):
         start_time = time.perf_counter()
         root = super()._speculate(input_ids, hidden_states, past_key_values)
         self.draft_time_per_iter.append(time.perf_counter()-start_time)

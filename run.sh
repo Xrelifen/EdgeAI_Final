@@ -46,4 +46,14 @@ LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py \
     --mode sd-offload --sd-method greedy \
     -llm meta-llama/Llama-2-7b-chat-hf \
     -ssm relaxml/Llama-2-7b-chat-QTIP-2Bit \
-    --depth 15
+    --depth 15 \
+    --use-static-tree-cache
+
+
+# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py \
+#     --max-new-tokens 256 --temp 0.6 --seed 999 \
+#     --mode sd-offload --sd-method greedy \
+#     -llm meta-llama/Llama-2-7b-chat-hf \
+#     -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+#     --depth 15 \
+#     --use-static-tree-cache

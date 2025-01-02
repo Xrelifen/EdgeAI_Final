@@ -65,7 +65,7 @@ class SSMBase(nn.Module):
         self.init_additional_modules(config)
         
         # Draft parameters
-        self.init_draft_parameters()
+        self.init_draft_parameters(max_depth=tree_depth, topk_len=topk_len, min_sample_prob=min_sample_prob, min_accept_prob=min_accept_prob)
         
     @classmethod
     def from_pretrained(
@@ -119,12 +119,23 @@ class SSMBase(nn.Module):
     def init_additional_modules(self, config):
         pass
 
-    def init_draft_parameters(self):
-        self.max_depth = 6 + 1
-        self.topk_len = 10
-        self.min_accept_prob = 1e-2 #! Not used
-        self.max_tokens = 64
-        
+    # def init_draft_parameters(self):
+    #     self.max_depth = 6 + 1
+    #     self.topk_len = 10
+    #     self.min_accept_prob = 1e-2 #! Not used
+    #     self.max_tokens = 64
+
+    def init_draft_parameters(self, 
+                              max_depth=6+1, 
+                              topk_len=10, 
+                              min_accept_prob=1e-2,
+                              min_sample_prob=1e-2,
+                              max_tokens=64):
+        self.max_depth = max_depth
+        self.topk_len = topk_len
+        self.min_accept_prob = min_accept_prob #! Not used
+        self.max_tokens = max_tokens
+
     def get_input_embeddings(self):
         # If the model has input embeddings, return it. Otherwise, return None
         if hasattr(self.model, "embed_tokens"):
@@ -335,7 +346,7 @@ class TreeData(nn.Module):
 
 
 class TreeMaskCache(nn.Module):
-    def __init__(self, prefix_len: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
+    def __init__(self, prefix_len: int, sample_len: int, max_sample_depth: int, dtype: str, device: str, use_static_tree_cache: bool):
         super().__init__()
         self.prefix_len = prefix_len
         self.sample_len = sample_len
@@ -343,12 +354,22 @@ class TreeMaskCache(nn.Module):
         self.max_cache_len = prefix_len + sample_len * max_sample_depth
         self.dtype = dtype
         self.device = device
+        self.use_static_tree_cache = use_static_tree_cache
         
-        self.tree_mask_cache = torch.zeros(
-            [1, 1, self.sample_len, self.max_cache_len],
-            device=device,
-            dtype=torch.bool,
-        )
+        if self.use_static_tree_cache == False:
+            self.tree_mask_cache = torch.zeros(
+                [1, 1, self.sample_len, self.max_cache_len],
+                device=device,
+                dtype=torch.bool,
+            )
+            # print(f'self.tree_mask_cache.shape(false): {self.tree_mask_cache.shape}')
+        else:
+            self.tree_mask_cache = torch.zeros(
+                [1, 1, self.sample_len, 1024],
+                device=device,
+                dtype=torch.bool,
+            )
+            # print(f'self.tree_mask_cache.shape(true) : {self.tree_mask_cache.shape}')
         if not is_torchdynamo_compiling():
             # Mark the buffer's address as static for optimization purposes
             torch._dynamo.mark_static_address(self.tree_mask_cache)
@@ -364,11 +385,18 @@ class TreeMaskCache(nn.Module):
         
         
     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
+        # print(f'self.tree_mask_cache.shape(0): {self.tree_mask_cache.shape}')
         self.tree_mask_cache[..., :self.current_len] = self.tree_mask_cache[..., parent_indices[0], :self.current_len]
+        # print(f'self.tree_mask_cache.shape(1): {self.tree_mask_cache.shape}')
         self.tree_mask_cache[..., self.current_len:self.current_len+self.sample_len] = self.eye_block
+        # print(f'self.tree_mask_cache.shape(2) : {self.tree_mask_cache.shape}')
         self.current_len += self.sample_len
-        
-        return invert_mask(self.tree_mask_cache[..., :self.current_len], dtype=self.dtype)
+
+        if self.use_static_tree_cache == False:
+            ret_tree_mask_cache = self.tree_mask_cache[..., :self.current_len]
+        else:
+            ret_tree_mask_cache = self.tree_mask_cache
+        return invert_mask(ret_tree_mask_cache, dtype=self.dtype)
 
     
 class SSM_Classic(SSMBaseNEFT):
@@ -378,9 +406,14 @@ class SSM_Classic(SSMBaseNEFT):
 
         logits = self.model(input_ids, *model_args, **kwargs).logits
         return logits
-    
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
+    @torch.compile(mode="max-autotune", fullgraph=True)
+    def run_compiled_ssm(self, token_ids, past_key_values, position_ids, attention_mask, cache_position):
+        logits = self.model(input_ids=token_ids, past_key_values=past_key_values, position_ids=position_ids, attention_mask=attention_mask, cache_position=cache_position).logits
+        return logits
+
+    @torch.no_grad()
+    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, use_static_tree_cache, *model_args, **kwargs):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
@@ -404,11 +437,14 @@ class SSM_Classic(SSMBaseNEFT):
             max_sample_depth=self.max_depth,
             dtype=dtype,
             device=device,
+            use_static_tree_cache=use_static_tree_cache,
         )
+        # print(f'tree_mask_cache: {tree_mask_cache.tree_mask_cache.shape}')
 
         # 4) Initialize parent probabilities & position ids
         parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
         position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        cur_length = org_input_len
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
@@ -423,6 +459,7 @@ class SSM_Classic(SSMBaseNEFT):
         
         # 6) Main loop
         for depth_i in range(1, self.max_depth):
+            # print(f'depth_i: {depth_i}')
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -450,22 +487,49 @@ class SSM_Classic(SSMBaseNEFT):
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)
-                
+
+            with nvtx.annotate("cache position"):
+                # print(f'past_seen_tokens: {cur_length}')
+                cache_position = torch.arange(
+                    cur_length, cur_length + self.topk_len, device=0
+                )
+                cur_length+=self.topk_len
+
+                # past_seen_tokens = past_key_values.get_seq_length()
+                # print(f'past_seen_tokens: {past_seen_tokens}')
+                # cache_position = torch.arange(
+                #     past_seen_tokens, past_seen_tokens + 16, device=0
+                # )
+
             with nvtx.annotate("position"):
                 position_ids += 1
-                
+                # print(f'position_ids: {position_ids}')
+
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
+                # print(f'tree_attention_mask(debug): {tree_attention_mask.shape}')
             
+
+
             with nvtx.annotate("forward", color="red"):
-                logits = self(
-                    token_ids,
-                    past_key_values=past_key_values,
-                    position_ids=position_ids,
-                    attention_mask=tree_attention_mask,
-                    *model_args,
-                    **kwargs
-                )
+
+                if use_static_tree_cache == False:
+                    logits = self(
+                        token_ids,
+                        past_key_values=past_key_values,
+                        position_ids=position_ids,
+                        attention_mask=tree_attention_mask,
+                        *model_args,
+                        **kwargs
+                    )
+                else:
+                    logits = self.run_compiled_ssm(
+                        token_ids,
+                        past_key_values=past_key_values,
+                        position_ids=position_ids,
+                        attention_mask=tree_attention_mask,
+                        cache_position=cache_position,
+                    )
 
             with nvtx.annotate("softmax"):
                 sampled_probs = torch.softmax(logits, dim=-1)

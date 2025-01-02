@@ -294,8 +294,8 @@ class OffloadSDWrapper(SDWrapper):
             logging.info(f"[Warning] memory usage is too much")
 
         
-    def _speculate(self, input_ids, hidden_states, past_key_values):
-        return super()._speculate(input_ids=input_ids, hidden_states=hidden_states, past_key_values=past_key_values)
+    def _speculate(self, input_ids, hidden_states, past_key_values, use_static_tree_cache=False):
+        return super()._speculate(input_ids=input_ids, hidden_states=hidden_states, past_key_values=past_key_values, use_static_tree_cache=use_static_tree_cache)
 
     def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
         return super()._tree_decoding(root, past_key_values, position_offset, device, dtype=dtype)
@@ -306,8 +306,9 @@ class OffloadSDWrapper(SDWrapper):
         stopping_criteria: StoppingCriteria,
         logits_warper: LogitsWarper,
         do_sample: bool,
+        use_static_tree_cache: bool = False,
     ):   
-        return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)             
+        return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample, use_static_tree_cache)             
 
 class ProfileOffloadSDWrapper(OffloadSDWrapper):
     def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
