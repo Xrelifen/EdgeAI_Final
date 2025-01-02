@@ -513,17 +513,19 @@ class SSM_Eagle(SSMBaseNEFT):
         )
         
         # 3) Initialize tree mask cache for draft model inference
-        tree_mask_cache = TreeMaskCache(
-            prefix_len=org_input_len,
-            sample_len=self.topk_len,
-            max_sample_depth=self.max_depth,
-            dtype=dtype,
-            device=device,
-        )
+        with nvtx.annotate("init tree mask cache"):
+            tree_mask_cache = TreeMaskCache(
+                prefix_len=org_input_len,
+                sample_len=self.topk_len,
+                max_sample_depth=self.max_depth,
+                dtype=dtype,
+                device=device,
+            )
 
         # 4) Initialize parent probabilities & position ids
-        parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
-        position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        with nvtx.annotate("init parent_probs & position_ids"):
+            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
+            position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
