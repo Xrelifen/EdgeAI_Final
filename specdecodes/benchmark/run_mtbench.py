@@ -124,7 +124,6 @@ if __name__ == "__main__":
     parser.add_argument("--llm-path", "-llm", required=True, help="Path to LLM weights.")
     parser.add_argument("--ssm-path", "-ssm", default="", help="Path to SSM weights.")
     parser.add_argument("--mode", default="naive", help="Model mode.")
-    parser.add_argument("--sd-method", default="greedy", help="Sampling method for SD.")
     parser.add_argument("--layers", type=int, default=1, help="Number of SSM layers.")
     parser.add_argument("--out-dir", default="specdecodes/experiments/mt_bench/", help="Output directory.")
     parser.add_argument("--log-dir", default="specdecodes/experiments/result/", help="Experiment log directory.")
@@ -161,7 +160,7 @@ if __name__ == "__main__":
     for i in range(args.repeat):
         log_file = os.path.join(log_dir, f"{i}.jsonl")
         avg_tput, avg_accept_rate = run_eval(
-            args.llm_path, args.ssm_path, args.mode, args.sd_method, 
+            args.llm_path, args.ssm_path, args.mode,
             args.layers, args.out_dir, dataset, log_file, args.max_new_tokens, 
             args.llm_offload, args.temp, str_to_torch_dtype(args.dtype), args.do_sample
         )

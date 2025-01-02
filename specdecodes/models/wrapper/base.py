@@ -108,6 +108,7 @@ class WrapperBase(nn.Module):
             else: # return sampled token
                 token = torch.multinomial(probs, num_samples=1)
                 return token.view(batch, seq_len) # preserve shape
+
         else:
             
             if return_probs: # return sample prob

@@ -13,7 +13,7 @@ from accelerate.logging import get_logger
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
-from ..models import SSM_Classic, LLM_First_Layers, LLM_Last_Layers
+from ..models import SSM_ShrinkEagle, LLM_First_Layers, LLM_Last_Layers
 from .train_utils import (
     list_files,
     CustomDataset,
@@ -21,7 +21,7 @@ from .train_utils import (
     AddUniformNoise,
     AddGaussianNoise,
     update_metrics,
-    calc_l1_loss,
+    calc_sl1_loss,
     calc_ce_loss,
 )
 
@@ -29,13 +29,22 @@ from .train_utils import (
 logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
+@torch.no_grad()
+def remap_logits(logits, id_map, keep_len=8192):
+    logits = logits[:, :, id_map]
+    logits = torch.concat([
+            logits[:, :, :keep_len-1],
+            logits[:, :, keep_len-1:].logsumexp(dim=2, keepdim=True),
+        ], dim=2)
+    return logits
+
 def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logits, train_config):
     # Upcast to float if we need to compute the loss to avoid potential precision issues
     s_logits = s_logits.float()
     t_logits = t_logits.float()
     
     # Calculate losses
-    vloss = calc_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    vloss = calc_sl1_loss(loss_mask, s_hidden_states, t_hidden_states)
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
     loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
     return loss, vloss, ploss
@@ -58,18 +67,36 @@ def train_one_epoch(
             with torch.no_grad():
                 t_hidden_states = data["target"]
                 t_logits = llm_last(t_hidden_states)
+                
+                # Remap logits
+                t_logits = remap_logits(t_logits, model.module.id_llm_freq_map, model.module.limited_vocab_size)
 
             # Student outputs
-            s_hidden_states = model(
+            s_logits, s_hidden_states = model(
                 input_ids=data["input_ids"],
-                embed_tokens=llm_first,
-                attention_mask=data["attention_mask"]
+                hidden_states=data["hidden_states"],
+                attention_mask=data["attention_mask"],
+                return_logits=True,
             )
-            s_logits = llm_last(s_hidden_states, head_only=True)
-
+            
+            # loss_mask = data["loss_mask"]
+            with torch.no_grad():
+                loss_mask = data["loss_mask"]
+                check_ids = model.module.id_llm_to_ssm[data["input_ids"]]
+                
+                # if token is in the limited vocab (-1): 
+                #   set loss mask to 0.1 if loss_mask is 1
+                #   else set loss mask to 0
+                in_vocab = check_ids != model.module.limited_vocab_size-1
+                not_in_vocab = check_ids == model.module.limited_vocab_size-1
+                
+                lamda = 0.1
+                loss_mask = (loss_mask * in_vocab) + lamda * (loss_mask * not_in_vocab)
+                
+                
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
-                data["loss_mask"], s_hidden_states, t_hidden_states,
+                loss_mask, s_hidden_states, t_hidden_states,
                 s_logits, t_logits, train_config
             )
 
@@ -81,7 +108,7 @@ def train_one_epoch(
         
         # Update metrics
         correct, total, expect, topk_metrics = update_metrics(
-            loss_mask=data["loss_mask"],
+            loss_mask=loss_mask,
             s_logits=s_logits,
             t_logits=t_logits,
         )
@@ -150,24 +177,33 @@ def validate(
         # Teacher outputs
         t_hidden_states = data["target"]
         t_logits = llm_last(t_hidden_states)
+        
+        # Remap logits
+        t_logits = remap_logits(t_logits, model.module.id_llm_freq_map, model.module.limited_vocab_size)
 
         # Student outputs
-        s_hidden_states = model(
+        s_logits, s_hidden_states = model(
             input_ids=data["input_ids"],
-            embed_tokens=llm_first,
-            attention_mask=data["attention_mask"]
+            hidden_states=data["hidden_states"],
+            attention_mask=data["attention_mask"],
+            return_logits=True,
         )
-        s_logits = llm_last(s_hidden_states, head_only=True)
+        
+        # loss_mask = data["loss_mask"]
+        loss_mask = data["loss_mask"]
+        check_ids = model.module.id_llm_to_ssm[data["input_ids"]]
+        # set loss mask to 0 if the token is not in the limited vocab (-1)
+        loss_mask = loss_mask * (check_ids != model.module.limited_vocab_size-1)
 
         # Calculate loss
         loss, vloss, ploss = calculate_loss(
-            data["loss_mask"], s_hidden_states, t_hidden_states,
+            loss_mask, s_hidden_states, t_hidden_states,
             s_logits, t_logits, train_config
         )
 
         # Update metrics
         correct, total, expect, topk_metrics = update_metrics(
-            loss_mask=data["loss_mask"],
+            loss_mask=loss_mask,
             s_logits=s_logits,
             t_logits=t_logits,
         )
@@ -320,24 +356,39 @@ def main(args):
     draft_config.num_hidden_layers = args.layers
     draft_config.use_cache = False
     draft_config._attn_implementation = "sdpa"
+    
+    # Compression
+    # draft_config.compress_hidden_ratio = 0.5
+    # draft_config.compress_intermediate_ratio = 0.5
+    
     if args.neftune:
         draft_config.neftune_noise_alpha = args.neftune_noise_alpha
 
     if args.pretrained:
         logger.info("Loading pretrained model...")
-        model = SSM_Classic.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_ShrinkEagle.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Classic(config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_ShrinkEagle(config=draft_config, keep_embeddings=args.keep_embeddings)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
 
-    # Transfer embeddings if available
-    if hasattr(model.model, "embed_tokens"):
-        model.model.embed_tokens.weight = llm.get_input_embeddings().weight.clone().detach()
-        model.model.embed_tokens.requires_grad_(False)
-
+    # if hasattr(model.model, "embed_tokens"):
+    #     logger.info("Transferring embeddings...")
+    #     limited_vocab_size = model.limited_vocab_size
+    #     id_llm_freq_map = model.id_llm_freq_map
+    #     model.model.embed_tokens.weight.data[:limited_vocab_size-1] = llm.get_input_embeddings().weight.data[id_llm_freq_map][:limited_vocab_size-1].clone()
+    #     model.model.embed_tokens.weight.data[limited_vocab_size-1:] = torch.zeros_like(model.model.embed_tokens.weight.data[limited_vocab_size-1:])
+        # model.model.embed_tokens.weight.requires_grad_(False)
+    
+    if hasattr(model, "lm_head"):
+        logger.info("Transferring lm_head...")
+        limited_vocab_size = model.limited_vocab_size
+        id_llm_freq_map = model.id_llm_freq_map
+        model.lm_head.weight.data[:limited_vocab_size-1] = llm.get_output_embeddings().weight.data[id_llm_freq_map][:limited_vocab_size-1].clone()
+        # model.lm_head.weight.requires_grad_(False)
+        
     # # load llm's norm layer to draft model
     # model.model.norm.weight = llm.model.norm.weight.clone().detach()
     # model.model.norm.requires_grad_(False)

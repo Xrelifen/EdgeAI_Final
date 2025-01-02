@@ -21,7 +21,6 @@ from transformers.cache_utils import StaticCache, DynamicCache
 
 from bigtree import preorder_iter, levelorder_iter
 from bigtree import tree_to_nested_dict
-from ..utils import TreeDynamicCache, build_tree_attention_data
 
 from awq import AutoAWQForCausalLM
 import prettytable as pt

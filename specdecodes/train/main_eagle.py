@@ -23,6 +23,7 @@ from .train_utils import (
     update_metrics,
     calc_sl1_loss,
     calc_ce_loss,
+    wsd_schedule,
 )
 
 # Setup logging
@@ -39,6 +40,9 @@ def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logi
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
     loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
     return loss, vloss, ploss
+    
+    # loss = calc_ce_loss(loss_mask, s_logits, t_logits)
+    # return loss, loss, loss
 
 def train_one_epoch(
     model, llm_first, llm_last, train_loader, optimizer, scheduler,
@@ -202,7 +206,7 @@ def validate(
     if accelerator.is_main_process and run:
         logger.info(
             f'Validation Epoch [{epoch + 1}/{num_epochs}] '
-            f'Loss: {total_loss:.4f}, '
+            f'Loss: {avg_loss:.4f}, '
             f'Accuracy: {100 * total_correct / total_samples:.2f}%'
         )
         log_dict = {
@@ -253,7 +257,7 @@ def main(args):
         if not args.wandb:
             os.environ['WANDB_DISABLED'] = 'true'
         wandb.require("core")
-        run = wandb.init(project="eagle", config=train_config)
+        run = wandb.init(project=args.wandb_project, config=train_config)
     else:
         run = None
 
@@ -319,9 +323,21 @@ def main(args):
     # Set up the student model
     logger.info("Setting up model...")
     draft_config = deepcopy(config)
-    draft_config.num_hidden_layers = args.layers
+    draft_config.num_hidden_layers = 1
     draft_config.use_cache = False
     draft_config._attn_implementation = "sdpa"
+    
+    # draft_config.head_dim = 64
+    # draft_config.hidden_size = 2048
+    # draft_config.intermediate_size = 8192
+    # draft_config.num_attention_heads = 32
+    # draft_config.num_key_value_heads = 8
+    
+    # draft_config.num_attention_heads = 32
+    # draft_config.num_key_value_heads = 8
+    # draft_config.intermediate_size = 11008
+    # 4096 
+    
     if args.neftune:
         draft_config.neftune_noise_alpha = args.neftune_noise_alpha
 
@@ -336,19 +352,19 @@ def main(args):
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
 
     # Transfer embeddings if available
-    if hasattr(model.model, "embed_tokens"):
-        model.model.embed_tokens.weight = llm.get_input_embeddings().weight.clone().detach()
-        model.model.embed_tokens.requires_grad_(False)
+    # if hasattr(model.model, "embed_tokens"):
+    #     model.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
+    #     model.model.embed_tokens.requires_grad_(False)
 
-    # # load llm's norm layer to draft model
-    # model.model.norm.weight = llm.model.norm.weight.clone().detach()
+    # load llm's norm layer to draft model
+    # model.model.norm.weight.data = llm.model.norm.weight.data.clone()
     # model.model.norm.requires_grad_(False)
     
-    # # load llm's last attention layer's data to draft model (not trainable)
+    # load llm's last attention layer's data to draft model (not trainable)
     # load_index = -1
     # for (draft_param, llm_param) in zip(model.model.layers[load_index].parameters(), llm.model.layers[load_index].parameters()):
-    #     draft_param.data = llm_param.data
-    #     draft_param.requires_grad = False
+    #     draft_param.data = llm_param.data.clone()
+    #     draft_param.requires_grad_(False)
     
     # # load llm's first layer's data to draft model
     # load_index = -2
@@ -369,11 +385,21 @@ def main(args):
 
     # Set up optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=max_train_steps
+    # scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=num_warmup_steps,
+    #     num_training_steps=max_train_steps
+    # )
+    wsd_fract_decay = 0.2
+    lambda_schedule = wsd_schedule(
+        n_iterations=max_train_steps,
+        n_warmup=num_warmup_steps,
+        fract_decay=wsd_fract_decay,
+        init_div_factor=1e2,
+        final_lr_factor=0,  # should be 0 here
+        decay_type='sqrt',
     )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda_schedule)
 
     # Prepare everything with accelerator
     model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
@@ -403,7 +429,6 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training Script')
     parser.add_argument('--llm-path', type=str, default="meta-llama/Llama-2-7b-chat-hf")
-    parser.add_argument("--layers", type=int, default=1)
     parser.add_argument('--datadir', type=str, required=True)
     parser.add_argument('--savedir', type=str, required=True)
     parser.add_argument('--data-ratio', type=float, default=1.0)
@@ -427,5 +452,6 @@ if __name__ == '__main__':
 
     # Logging
     parser.add_argument('--wandb', action='store_true')
+    parser.add_argument('--wandb-project', type=str, default='specdecodes')
     args = parser.parse_args()
     main(args)

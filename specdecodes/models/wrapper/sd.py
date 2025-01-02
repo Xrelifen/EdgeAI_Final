@@ -4,19 +4,16 @@ import os
 import time
 import numpy as np
 import torch
-import torch.nn.functional as F
-import gc
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from bigtree import preorder_iter, levelorder_iter
-from bigtree import tree_to_nested_dict
 import prettytable as pt
 
-from .verify_utils import verify_step
-from ..utils import TreeDynamicCache, build_tree_attention_data
+from ..utils import TreeDynamicCache
+
+import nvtx
 
 
 class SDWrapper(WrapperBase):
@@ -43,69 +40,95 @@ class SDWrapper(WrapperBase):
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
         )
-        
-    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+
+    def _tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
         # Preparing llm's tree decoding data, also updates each node's index (node.ind).
-        tree_input_ids, tree_position_ids, tree_mask = build_tree_attention_data(root, position_offset=position_offset, dtype=dtype)
+        node_data = tree.get_node_data()
+        tree_input_ids = node_data['token_ids']
+        tree_position_ids = node_data['depths'] + position_offset
+        tree_mask = tree.create_attention_mask(position_offset)
         
         # Move to device
-        tree_input_ids = tree_input_ids.to(device)
-        tree_position_ids = tree_position_ids.to(device)
-        tree_mask = tree_mask.to(device)
+        tree_input_ids = tree_input_ids.to(device, non_blocking=True)
+        tree_position_ids = tree_position_ids.to(device, non_blocking=True)
+        tree_mask = tree_mask.to(device, non_blocking=True)
         
         # llm forward
+        #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
         outputs = self.llm(
-            tree_input_ids,
+            tree_input_ids.unsqueeze(0),
             past_key_values=past_key_values,
             attention_mask=tree_mask,
-            position_ids=tree_position_ids,
+            position_ids=tree_position_ids.unsqueeze(0),
             output_hidden_states=True,
         )
         
         return outputs
     
-    def _verify(self, root, logits, logits_warper, do_sample):
+    def _verify_step(self, p, q, token_ids, do_sample):
+        sampled_token_id = p.argmax() if not do_sample else p.multinomial(1).squeeze(-1)
+        if torch.any(sampled_token_id == token_ids):
+            return sampled_token_id, None
+        
+        denom = 1.0 - p[token_ids].sum()
+        p.div_(denom) if denom >= 1e-9 else p.zero_() # numerical stability
+        p[token_ids].zero_()
+        return None, p
+
+    def _verify(self, tree, logits, logits_warper, do_sample):
+        def sample_token_method(logits, return_probs=False):
+            return self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=return_probs)
+        
         # Obtain LLM sample logits
-        global_p = self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=True).squeeze(0) # remove batch dim
+        global_p = sample_token_method(logits, return_probs=True).squeeze(0).to(device='cpu', non_blocking=True) # remove batch dim
         
         # Initialize variables
-        sampled_tokens = []
-        hidden_indices = []
+        sampled_tokens = torch.tensor([], dtype=torch.long, device='cpu')
+        hidden_indices = torch.tensor([], dtype=torch.long, device='cpu')
         total_len = 0
         accept_len = 0
         
         # Iterate through draft tree, verify each node
-        cur = root
-        while cur.children:
+        node_data = tree.get_node_data()
+        token_ids = node_data['token_ids']
+        token_probs = node_data['cumulative_probabilities']
+        
+        cur_ind = torch.tensor([0], dtype=torch.long, device='cpu')
+        children_inds = tree.get_children_indices(cur_ind)
+        children_token_ids = token_ids[children_inds]
+        
+        torch.cuda.synchronize() # synchronize before starting the loop
+        while children_inds.size(0) > 0:
             total_len += 1
-            accept_token_id, new_p = verify_step(global_p[cur.ind], cur.sample_probs, cur, do_sample)
+            #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
+            accept_token_id, new_p = self._verify_step(global_p[cur_ind].squeeze(0), token_probs[cur_ind].squeeze(0), children_token_ids, do_sample)
                     
             # Accept token if it is in the children
             if accept_token_id is not None:
                 accept_len += 1
-                sampled_tokens.append(accept_token_id)
-                hidden_indices.append(cur.ind)
-                cur = next(node for node in cur.children if node.id == accept_token_id)
+                sampled_tokens = torch.cat([sampled_tokens, accept_token_id[None]])
+                hidden_indices = torch.cat([hidden_indices, cur_ind])
+                cur_ind = children_inds[children_token_ids == accept_token_id]
+                children_inds = tree.get_children_indices(cur_ind)
+                children_token_ids = token_ids[children_inds]
+            
             # Reject token, update global_p and break
             else:
-                global_p[cur.ind] = new_p
+                global_p[cur_ind] = new_p
                 break
         
-        # Generate bonus token
-        # Don't generate if eos token is the last token
-        if not sampled_tokens or sampled_tokens[-1] != self.ssm.eos_token_id:
+        # Generate bonus token, don't generate if eos token is the last token
+        if sampled_tokens.size(0) == 0 or sampled_tokens[-1] != self.ssm.eos_token_id:
+            #TODO: Remove unnecessary shape modification operations
             if not do_sample:
-                bonus_token = global_p[cur.ind].argmax().item()
+                bonus_token = global_p[cur_ind].argmax()[None]
             else:
-                bonus_token = global_p[cur.ind].multinomial(num_samples=1)
-            sampled_tokens.append(bonus_token)
-            hidden_indices.append(cur.ind)
+                bonus_token = global_p[cur_ind].multinomial(num_samples=1).squeeze(-1)
+
+            sampled_tokens = torch.cat([sampled_tokens, bonus_token])
+            hidden_indices = torch.cat([hidden_indices, cur_ind])
         
-        # Convert the sampled tokens and hidden indices to tensors
-        sampled_tokens = torch.tensor(sampled_tokens, dtype=torch.long)[None] # add back batch size dim
-        hidden_indices = torch.tensor(hidden_indices, dtype=torch.long)
-        print(f"accept_len: {accept_len}")
-        return sampled_tokens, hidden_indices, (total_len, accept_len)
+        return sampled_tokens[None], hidden_indices, (total_len, accept_len)
 
     def _generate(
         self,
@@ -151,7 +174,8 @@ class SDWrapper(WrapperBase):
         ssm_past_key_values = TreeDynamicCache()
 
         # * prefill stage
-        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
+        with nvtx.annotate("prefill", color="orange"):
+            outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
@@ -166,43 +190,48 @@ class SDWrapper(WrapperBase):
         next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
 
-        finished = False
-        while not finished:
-            # * speculate
-            root = self._speculate(input_ids, hidden_states, ssm_past_key_values)
+        with nvtx.annotate("decoding"):
+            finished = False
+            while not finished:
+                # * speculate
+                with nvtx.annotate("speculate", color="cyan"):
+                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
 
-            # * tree decoding
-            prev_kv_len = llm_past_key_values.get_seq_length()
-            outputs = self._tree_decoding(root, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
-            
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # We keep the seq_len axis considering cases of multiple tokens.
-            next_token_logits = outputs.logits
-            hidden_states = outputs.hidden_states[-1].clone()
-            
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
-            gc.collect()
+                # * tree decoding
+                with nvtx.annotate("tree_decoding", color="orange"):
+                    prev_kv_len = llm_past_key_values.get_seq_length()
+                    outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+                
+                # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+                # We keep the seq_len axis considering cases of multiple tokens.
+                next_token_logits = outputs.logits.clone()
+                hidden_states = outputs.hidden_states[-1].clone()
+                
+                # This is needed to properly delete outputs.logits which may be very large for first iteration
+                # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
+                del outputs
 
-            # * verify
-            sampled_tokens, hidden_indices, _ = self._verify(
-                                                root, next_token_logits, 
-                                                logits_warper,
-                                                do_sample
-                                            )
-            
-            sampled_tokens = sampled_tokens.to(input_ids.device)
-            hidden_indices = hidden_indices.to(hidden_states.device)
+                # * verify
+                with nvtx.annotate("verify"):
+                    sampled_tokens, hidden_indices, _ = self._verify(
+                                                        tree, next_token_logits, 
+                                                        logits_warper,
+                                                        do_sample
+                                                    )
+                    
+                    sampled_tokens = sampled_tokens.to(input_ids.device, non_blocking=True)
+                    hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
+                
 
-            # * update input_ids, hidden_states, and kv-cache
-            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-            hidden_states = hidden_states[:, hidden_indices].clone()
-            llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
-            
-            # * check stopping criteria
-            finished = stopping_criteria(input_ids, None)
-        
+                # * update input_ids, hidden_states, and kv-cache
+                with nvtx.annotate("update_cache"):
+                    input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
+                    hidden_states = hidden_states[:, hidden_indices].clone()
+                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
+                
+                # * check stopping criteria
+                finished = stopping_criteria(input_ids, None)
+                
         return input_ids
     
 
@@ -233,9 +262,9 @@ class ProfileSDWrapper(SDWrapper):
         self.target_time_per_iter.append(time.perf_counter()-start_time)
         return outputs
     
-    def _verify(self, root, logits, logits_warper, do_sample):
+    def _verify(self, tree, logits, logits_warper, do_sample):
         start_time = time.perf_counter()
-        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, logits, logits_warper, do_sample)
         self.verify_time_per_iter.append(time.perf_counter()-start_time)
         
         # tokenize id to text for visualization
@@ -261,7 +290,7 @@ class ProfileSDWrapper(SDWrapper):
         self.profile_data['accept_len'].append(accept_len)
         # logging
         logging.debug(
-            f"Total: {len(list(preorder_iter(root)))},"\
+            f"Total: {tree.size()},"\
             f"\tPredicted ({accept_len}/{total_len}): {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
         )
         
