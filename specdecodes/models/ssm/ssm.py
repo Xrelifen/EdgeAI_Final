@@ -105,7 +105,7 @@ class SSMBase(nn.Module):
         pass
 
     def init_draft_parameters(self):
-        self.depth = 6 + 1
+        self.max_depth = 6 + 1
         self.topk_len = 10
         self.min_accept_prob = 1e-2 #! Not used
         self.max_tokens = 64
@@ -190,7 +190,6 @@ class SSMBase(nn.Module):
 
         return token_ids, topk_probs, parent_indices, valid_flag
 
-
 class SSMBaseNEFT(SSMBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -217,11 +216,12 @@ class SSMBaseNEFT(SSMBase):
             handle.deactivate_hook()
 
 class TreeMaskCache(nn.Module):
-    def __init__(self, prefix_len: int, sample_len: int, max_sample_cnt: int, dtype: str, device: str):
+    def __init__(self, prefix_len: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
         super().__init__()
         self.prefix_len = prefix_len
         self.sample_len = sample_len
-        self.max_cache_len = prefix_len + sample_len * max_sample_cnt
+        self.max_sample_depth = max_sample_depth
+        self.max_cache_len = prefix_len + sample_len * max_sample_depth
         self.dtype = dtype
         self.device = device
         
@@ -277,7 +277,7 @@ class SSM_Classic(SSMBaseNEFT):
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
             sample_len=self.topk_len,
-            max_sample_cnt=self.topk_len*self.depth,
+            max_sample_depth=self.max_depth,
             dtype=dtype,
             device=device,
         )
@@ -298,7 +298,7 @@ class SSM_Classic(SSMBaseNEFT):
             sampled_probs = torch.softmax(logits, dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.depth):
+        for depth_i in range(1, self.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -318,7 +318,7 @@ class SSM_Classic(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
             #         break
             
             # --------------------------------------
@@ -402,7 +402,7 @@ class SSM_Eagle(SSMBaseNEFT):
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
             sample_len=self.topk_len,
-            max_sample_cnt=self.topk_len*self.depth,
+            max_sample_depth=self.max_depth,
             dtype=dtype,
             device=device,
         )
@@ -425,7 +425,7 @@ class SSM_Eagle(SSMBaseNEFT):
             sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.depth):
+        for depth_i in range(1, self.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -442,7 +442,7 @@ class SSM_Eagle(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
             #         break
             
             # --------------------------------------
