@@ -121,7 +121,7 @@ def load_model(
 
 def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_file,
              max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False):
-    model, tokenizer = load_model(llm_path, ssm_path, out_dir=out_dir, dtype=dtype, device="cuda", args=args)
+    model, tokenizer = load_model(llm_path, ssm_path, out_dir=out_dir, dtype=dtype, device="auto", args=args)
 
     # Warm up the model
     for i in trange(10, desc='Warming up'):
@@ -170,12 +170,12 @@ if __name__ == "__main__":
         "--cache-impl",
         type=str,
         choices=["dynamic", "static"],
-        default="dynamic"
+        default="static"
     )
     parser.add_argument(
         "--compile-mode",
         type=str,
-        default='eager',
+        default='max-autotune',
         choices=["eager", 'reduce-overhead', 'max-autotune']
     )
     
@@ -190,6 +190,12 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Number of top draft nodes to keep on each draft iteration",
+    )
+    parser.add_argument(
+        "--max-verify-tokens",
+        type=int,
+        default=64,
+        help="Number of draft tokens to be verified at once.",
     )
     parser.add_argument(
         "--min-accept-prob",

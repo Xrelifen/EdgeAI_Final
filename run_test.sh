@@ -55,6 +55,7 @@ TEMPERATURE=0
 # drafting parameters
 DRAFT_MAX_DEPTH=6
 DRAFT_TOPK_LEN=10
+DRAFT_MAX_VERIFY_TOKENS=64
 DRAFT_MIN_ACCEPT_PROB=1e-2
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
@@ -87,6 +88,7 @@ args=(
   --compile-mode "$COMPILE_MODE"
   --max-depth "$DRAFT_MAX_DEPTH"
   --topk-len "$DRAFT_TOPK_LEN"
+  --max-verify-tokens "$DRAFT_MAX_VERIFY_TOKENS"
   --min-accept-prob "$DRAFT_MIN_ACCEPT_PROB"
 )
 

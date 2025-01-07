@@ -252,6 +252,12 @@ if __name__ == "__main__":
         help="Number of top draft nodes to keep on each draft iteration",
     )
     parser.add_argument(
+        "--max-verify-tokens",
+        type=int,
+        default=64,
+        help="Number of draft tokens to be verified at once.",
+    )
+    parser.add_argument(
         "--min-accept-prob",
         type=float,
         default=1e-2,
