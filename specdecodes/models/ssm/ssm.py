@@ -4,19 +4,18 @@ from torch.nn import functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils import is_torchdynamo_compiling
 from safetensors.torch import load_model
-import math, os
+import os
 from typing import List, Tuple
-from torch import Tensor
 import nvtx
 
 from .training_hooks import TrainingHook, NEFTuneHook
 
 from ..utils import invert_mask
-from ..llm import modeling_llama_no_init_weights as modeling_llama
+from ..llm import modeling_llama as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
 from ..cpu_tree import Tree
      
-def load_custom_model(model, model_path):
+def load_custom_model(model, model_path, keep_embeddings=False):
     # Load the model
     missing_keys, unexpected_keys = load_model(model, model_path, strict=False)
     
@@ -24,7 +23,8 @@ def load_custom_model(model, model_path):
     for key in missing_keys:
         if 'embed_tokens' in key:
             print(f"embed_tokens not found. Use LLM's embed_tokens instead.")
-            del model.model.embed_tokens
+            if not keep_embeddings:
+                del model.model.embed_tokens
     missing_keys = [key for key in missing_keys if 'embed_tokens' not in key]
     
     # error handling
@@ -64,9 +64,6 @@ class SSMBase(nn.Module):
         # Initialize additional modules
         self.init_additional_modules(config)
         
-        # Draft parameters
-        self.init_draft_parameters()
-        
     @classmethod
     def from_pretrained(
         cls, 
@@ -74,6 +71,7 @@ class SSMBase(nn.Module):
         *model_args,
         config = None,
         torch_dtype=torch.float32,
+        keep_embeddings = False,
         **model_kwargs
     ):
         # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
@@ -83,8 +81,8 @@ class SSMBase(nn.Module):
         # Load HuggingFace model if config is not provided
         if config is not None: 
             draft_model_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-            model = cls(None, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs)
-            model = load_custom_model(model, draft_model_path)
+            model = cls(None, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, keep_embeddings=keep_embeddings, *model_args, **model_kwargs)
+            model = load_custom_model(model, draft_model_path, keep_embeddings=keep_embeddings)
         
         else:
             ssm = AutoModelForCausalLM.from_pretrained(
@@ -103,12 +101,6 @@ class SSMBase(nn.Module):
     
     def init_additional_modules(self, config):
         pass
-
-    def init_draft_parameters(self):
-        self.max_depth = 6 + 1
-        self.topk_len = 10
-        self.min_accept_prob = 1e-2 #! Not used
-        self.max_tokens = 64
         
     def get_input_embeddings(self):
         # If the model has input embeddings, return it. Otherwise, return None
@@ -116,6 +108,11 @@ class SSMBase(nn.Module):
             return self.model.embed_tokens
         else:
             return None
+    
+    @torch.no_grad()
+    def prefill_forward(self, input_ids, *model_args, **kwargs):
+        # This function can be modified to act differently specifically on prefill stage.
+        return self(input_ids, *model_args, **kwargs)
         
     @torch.no_grad()
     def forward(self, input_ids, *model_args, **kwargs):
@@ -172,7 +169,7 @@ class SSMBase(nn.Module):
         with nvtx.annotate("sampling_3"):
             # Perform top-k sampling
             topk_probs, topk_indices = torch.topk(
-                flattened_probs, sample_k, dim=1, sorted=True#False#largest=True, sorted=True
+                flattened_probs, sample_k, dim=1, sorted=False
             )  # Both shape: [sample_k]
         
         with nvtx.annotate("sampling_4"):
@@ -319,13 +316,12 @@ class TreeData(nn.Module):
         return (self.token_ids_data, self.child_probs_data, self.parent_indices_data)
 
 
-class TreeMaskCache(nn.Module):
-    def __init__(self, prefix_len: int, sample_len: int, max_sample_depth: int, dtype: str, device: str):
+class TreeMaskCache:
+    def __init__(self, prefix_len: int, sample_len: int, max_cache_len: int, dtype: str, device: str):
         super().__init__()
         self.prefix_len = prefix_len
         self.sample_len = sample_len
-        self.max_sample_depth = max_sample_depth
-        self.max_cache_len = prefix_len + sample_len * max_sample_depth
+        self.max_cache_len = max_cache_len
         self.dtype = dtype
         self.device = device
         
@@ -346,14 +342,14 @@ class TreeMaskCache(nn.Module):
 
         # create an eye block for later use
         self.eye_block = torch.eye(self.sample_len, device=device, dtype=torch.bool)[None, None]
-        
-        
+    
     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
         self.tree_mask_cache[..., :self.current_len] = self.tree_mask_cache[..., parent_indices[0], :self.current_len]
-        self.tree_mask_cache[..., self.current_len:self.current_len+self.sample_len] = self.eye_block
+        self.tree_mask_cache[..., self.current_len:self.current_len + self.sample_len] = self.eye_block
+        # Update the current length
         self.current_len += self.sample_len
-        
-        return invert_mask(self.tree_mask_cache[..., :self.current_len], dtype=self.dtype)
+        # Invert the mask and return
+        return invert_mask(self.tree_mask_cache, dtype=self.dtype)
 
     
 class SSM_Classic(SSMBaseNEFT):
@@ -365,19 +361,20 @@ class SSM_Classic(SSMBaseNEFT):
         return logits
     
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
+    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, max_cache_len=None, *model_args, **kwargs):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
         batch_size, org_input_len = input_ids.shape
+        kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
         tree_data = TreeData(
             root_id,
-            sample_len=self.topk_len,
-            max_sample_depth=self.max_depth,
+            sample_len=self.draft_params.topk_len,
+            max_sample_depth=self.draft_params.max_depth,
             dtype=dtype,
             device=device,
         )
@@ -385,29 +382,34 @@ class SSM_Classic(SSMBaseNEFT):
         # 3) Initialize tree mask cache for draft model inference
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
-            sample_len=self.topk_len,
-            max_sample_depth=self.max_depth,
+            sample_len=self.draft_params.topk_len,
+            max_cache_len=max_cache_len, #org_input_len + self.draft_params.topk_len * self.draft_params.max_depth,
             dtype=dtype,
             device=device,
         )
 
-        # 4) Initialize parent probabilities & position ids
-        parent_probs = torch.tensor([[1.0]], device=device, dtype=dtype)
-        position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+        # 4) Initialize parent probabilities & position ids & cache_position
+        with nvtx.annotate("init parent_probs & position_ids"):
+            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
+            cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
-            kv_len = past_key_values.get_seq_length()
-            logits = self(
+            logits = self.prefill_forward(
                 input_ids[:, kv_len:],
                 past_key_values=past_key_values,
+                cache_position=cache_position,
             )[:, -1:] # keep only the last hidden state
+            
+            next_idx = cache_position[-1] + 1
+            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
 
         with nvtx.annotate("softmax"):
             sampled_probs = torch.softmax(logits, dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.max_depth):
+        for depth_i in range(self.draft_params.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -415,8 +417,8 @@ class SSM_Classic(SSMBaseNEFT):
                 token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
                     sampled_probs,
                     parent_probs,
-                    self.topk_len, 
-                    self.min_accept_prob
+                    self.draft_params.topk_len, 
+                    self.draft_params.min_accept_prob
                 )
                 parent_probs = child_probs
             
@@ -427,7 +429,7 @@ class SSM_Classic(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
             #         break
             
             # --------------------------------------
@@ -448,9 +450,9 @@ class SSM_Classic(SSMBaseNEFT):
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     attention_mask=tree_attention_mask,
-                    *model_args,
-                    **kwargs
+                    cache_position=cache_position,
                 )
+                cache_position += self.draft_params.topk_len
 
             with nvtx.annotate("softmax"):
                 sampled_probs = torch.softmax(logits, dim=-1)
@@ -464,12 +466,10 @@ class SSM_Classic(SSMBaseNEFT):
         tree.add_nodes(*tree_data.get_data())
         
         # Prune to top-n
-        tree.prune_to_top_n(self.max_tokens)
+        tree.prune_to_top_n(self.draft_params.max_verify_tokens)
         
         return tree
 
-
-# torch.set_float32_matmul_precision('high')
 
 class SSM_Eagle(SSMBaseNEFT):
     def init_custom_model(self, config):
@@ -489,7 +489,7 @@ class SSM_Eagle(SSMBaseNEFT):
         return hidden_states
     
     @torch.no_grad()
-    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, *model_args, **kwargs):
+    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, max_cache_len=None, *model_args, **kwargs):
         # 1-1) Obtain necessary parameters
         device = input_ids.device
         if hasattr(self.model, "lm_head"):
@@ -500,14 +500,15 @@ class SSM_Eagle(SSMBaseNEFT):
         # 1-2) Remove the first token from input_ids (shift by 1)
         input_ids = input_ids[:, 1:]
         batch_size, org_input_len = input_ids.shape
+        kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
         tree_data = TreeData(
             root_id,
-            sample_len=self.topk_len,
-            max_sample_depth=self.max_depth,
+            sample_len=self.draft_params.topk_len,
+            max_sample_depth=self.draft_params.max_depth,
             dtype=dtype,
             device=device,
         )
@@ -516,32 +517,36 @@ class SSM_Eagle(SSMBaseNEFT):
         with nvtx.annotate("init tree mask cache"):
             tree_mask_cache = TreeMaskCache(
                 prefix_len=org_input_len,
-                sample_len=self.topk_len,
-                max_sample_depth=self.max_depth,
+                sample_len=self.draft_params.topk_len,
+                max_cache_len=max_cache_len,
                 dtype=dtype,
                 device=device,
             )
 
-        # 4) Initialize parent probabilities & position ids
+        # 4) Initialize parent probabilities & position ids & cache_position
         with nvtx.annotate("init parent_probs & position_ids"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.topk_len), org_input_len, device=device, dtype=torch.long)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
+            cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
-            kv_len = past_key_values.get_seq_length()
-            hidden_states = self(
+            hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 hidden_states=hidden_states,
                 embed_tokens=embed_tokens,
                 past_key_values=past_key_values,
+                cache_position=cache_position,
             )[:, -1:] # keep only the last hidden state
+            
+            next_idx = cache_position[-1] + 1
+            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
 
         with nvtx.annotate("softmax"):
             sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
         
         # 6) Main loop
-        for depth_i in range(1, self.max_depth):
+        for depth_i in range(self.draft_params.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
@@ -549,8 +554,8 @@ class SSM_Eagle(SSMBaseNEFT):
                 token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
                     sampled_probs,
                     parent_probs,
-                    self.topk_len, 
-                    self.min_accept_prob
+                    self.draft_params.topk_len, 
+                    self.draft_params.min_accept_prob
                 )
                 parent_probs = child_probs
             
@@ -558,7 +563,7 @@ class SSM_Eagle(SSMBaseNEFT):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
             #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.max_depth}")
+            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
             #         break
             
             # --------------------------------------
@@ -586,9 +591,9 @@ class SSM_Eagle(SSMBaseNEFT):
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     attention_mask=tree_attention_mask,
-                    *model_args,
-                    **kwargs
+                    cache_position=cache_position,
                 )
+                cache_position += self.draft_params.topk_len
 
             with nvtx.annotate("softmax"):
                 sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
@@ -602,6 +607,6 @@ class SSM_Eagle(SSMBaseNEFT):
         tree.add_nodes(*tree_data.get_data())
         
         # Prune to top-n
-        tree.prune_to_top_n(self.max_tokens)
+        tree.prune_to_top_n(self.draft_params.max_verify_tokens)
         
         return tree

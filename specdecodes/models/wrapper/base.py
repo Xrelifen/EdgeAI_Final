@@ -4,12 +4,15 @@ import torch.nn as nn
 from transformers.generation.logits_process import LogitsWarper, LogitsProcessorList, TemperatureLogitsWarper, TopKLogitsWarper, TopPLogitsWarper, LogitNormalization
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList, MaxLengthCriteria, MaxTimeCriteria, EosTokenCriteria
 
+#from transformers.cache_utils import DynamicCache, StaticCache
+from .cache_utils import TreeDynamicCache, TreeStaticCache # Added extra functions to support tree decoding
 
 # https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py
 # Several functions are form class GenerationMixin, simplified.
 class WrapperBase(nn.Module):
-    def __init__(self):
+    def __init__(self, cache_implementation="dynamic"):
         super(WrapperBase, self).__init__()
+        self.cache_implementation = cache_implementation
         
     # calling .config is same as calling .llm.config
     @property
@@ -165,3 +168,22 @@ class WrapperBase(nn.Module):
             do_sample=do_sample,
         )
         return results
+    
+    def create_kv_cache(
+        self,
+        max_cache_len,
+        max_batch_size,
+        config,
+        device,
+        dtype,
+    ):
+        if self.cache_implementation == "dynamic":
+            return TreeDynamicCache()
+        elif self.cache_implementation == "static":
+            return TreeStaticCache(
+                max_cache_len=max_cache_len,
+                max_batch_size=max_batch_size,
+                config=config,
+                device=device,
+                dtype=dtype,
+            )

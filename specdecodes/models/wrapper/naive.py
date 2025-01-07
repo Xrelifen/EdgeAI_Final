@@ -9,8 +9,8 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 from transformers.cache_utils import StaticCache, DynamicCache
 
 class NaiveWrapper(WrapperBase):
-    def __init__(self):
-        super(NaiveWrapper, self).__init__()
+    def __init__(self, *model_args, **kwargs):
+        super().__init__(*model_args, **kwargs)
  
     def _generate(
         self,
@@ -20,15 +20,23 @@ class NaiveWrapper(WrapperBase):
         do_sample: bool,
     ):
         assert self.llm is not None, "LLM model must be provided"
-
-        # * clone input_ids 
+        
+        # * clone input_ids
         input_ids = input_ids.clone()
 
-        # * prepare kv-cache
-        llm_past_key_values = DynamicCache()
+        # * prepare kv-cache and cache position
+        llm_past_key_values = self.create_kv_cache(
+            max_cache_len=stopping_criteria.max_length,
+            max_batch_size=1,
+            config=self.llm.model.config,
+            device=input_ids.device,
+            dtype=self.llm.model.dtype,
+        )
+        cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
         
         # * prefill stage
-        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True)
+        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
+        cache_position = cache_position[-1:] + 1
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
@@ -44,7 +52,8 @@ class NaiveWrapper(WrapperBase):
 
         finished = False
         while not finished:
-            outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True)
+            outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
+            cache_position += 1
         
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # We keep the seq_len axis considering cases of multiple tokens.
@@ -63,8 +72,8 @@ class NaiveWrapper(WrapperBase):
         return input_ids
     
 class ProfileNaiveWrapper(NaiveWrapper):
-    def __init__(self):
-        super(ProfileNaiveWrapper, self).__init__()
+    def __init__(self, *model_args, **kwargs):
+        super().__init__(*model_args, **kwargs)
         self.exp_log = {}
 
     def _generate(

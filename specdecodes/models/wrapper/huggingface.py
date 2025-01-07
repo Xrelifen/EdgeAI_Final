@@ -2,8 +2,8 @@ import torch
 from .base import WrapperBase
 
 class HuggingFaceWrapper(WrapperBase):
-    def __init__(self):
-        super(HuggingFaceWrapper, self).__init__()
+    def __init__(self, *model_args, **kwargs):
+        super().__init__(*model_args, **kwargs)
     
     def generate(
         self, 
@@ -15,6 +15,7 @@ class HuggingFaceWrapper(WrapperBase):
     ):
         assert self.llm is not None, "LLM model must be provided"
         
+        self.llm.generate.cache_implementation = self.cache_implementation
         return self.llm.generate(
             input_ids=input_ids,
             temperature=temperature,

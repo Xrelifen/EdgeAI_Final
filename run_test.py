@@ -1,24 +1,26 @@
 import torch
+from tqdm import trange
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from copy import deepcopy
 import argparse
 import time
 import os
 import logging
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import specdecodes.models.llm.modeling_llama as modeling_llama
+# from transformers.models.llama import modeling_llama
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle
+from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle
 
 import nvtx
 
 def load_model(
     llm_path: str,
     ssm_path: str,
-    mode: str,
-    profile_mode: bool = False,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
+    args: dict = {},
     ):
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
@@ -29,8 +31,11 @@ def load_model(
         llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
-        device_map=device
+        device_map=device,
+        _attn_implementation="sdpa",
     )
+    ssm = None
+    
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
@@ -39,44 +44,76 @@ def load_model(
     else:
         draft_config = None
 
-    if mode == "naive":
-        model = ProfileNaiveWrapper() if profile_mode else NaiveWrapper()
+    if args.mode == "naive":
+        model = ProfileNaiveWrapper() if args.logging else NaiveWrapper()
         
-    elif mode == "hf":
+    elif args.mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif mode == "sd-classic":
-        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
+    elif args.mode.split("-")[0] == "sd":
+        draft_params = DraftParams(
+            max_depth=args.max_depth,
+            topk_len=10,
+            min_accept_prob=0.01
+        )
+        print("Draft params:", draft_params)
         
-        # load SSM
-        ssm = SSM_Classic.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
+        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
         
-    elif mode == "sd-eagle":
-        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
+        if args.mode == "sd-classic":
+            # load SSM
+            ssm = SSM_Classic.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         
-        # load SSM
-        ssm = SSM_Eagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-            keep_embeddings=True,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        elif args.mode == "sd-eagle":
+            # load SSM
+            if args.compile_mode != 'eager':
+                ssm = SSM_Eagle.from_pretrained(
+                    ssm_path,
+                    config=draft_config,
+                    eos_token_id=tokenizer.eos_token_id,
+                    torch_dtype=dtype,
+                    keep_embeddings=True,
+                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+                # Duplicate embed_tokens for torch.compile to work.
+                ssm.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
+            else:
+                ssm = SSM_Eagle.from_pretrained(
+                    ssm_path,
+                    config=draft_config,
+                    eos_token_id=tokenizer.eos_token_id,
+                    torch_dtype=dtype,
+                    keep_embeddings=False,
+                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        else:
+            raise ValueError("Invalid sd mode.")
+        
         model.set_ssm(ssm)
         
     else:
         raise ValueError("Invalid mode.")
-    
+
     # set model
+    model.cache_implementation = args.cache_impl
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
+    
+    if args.compile_mode != 'eager':
+        print("Running with Torch Inductor...")
+        # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
+        torch._dynamo.config.capture_scalar_outputs = True
+        torch.set_float32_matmul_precision('high')
+        
+        llm.prefill_forward = llm.forward
+        llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
+        if ssm is not None:
+            ssm.prefill_forward = ssm.forward
+            ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, fullgraph=True)
     
     return model, tokenizer
 
@@ -90,25 +127,26 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.profile)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=torch.float16, device="auto", args=args)
 
     # warm up
     if not args.no_warm_up:
-        print("Warming up model...")
-
-        # input message
-        system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-        input_message = "Hello."
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": input_message},
-        ]
-        with nvtx.annotate("Warm up"):
-            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
-
-    # generate response
-    print("Generating response...")
+        print("Warming up... It will take some time for the first few iterations to run.")
+        with nvtx.annotate("Warming up model ..."):
+            model.disable_logging = True
+            for i in trange(5, desc='Warming up'):
+                # input message
+                system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+                input_message = f"Generate a extremely long article about William Shakespeare, version {i}"
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": input_message},
+                ]
+                with nvtx.annotate("Warm up"):
+                    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+                    with sdpa_kernel(backends=[SDPBackend.MATH]):
+                        _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+            model.disable_logging = False
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
@@ -121,9 +159,13 @@ def main(args):
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
     prompt = tokenizer.decode(input_ids[0])
     
+    # generate response
+    print("Generating response...")
+    torch.cuda.cudart().cudaProfilerStart() # start profiling from here
     start_time = time.time()
     with nvtx.annotate("Generate"):
-        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+        with sdpa_kernel(backends=[SDPBackend.MATH]):
+            output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     end_time = time.time()
     
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
@@ -185,10 +227,43 @@ if __name__ == "__main__":
         default="naive",
         help="The mode of model generation.",
     )
+    
     parser.add_argument(
-        "--profile",
+        "--cache-impl",
+        type=str,
+        choices=["dynamic", "static"],
+        default="dynamic"
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default='eager',
+        choices=["eager", 'reduce-overhead', 'max-autotune']
+    )
+    
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=6,
+        help="Max number of draft iterations",
+    )
+    parser.add_argument(
+        "--topk-len",
+        type=int,
+        default=10,
+        help="Number of top draft nodes to keep on each draft iteration",
+    )
+    parser.add_argument(
+        "--min-accept-prob",
+        type=float,
+        default=1e-2,
+        help="All draft nodes should have probs higher than this value. (Currently not used)",
+    )
+    
+    parser.add_argument(
+        "--logging",
         action="store_true",
-        help="Profile the model.",
+        help="Log output of the model.",
     )
     parser.add_argument(
         "-nw",

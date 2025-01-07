@@ -4,27 +4,24 @@ import os
 import time
 import numpy as np
 import torch
-from .base import WrapperBase
-
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
-
 import prettytable as pt
-
-from ..utils import TreeDynamicCache
+from .base import WrapperBase
+from ..utils import DraftParams
 
 import nvtx
 
-
 class SDWrapper(WrapperBase):
-    def __init__(self, method="greedy"):
-        super().__init__()
-        self.method = method
+    def __init__(self, draft_params: DraftParams = None, *model_args, **kwargs):
+        super().__init__(*model_args, **kwargs)
+        self.draft_params = DraftParams() if draft_params is None else draft_params
     
     def set_ssm(self, ssm):
         self.ssm = ssm
+        self.ssm.draft_params = self.draft_params
     
-    def _speculate(self, input_ids, hidden_states, past_key_values):
+    def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
         if hasattr(self.ssm, "lm_head"):
             lm_head = self.ssm.lm_head
@@ -37,9 +34,10 @@ class SDWrapper(WrapperBase):
             past_key_values=past_key_values,
             embed_tokens=self.llm.get_input_embeddings(), 
             lm_head=lm_head,
+            max_cache_len=max_cache_len,
         )
 
-    def _tree_decoding(self, tree, past_key_values, position_offset, device, dtype=torch.float32):
+    def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
         # Preparing llm's tree decoding data, also updates each node's index (node.ind).
         node_data = tree.get_node_data()
         tree_input_ids = node_data['token_ids']
@@ -51,6 +49,12 @@ class SDWrapper(WrapperBase):
         tree_position_ids = tree_position_ids.to(device, non_blocking=True)
         tree_mask = tree_mask.to(device, non_blocking=True)
         
+        # Assing to tree mask
+        tree_mask_base[:, :, :, :tree_mask.shape[3]] = tree_mask
+        
+        #invert
+        tree_mask = (~tree_mask_base).to(torch.float16) * torch.finfo(torch.float16).min
+        
         # llm forward
         #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
         outputs = self.llm(
@@ -59,8 +63,8 @@ class SDWrapper(WrapperBase):
             attention_mask=tree_mask,
             position_ids=tree_position_ids.unsqueeze(0),
             output_hidden_states=True,
+            cache_position=cache_position
         )
-        
         return outputs
     
     def _verify_step(self, p, q, token_ids, do_sample):
@@ -168,12 +172,35 @@ class SDWrapper(WrapperBase):
         input_ids = input_ids.clone()
 
         # * prepare kv-cache
-        llm_past_key_values = TreeDynamicCache()
-        ssm_past_key_values = TreeDynamicCache()
+        llm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_verify_tokens # Add extra space for verifying
+        llm_past_key_values = self.create_kv_cache(
+            max_cache_len=llm_max_cache_len,
+            max_batch_size=1,
+            config=self.llm.model.config,
+            device=input_ids.device,
+            dtype=self.llm.model.dtype,
+        )
+        ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
+        ssm_past_key_values = self.create_kv_cache(
+            max_cache_len=ssm_max_cache_len,
+            max_batch_size=1,
+            config=self.ssm.model.config,
+            device=input_ids.device,
+            dtype=self.ssm.model.dtype,
+        )
+        tree_mask_base = torch.zeros(
+            [1, 1, self.draft_params.max_verify_tokens, llm_max_cache_len],
+            device=input_ids.device,
+            dtype=torch.bool,
+        )
+        cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True)
+            outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position)
+            
+            next_idx = cache_position[-1] + 1
+            cache_position = torch.arange(next_idx, next_idx+self.draft_params.max_verify_tokens, dtype=torch.long, device=input_ids.device)
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
         # (the clone itself is always small)
@@ -191,14 +218,16 @@ class SDWrapper(WrapperBase):
         with nvtx.annotate("decoding"):
             finished = False
             while not finished:
+                torch.compiler.cudagraph_mark_step_begin()
+                
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
+                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values, max_cache_len=ssm_max_cache_len)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = llm_past_key_values.get_seq_length()
-                    outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, device=hidden_states.device, dtype=hidden_states.dtype)
+                    outputs = self._tree_decoding(tree, tree_mask_base, llm_past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
                 
                 # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
                 # We keep the seq_len axis considering cases of multiple tokens.
@@ -221,11 +250,12 @@ class SDWrapper(WrapperBase):
                     hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
                 
 
-                # * update input_ids, hidden_states, and kv-cache
-                with nvtx.annotate("update_cache"):
+                # * update input_ids, hidden_states, kv-cache, and cache_position
+                with nvtx.annotate("update_data"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
                     hidden_states = hidden_states[:, hidden_indices].clone()
-                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, dim=2)
+                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
+                    cache_position += sampled_tokens.shape[1]
                 
                 # * check stopping criteria
                 finished = stopping_criteria(input_ids, None)
@@ -234,8 +264,8 @@ class SDWrapper(WrapperBase):
     
 
 class ProfileSDWrapper(SDWrapper):
-    def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
-        super().__init__(method)
+    def __init__(self, out_dir="specdecodes/experiments/profile_data", prefix="sd", *model_args, **kwargs):
+        super().__init__(*model_args, **kwargs)
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
         self.iter_count = 1 # assume first step is done (prefill stage)
@@ -248,19 +278,30 @@ class ProfileSDWrapper(SDWrapper):
         self.target_time_per_iter = []
         self.verify_time_per_iter = []
         
-    def _speculate(self, input_ids, hidden_states, past_key_values):
+        self.disable_logging = False
+        
+    def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
+        if self.disable_logging:
+            return super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
+        
         start_time = time.perf_counter()
-        root = super()._speculate(input_ids, hidden_states, past_key_values)
+        root = super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
         self.draft_time_per_iter.append(time.perf_counter()-start_time)
         return root
     
-    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+    def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
+        if self.disable_logging:
+            return super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
+        
         start_time = time.perf_counter()
-        outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
+        outputs = super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
         self.target_time_per_iter.append(time.perf_counter()-start_time)
         return outputs
     
     def _verify(self, tree, logits, logits_warper, do_sample):
+        if self.disable_logging:
+            return super()._verify(tree, logits, logits_warper, do_sample)
+        
         start_time = time.perf_counter()
         sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, logits, logits_warper, do_sample)
         self.verify_time_per_iter.append(time.perf_counter()-start_time)
@@ -306,8 +347,10 @@ class ProfileSDWrapper(SDWrapper):
         logits_warper: LogitsWarper,
         do_sample: bool,
     ):
-        cur_time = time.strftime("%Y%m%d-%H%M%S")
+        if self.disable_logging:
+            return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
         
+        cur_time = time.strftime("%Y%m%d-%H%M%S")
         # prepare output directory
         if self.out_dir is not None:
             os.makedirs(self.out_dir, exist_ok=True)
