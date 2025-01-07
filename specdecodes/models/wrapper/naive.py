@@ -35,7 +35,7 @@ class NaiveWrapper(WrapperBase):
         cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
         
         # * prefill stage
-        outputs = self.llm(input_ids, past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
+        outputs = self.llm.prefill_forward(input_ids, past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
         cache_position = cache_position[-1:] + 1
         
         # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
