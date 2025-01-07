@@ -100,9 +100,7 @@ def load_model(
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
-    
-    llm.prefill_forward = llm.forward
-    ssm.prefill_forward = ssm.forward
+        
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
         # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning

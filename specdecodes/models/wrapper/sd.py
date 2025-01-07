@@ -20,6 +20,7 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
         self.ssm.draft_params = self.draft_params
+        self.ssm.prefill_forward = self.ssm.forward
     
     def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
         # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head

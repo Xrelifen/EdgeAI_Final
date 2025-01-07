@@ -25,6 +25,7 @@ class WrapperBase(nn.Module):
     
     def set_llm(self, llm):
         self.llm = llm
+        self.llm.prefill_forward = self.llm.forward
         
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
