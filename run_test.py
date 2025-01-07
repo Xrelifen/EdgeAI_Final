@@ -51,15 +51,6 @@ def load_model(
         model = HuggingFaceWrapper()
         
     elif args.mode.split("-")[0] == "sd":
-        draft_params = DraftParams(
-            max_depth=args.max_depth,
-            topk_len=10,
-            min_accept_prob=0.01
-        )
-        print("Draft params:", draft_params)
-        
-        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
-        
         if args.mode == "sd-classic":
             # load SSM
             ssm = SSM_Classic.from_pretrained(
@@ -68,7 +59,6 @@ def load_model(
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        
         elif args.mode == "sd-eagle":
             # load SSM
             if args.compile_mode != 'eager':
@@ -91,7 +81,15 @@ def load_model(
                 ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         else:
             raise ValueError("Invalid sd mode.")
+
+        draft_params = DraftParams(
+            max_depth=args.max_depth,
+            topk_len=10,
+            min_accept_prob=0.01
+        )
+        print("Draft params:", draft_params)
         
+        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
         model.set_ssm(ssm)
         
     else:
@@ -103,16 +101,16 @@ def load_model(
     model.set_llm(llm)
     model.eval()
     
+    llm.prefill_forward = llm.forward
+    ssm.prefill_forward = ssm.forward
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
         # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
         torch._dynamo.config.capture_scalar_outputs = True
         torch.set_float32_matmul_precision('high')
         
-        llm.prefill_forward = llm.forward
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
         if ssm is not None:
-            ssm.prefill_forward = ssm.forward
             ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, fullgraph=True)
     
     return model, tokenizer
@@ -134,7 +132,7 @@ def main(args):
         print("Warming up... It will take some time for the first few iterations to run.")
         with nvtx.annotate("Warming up model ..."):
             model.disable_logging = True
-            for i in trange(5, desc='Warming up'):
+            for i in trange(10, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                 input_message = f"Generate a extremely long article about William Shakespeare, version {i}"

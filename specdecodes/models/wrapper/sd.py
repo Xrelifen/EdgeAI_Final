@@ -197,7 +197,7 @@ class SDWrapper(WrapperBase):
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            outputs = self.llm(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position)
+            outputs = self.llm.prefill_forward(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position)
             
             next_idx = cache_position[-1] + 1
             cache_position = torch.arange(next_idx, next_idx+self.draft_params.max_verify_tokens, dtype=torch.long, device=input_ids.device)
