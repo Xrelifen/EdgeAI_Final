@@ -6,68 +6,132 @@ import random
 import os
 import json
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
+
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
-from ..models import modeling_llama
+from ..models import DraftParams, modeling_llama
 
 # Set random seed for reproducibility
 torch.manual_seed(0)
 random.seed(0)
 
-def load_model(llm_path, ssm_path, mode, layers, out_dir=None, dtype=torch.float16, device="auto"):
-    # Load tokenizer and LLM
+def load_model(
+    llm_path: str,
+    ssm_path: str,
+    out_dir=None,
+    dtype: torch.dtype = torch.float16,
+    device: str = "auto",
+    args: dict = {},
+    ):
+    # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
-    llm = modeling_llama.LlamaForCausalLM.from_pretrained(llm_path, torch_dtype=dtype, low_cpu_mem_usage=True, device_map=device)
-
-    # Prepare SSM configuration
-    draft_config = deepcopy(llm.config) if os.path.exists(ssm_path) else None
-    if draft_config:
-        draft_config.num_hidden_layers = layers
+    
+    # load LLM
+    # llm = AutoModelForCausalLM.from_pretrained(
+    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+        llm_path, 
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+        device_map=device,
+        _attn_implementation="sdpa",
+    )
+    ssm = None
+    
+    # check if ssm_path directory exists
+    if os.path.exists(ssm_path):
+        draft_config = deepcopy(llm.config)
+        draft_config.num_hidden_layers = 1
         
-    # compress
-    # draft_config.compress_hidden_ratio = 0.5
-    # draft_config.compress_intermediate_ratio = 0.5
+    else:
+        draft_config = None
 
-    # Select model wrapper
-    wrappers = {
-        "naive": ProfileNaiveWrapper, # NaiveWrapper,
-        "hf": HuggingFaceWrapper,
-        "sd-classic": lambda: ProfileSDWrapper(out_dir=out_dir),
-        "sd-eagle": lambda: ProfileSDWrapper(out_dir=out_dir),
-        "sd-shrinkeagle": lambda: ProfileSDWrapper(out_dir=out_dir),
-    }
-    model = wrappers.get(mode, lambda: ValueError("Invalid mode"))()
-
-    # Load SSM if required
-    if mode.startswith("sd"):
-        ssms = {
-            "sd-classic": SSM_Classic,
-            "sd-eagle": SSM_Eagle,
-        }
-        ssm_cls = ssms.get(mode, lambda: ValueError("Invalid mode"))
-        ssm = ssm_cls.from_pretrained(ssm_path, config=draft_config,
-                                      eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
-        ssm = ssm.to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+    if args.mode == "naive":
+        model = ProfileNaiveWrapper()
+        
+    elif args.mode == "hf":
+        model = HuggingFaceWrapper() # should not work
+        
+    elif args.mode.split("-")[0] == "sd":
+        if args.mode == "sd-classic":
+            # load SSM
+            ssm = SSM_Classic.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        elif args.mode == "sd-eagle":
+            # load SSM
+            if args.compile_mode != 'eager':
+                ssm = SSM_Eagle.from_pretrained(
+                    ssm_path,
+                    config=draft_config,
+                    eos_token_id=tokenizer.eos_token_id,
+                    torch_dtype=dtype,
+                    keep_embeddings=True,
+                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+                # Duplicate embed_tokens for torch.compile to work.
+                ssm.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
+            else:
+                ssm = SSM_Eagle.from_pretrained(
+                    ssm_path,
+                    config=draft_config,
+                    eos_token_id=tokenizer.eos_token_id,
+                    torch_dtype=dtype,
+                    keep_embeddings=False,
+                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        else:
+            raise ValueError("Invalid sd mode.")
+        
+        draft_params = DraftParams(
+            max_depth=args.max_depth,
+            topk_len=10,
+            min_accept_prob=0.01
+        )
+        print("Draft params:", draft_params)
+        
+        model = ProfileSDWrapper(draft_params=draft_params, out_dir=out_dir)
         model.set_ssm(ssm)
+        
+    else:
+        raise ValueError("Invalid mode.")
 
+    # set model
+    model.cache_implementation = args.cache_impl
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
+    
+    llm.prefill_forward = llm.forward
+    ssm.prefill_forward = ssm.forward
+    if args.compile_mode != 'eager':
+        print("Running with Torch Inductor...")
+        # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
+        torch._dynamo.config.capture_scalar_outputs = True
+        torch.set_float32_matmul_precision('high')
+        
+        llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
+        if ssm is not None:
+            ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, fullgraph=True)
+    
     return model, tokenizer
 
-def run_eval(llm_path, ssm_path, mode, layers, out_dir, dataset, log_file,
+def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_file,
              max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False):
-    model, tokenizer = load_model(llm_path, ssm_path, mode, layers, out_dir, dtype=dtype, device="cuda")
+    model, tokenizer = load_model(llm_path, ssm_path, out_dir=out_dir, dtype=dtype, device="cuda", args=args)
 
     # Warm up the model
-    warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Hello."}]
-    input_ids = tokenizer.apply_chat_template(warmup_input, tokenize=True, add_generation_prompt=True,
-                                              return_tensors="pt").cuda()
-    model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
-
+    for i in trange(10, desc='Warming up'):
+        input_message = f"Generate a extremely long article about William Shakespeare, version {i}"
+        warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": input_message}]
+        input_ids = tokenizer.apply_chat_template(warmup_input, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+        with sdpa_kernel(backends=[SDPBackend.MATH]):
+            model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
+    
     tput_list, accept_rate_list = [], []
 
     # Evaluate dataset
@@ -77,9 +141,9 @@ def run_eval(llm_path, ssm_path, mode, layers, out_dir, dataset, log_file,
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": input_message}
         ]
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-                                                  return_tensors="pt").cuda()
-        output_ids = model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
+        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+        with sdpa_kernel(backends=[SDPBackend.MATH]):
+            output_ids = model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
         output = tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
         exp_log = {**model.exp_log, "query": input_message, "response": output}
@@ -88,7 +152,7 @@ def run_eval(llm_path, ssm_path, mode, layers, out_dir, dataset, log_file,
             f.write("\n")
 
         tput_list.append(exp_log.get("tput", 0))
-        if "sd" in mode:
+        if "sd" in args.mode:
             accept_rate_list.append(exp_log.get("avg_sampled", 0))
 
     avg_tput = np.mean(tput_list)
@@ -101,7 +165,40 @@ if __name__ == "__main__":
     parser.add_argument("--llm-path", "-llm", required=True, help="Path to LLM weights.")
     parser.add_argument("--ssm-path", "-ssm", default="", help="Path to SSM weights.")
     parser.add_argument("--mode", default="naive", help="Model mode.")
-    parser.add_argument("--layers", type=int, default=1, help="Number of SSM layers.")
+    
+    parser.add_argument(
+        "--cache-impl",
+        type=str,
+        choices=["dynamic", "static"],
+        default="dynamic"
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default='eager',
+        choices=["eager", 'reduce-overhead', 'max-autotune']
+    )
+    
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=6,
+        help="Max number of draft iterations",
+    )
+    parser.add_argument(
+        "--topk-len",
+        type=int,
+        default=10,
+        help="Number of top draft nodes to keep on each draft iteration",
+    )
+    parser.add_argument(
+        "--min-accept-prob",
+        type=float,
+        default=1e-2,
+        help="All draft nodes should have probs higher than this value. (Currently not used)",
+    )
+    
+    
     parser.add_argument("--out-dir", default="specdecodes/experiments/mt_bench/", help="Output directory.")
     parser.add_argument("--log-dir", default="specdecodes/experiments/result/", help="Experiment log directory.")
     parser.add_argument("--bench-name", default="mt_bench", help="Benchmark name.")
@@ -136,9 +233,8 @@ if __name__ == "__main__":
     for i in range(args.repeat):
         log_file = os.path.join(log_dir, f"{i}.jsonl")
         avg_tput, avg_accept_rate = run_eval(
-            args.llm_path, args.ssm_path, args.mode,
-            args.layers, args.out_dir, dataset, log_file, args.max_new_tokens, 
-            args.temp, str_to_torch_dtype(args.dtype), args.do_sample
+            args.llm_path, args.ssm_path, args.out_dir, args, dataset, log_file, 
+            args.max_new_tokens, temp=args.temp, dtype=str_to_torch_dtype(args.dtype), do_sample=args.do_sample
         )
         tput_list.append(avg_tput)
         accept_rate_list.append(avg_accept_rate)
