@@ -111,6 +111,9 @@ class SDWrapper(WrapperBase):
                 accept_len += 1
                 sampled_tokens = torch.cat([sampled_tokens, accept_token_id[None]])
                 hidden_indices = torch.cat([hidden_indices, cur_ind])
+                if accept_token_id == self.ssm.eos_token_id:
+                    break
+                
                 cur_ind = children_inds[children_token_ids == accept_token_id]
                 children_inds = tree.get_children_indices(cur_ind)
                 children_token_ids = token_ids[children_inds]
