@@ -66,9 +66,9 @@ CACHE_IMPL="static"
 # CACHE_IMPL="dynamic"
 
 # Compile mode options: ["eager", "reduce-overhead", "max-autotune"]
-COMPILE_MODE="eager"
+# COMPILE_MODE="eager"
 # COMPILE_MODE="reduce-overhead"
-# COMPILE_MODE="max-autotune"
+COMPILE_MODE="max-autotune"
 
 # NVTX profiling
 # NVTX_PROFILING=True
