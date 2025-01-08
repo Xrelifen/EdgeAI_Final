@@ -72,6 +72,8 @@ class ProfileNaiveWrapper(NaiveWrapper):
     def __init__(self, *model_args, **kwargs):
         super().__init__(*model_args, **kwargs)
         self.exp_log = {}
+        
+        self.disable_logging = False
 
     def _generate(
         self,
@@ -80,6 +82,9 @@ class ProfileNaiveWrapper(NaiveWrapper):
         logits_warper: LogitsWarper,
         do_sample: bool,
     ):
+        if self.disable_logging:
+            return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        
         # run generation
         org_input_len = len(input_ids[0])
         
