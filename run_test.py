@@ -155,15 +155,23 @@ def main(args):
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
     prompt = tokenizer.decode(input_ids[0])
     
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+                  
     # generate response
     print("Generating response...")
     torch.cuda.cudart().cudaProfilerStart() # start profiling from here
-    start_time = time.time()
+    start_event.record()
     with nvtx.annotate("Generate"):
         with sdpa_kernel(backends=[SDPBackend.MATH]):
             output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
-    end_time = time.time()
+    end_event.record()
     
+    # Ensure all CUDA kernels are done
+    torch.cuda.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
+    
+    total_time_s = start_event.elapsed_time(end_event) / 1000.0
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
     if not args.no_print_message:
@@ -176,7 +184,7 @@ def main(args):
         print("Output tokens:", len(output_ids[0][input_ids.shape[1]:]))
     
     if not args.no_print_time:
-        print("Time:", end_time - start_time)
+        print("Time:", total_time_s)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
