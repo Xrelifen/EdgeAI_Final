@@ -1,12 +1,9 @@
 import logging
-import time
 import torch
 from .base import WrapperBase
 
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
-
-from transformers.cache_utils import StaticCache, DynamicCache
 
 class NaiveWrapper(WrapperBase):
     def __init__(self, *model_args, **kwargs):
@@ -85,14 +82,25 @@ class ProfileNaiveWrapper(NaiveWrapper):
     ):
         # run generation
         org_input_len = len(input_ids[0])
-        start_time = time.perf_counter()
+        
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
-        end_time = time.perf_counter()
+        end_event.record()
+        
+        # Make sure all CUDA ops have finished before measuring
+        torch.cuda.synchronize()
+        
+        # Elapsed time in milliseconds
+        elapsed_time_ms = start_event.elapsed_time(end_event)
+        elapsed_time_s = elapsed_time_ms / 1000.0
         
         self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
-        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / elapsed_time_s
         logging.info(
-            f"Generated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+            f"Generated {self.exp_log['n_tokens']} tokens in {elapsed_time_s:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
         )
             
         return input_ids

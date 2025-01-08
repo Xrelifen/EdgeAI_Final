@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import time
-import numpy as np
 import torch
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
@@ -278,9 +277,9 @@ class ProfileSDWrapper(SDWrapper):
         self.prefix = prefix
         
         self.exp_log = {}
-        self.draft_time_per_iter = []
-        self.target_time_per_iter = []
-        self.verify_time_per_iter = []
+        self.draft_events = []
+        self.target_events = []
+        self.verify_events = []
         
         self.disable_logging = False
         
@@ -288,27 +287,42 @@ class ProfileSDWrapper(SDWrapper):
         if self.disable_logging:
             return super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
         
-        start_time = time.perf_counter()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         root = super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
-        self.draft_time_per_iter.append(time.perf_counter()-start_time)
+        end_event.record()
+        
+        self.draft_events.append((start_event, end_event))
         return root
     
     def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
         if self.disable_logging:
             return super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
         
-        start_time = time.perf_counter()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         outputs = super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
-        self.target_time_per_iter.append(time.perf_counter()-start_time)
+        end_event.record()
+        
+        self.target_events.append((start_event, end_event))
         return outputs
     
     def _verify(self, tree, logits, logits_warper, do_sample):
         if self.disable_logging:
             return super()._verify(tree, logits, logits_warper, do_sample)
         
-        start_time = time.perf_counter()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, logits, logits_warper, do_sample)
-        self.verify_time_per_iter.append(time.perf_counter()-start_time)
+        end_event.record()
+        
+        self.verify_events.append((start_event, end_event))
         
         # tokenize id to text for visualization
         # nodes = list(preorder_iter(root))
@@ -343,6 +357,40 @@ class ProfileSDWrapper(SDWrapper):
         
         return sampled_tokens, hidden_indices, (total_len, accept_len)
     
+    def compute_average_times(self):
+        """
+        Synchronize once at the end, then compute average
+        draft and target times from the recorded CUDA events.
+        """
+        # Ensure all CUDA kernels are done
+        torch.cuda.synchronize()
+
+        # Compute total time for draft iterations
+        draft_time_total_ms = 0.0
+        for (start_event, end_event) in self.draft_events:
+            draft_time_total_ms += start_event.elapsed_time(end_event)  # returns time in ms
+
+        # Compute total time for target iterations
+        target_time_total_ms = 0.0
+        for (start_event, end_event) in self.target_events:
+            target_time_total_ms += start_event.elapsed_time(end_event)
+            
+        # Compute total time for verify iterations
+        verify_time_total_ms = 0.0
+        for (start_event, end_event) in self.verify_events:
+            verify_time_total_ms += start_event.elapsed_time(end_event)
+
+        # Average times (in milliseconds)
+        draft_avg_ms = draft_time_total_ms / max(len(self.draft_events), 1)
+        target_avg_ms = target_time_total_ms / max(len(self.target_events), 1)
+        verify_avg_ms = verify_time_total_ms / max(len(self.verify_events), 1)
+
+        # Convert to seconds if you prefer
+        draft_avg_s = draft_avg_ms / 1000.0
+        target_avg_s = target_avg_ms / 1000.0
+        verify_avg_s = verify_avg_ms / 1000.0
+
+        return draft_avg_s, target_avg_s, verify_avg_s
     
     def _generate(
         self,
@@ -364,9 +412,20 @@ class ProfileSDWrapper(SDWrapper):
         
         # run generation
         org_input_len = len(input_ids[0])
-        start_time = time.perf_counter()
+        
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
-        end_time = time.perf_counter()
+        end_event.record()
+        
+        # Make sure all CUDA ops have finished before measuring
+        torch.cuda.synchronize()
+        
+        # Elapsed time in milliseconds
+        elapsed_time_ms = start_event.elapsed_time(end_event)
+        elapsed_time_s = elapsed_time_ms / 1000.0
         
         # compute stats
         total_sampled = self.sampled_count
@@ -419,17 +478,19 @@ class ProfileSDWrapper(SDWrapper):
                 json.dump(self.profile_data, f)
                 
         # save exp_log
-        self.exp_log['avg_draft_time'] = np.mean(self.draft_time_per_iter)
-        self.exp_log['avg_target_time'] = np.mean(self.target_time_per_iter)
-        self.exp_log['avg_verify_time'] = np.mean(self.verify_time_per_iter)
+        avg_draft_s, avg_target_s, avg_verify_s = self.compute_average_times()
+        self.exp_log['avg_draft_time'] = avg_draft_s
+        self.exp_log['avg_target_time'] = avg_target_s
+        self.exp_log['avg_verify_time'] = avg_verify_s
+        
         self.exp_log['avg_sampled'] = avg_sampled
         self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
-        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / elapsed_time_s
         logging.info(
             f"Average draft time: {self.exp_log['avg_draft_time']:.4f},"\
             f"\tAverage target time: {self.exp_log['avg_target_time']:.4f},"\
             f"\tAverage verify time: {self.exp_log['avg_verify_time']:.4f}"
-            f"\nGenerated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+            f"\nGenerated {self.exp_log['n_tokens']} tokens in {elapsed_time_s:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
         )
         
         return input_ids
