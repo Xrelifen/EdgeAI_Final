@@ -354,12 +354,14 @@ class TreeMaskCache:
     
 class SSM_Classic(SSMBaseNEFT):
     def prefill_forward(self, input_ids, *model_args, **kwargs):
-        logits = self.model(input_ids, *model_args, **kwargs).logits
-        return logits[:, -1:] # keep only the last hidden state
+        logits = self.model(input_ids, num_logits_to_keep=1, *model_args, **kwargs).logits
+        sampled_probs = torch.softmax(logits, dim=-1)
+        return sampled_probs
     
     def forward(self, input_ids, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
-        return logits
+        sampled_probs = torch.softmax(logits, dim=-1)
+        return sampled_probs
     
     @torch.no_grad()
     def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
@@ -397,14 +399,11 @@ class SSM_Classic(SSMBaseNEFT):
 
         # 5) First forward pass
         with nvtx.annotate("first forward", color="red"):
-            logits = self.prefill_forward(
+            sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
                 past_key_values=past_key_values,
                 cache_position=cache_position,
             )
-        
-        with nvtx.annotate("softmax"):
-            sampled_probs = torch.softmax(logits, dim=-1)
             
         with nvtx.annotate("update cache"):
             next_idx = cache_position[-1] + 1
@@ -447,16 +446,13 @@ class SSM_Classic(SSMBaseNEFT):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
             with nvtx.annotate("ssm forward", color="red"):
-                logits = self(
+                sampled_probs = self(
                     token_ids,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-                
-            with nvtx.annotate("softmax"):
-                sampled_probs = torch.softmax(logits, dim=-1)
                 
             with nvtx.annotate("update cache"):
                 cache_position += self.draft_params.topk_len
@@ -496,15 +492,15 @@ class SSM_Eagle(SSMBaseNEFT):
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
         hidden_states = hidden_states[:, -1:]
-        logits = self.lm_head(hidden_states)
-        return logits, hidden_states
+        sampled_probs = torch.softmax(self.lm_head(hidden_states), dim=-1)
+        return sampled_probs, hidden_states
     
     def forward(self, input_ids, hidden_states, *model_args, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
-        logits = self.lm_head(hidden_states)
-        return logits, hidden_states
+        sampled_probs = torch.softmax(self.lm_head(hidden_states), dim=-1)
+        return sampled_probs, hidden_states
     
     @torch.no_grad()
     def speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None, *model_args, **kwargs):
@@ -549,15 +545,12 @@ class SSM_Eagle(SSMBaseNEFT):
 
         # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
-            logits, hidden_states = self.prefill_forward(
+            sampled_probs, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 hidden_states=hidden_states,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
             )
-            
-        with nvtx.annotate("softmax"):
-            sampled_probs = torch.softmax(logits, dim=-1)
         
         with nvtx.annotate("update cache"):
             next_idx = cache_position[-1] + 1
@@ -605,7 +598,7 @@ class SSM_Eagle(SSMBaseNEFT):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
             with nvtx.annotate("ssm forward", color="red"):
-                logits, hidden_states = self(
+                sampled_probs, hidden_states = self(
                     token_ids,
                     hidden_states=hidden_states,
                     past_key_values=past_key_values,
@@ -613,9 +606,6 @@ class SSM_Eagle(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-            
-            with nvtx.annotate("softmax"):
-                sampled_probs = torch.softmax(logits, dim=-1)
                 
             with nvtx.annotate("update cache"):
                 cache_position += self.draft_params.topk_len
