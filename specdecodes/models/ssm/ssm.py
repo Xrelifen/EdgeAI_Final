@@ -209,13 +209,13 @@ class SSMBase(nn.Module):
     #         # 3) Flatten & final top-k
     #         flat_probs = global_probs.view(bsz, -1)
     #         top_probs, top_idx = torch.topk(flat_probs, sample_k, dim=1, sorted=False)
-    #         parent_idx = top_idx // sample_k
-    #         child_idx  = top_idx % sample_k
+    #         parent_idx = (top_idx // sample_k).long()
+    #         child_idx  = (top_idx % sample_k).long()
 
     #     with nvtx.annotate("gather_ids"):
     #         # 4) Gather final token_ids
     #         rows = torch.arange(bsz, device=sampled_probs.device).unsqueeze(-1)
-    #         token_ids = ptk_ids[rows, parent_idx, child_idx]
+    #         token_ids = ptk_ids[rows, parent_idx, child_idx].long()
 
     #     # Decide on valid_flag (simplified here)
     #     valid_flag = True  # or use top_probs.max(dim=1) > sample_min_prob, etc.
@@ -353,15 +353,16 @@ class TreeMaskCache:
 
     
 class SSM_Classic(SSMBaseNEFT):
+    def prefill_forward(self, input_ids, *model_args, **kwargs):
+        logits = self.model(input_ids, *model_args, **kwargs).logits
+        return logits[:, -1:] # keep only the last hidden state
+    
     def forward(self, input_ids, *model_args, **kwargs):
-        # not using hidden_states
-        _ = kwargs.pop("hidden_states", None) #! Refactor this
-
         logits = self.model(input_ids, *model_args, **kwargs).logits
         return logits
     
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, embed_tokens, lm_head, max_cache_len=None, *model_args, **kwargs):
+    def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
@@ -383,7 +384,7 @@ class SSM_Classic(SSMBaseNEFT):
         tree_mask_cache = TreeMaskCache(
             prefix_len=org_input_len,
             sample_len=self.draft_params.topk_len,
-            max_cache_len=max_cache_len, #org_input_len + self.draft_params.topk_len * self.draft_params.max_depth,
+            max_cache_len=max_cache_len,
             dtype=dtype,
             device=device,
         )
@@ -400,13 +401,14 @@ class SSM_Classic(SSMBaseNEFT):
                 input_ids[:, kv_len:],
                 past_key_values=past_key_values,
                 cache_position=cache_position,
-            )[:, -1:] # keep only the last hidden state
-            
-            next_idx = cache_position[-1] + 1
-            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
-
+            )
+        
         with nvtx.annotate("softmax"):
             sampled_probs = torch.softmax(logits, dim=-1)
+            
+        with nvtx.annotate("update cache"):
+            next_idx = cache_position[-1] + 1
+            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
         
         # 6) Main loop
         for depth_i in range(self.draft_params.max_depth):
@@ -444,7 +446,7 @@ class SSM_Classic(SSMBaseNEFT):
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
-            with nvtx.annotate("forward", color="red"):
+            with nvtx.annotate("ssm forward", color="red"):
                 logits = self(
                     token_ids,
                     past_key_values=past_key_values,
@@ -452,21 +454,26 @@ class SSM_Classic(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-                cache_position += self.draft_params.topk_len
-
+                
             with nvtx.annotate("softmax"):
                 sampled_probs = torch.softmax(logits, dim=-1)
+                
+            with nvtx.annotate("update cache"):
+                cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
             past_key_values.crop(org_input_len)
 
         # Obtain the final tree
-        tree = Tree(root_id, dtype)
-        tree.add_nodes(*tree_data.get_data())
-        
-        # Prune to top-n
-        tree.prune_to_top_n(self.draft_params.max_verify_tokens)
+        with nvtx.annotate("tree related"):
+            with nvtx.annotate("get tree data"):
+                data = tree_data.get_data()
+            with nvtx.annotate("build tree"):
+                tree = Tree(root_id, dtype)
+                tree.add_nodes(*data)
+            with nvtx.annotate("prune tree"):
+                tree.prune_to_top_n(self.draft_params.max_verify_tokens)
         
         return tree
 
@@ -477,25 +484,36 @@ class SSM_Eagle(SSMBaseNEFT):
 
     def init_additional_modules(self, config):
         self.fusion = MergeLinear(config.hidden_size*2, config.hidden_size)
-
-    def forward(self, input_ids, hidden_states, embed_tokens=None, *model_args, **kwargs):
-        # with torch.no_grad():
-        if self.get_input_embeddings():
-            embed_tokens = self.get_input_embeddings()
-        inputs_embeds = embed_tokens(input_ids)
         
+    def set_modules(self, embed_tokens=None, lm_head=None):
+        if embed_tokens is not None:
+            self.embed_tokens = embed_tokens
+        if lm_head is not None:
+            self.lm_head = lm_head
+            
+    def prefill_forward(self, input_ids, hidden_states, *model_args, **kwargs):
+        inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
-        return hidden_states
+        hidden_states = hidden_states[:, -1:]
+        logits = self.lm_head(hidden_states)
+        return logits, hidden_states
+    
+    def forward(self, input_ids, hidden_states, *model_args, **kwargs):
+        inputs_embeds = self.embed_tokens(input_ids)
+        hidden_states = self.fusion(hidden_states, inputs_embeds)
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+        logits = self.lm_head(hidden_states)
+        return logits, hidden_states
     
     @torch.no_grad()
-    def speculate(self, input_ids, hidden_states, past_key_values, embed_tokens, lm_head, max_cache_len=None, *model_args, **kwargs):
+    def speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None, *model_args, **kwargs):
         # 1-1) Obtain necessary parameters
         device = input_ids.device
         if hasattr(self.model, "lm_head"):
             dtype = self.model.lm_head.weight.dtype
         else:
-            dtype = lm_head.weight.dtype
+            dtype = self.lm_head.weight.dtype
         
         # 1-2) Remove the first token from input_ids (shift by 1)
         input_ids = input_ids[:, 1:]
@@ -530,21 +548,21 @@ class SSM_Eagle(SSMBaseNEFT):
             cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
 
         # 5) First forward pass
-        with nvtx.annotate("first forward", color="red"):
-            hidden_states = self.prefill_forward(
+        with nvtx.annotate("ssm first forward", color="red"):
+            logits, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 hidden_states=hidden_states,
-                embed_tokens=embed_tokens,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
-            )[:, -1:] # keep only the last hidden state
+            )
             
+        with nvtx.annotate("softmax"):
+            sampled_probs = torch.softmax(logits, dim=-1)
+        
+        with nvtx.annotate("update cache"):
             next_idx = cache_position[-1] + 1
             cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
 
-        with nvtx.annotate("softmax"):
-            sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
-        
         # 6) Main loop
         for depth_i in range(self.draft_params.max_depth):
             # --------------------------------------
@@ -559,6 +577,9 @@ class SSM_Eagle(SSMBaseNEFT):
                 )
                 parent_probs = child_probs
             
+            # --------------------------------------
+            # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
+            # --------------------------------------
             # with nvtx.annotate("early stop"):
             #     # if depth_i > 3:
             #     valid_flag = sampled_probs.max() > self.min_sample_prob
@@ -567,7 +588,7 @@ class SSM_Eagle(SSMBaseNEFT):
             #         break
             
             # --------------------------------------
-            # B. Add new nodes to the CPU tree
+            # C. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)
@@ -576,37 +597,41 @@ class SSM_Eagle(SSMBaseNEFT):
                 # Expand parent_indices to match hidden_states along the last dimension
                 parent_indices_expanded = parent_indices.unsqueeze(-1).expand(-1, -1, hidden_states.size(-1))
                 hidden_states = torch.gather(hidden_states, dim=1, index=parent_indices_expanded)
-
+                
             with nvtx.annotate("position"):
                 position_ids += 1
             
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
-            with nvtx.annotate("forward", color="red"):
-                hidden_states = self(
+            with nvtx.annotate("ssm forward", color="red"):
+                logits, hidden_states = self(
                     token_ids,
                     hidden_states=hidden_states,
-                    embed_tokens=embed_tokens,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-                cache_position += self.draft_params.topk_len
-
+            
             with nvtx.annotate("softmax"):
-                sampled_probs = torch.softmax(lm_head(hidden_states), dim=-1)
+                sampled_probs = torch.softmax(logits, dim=-1)
+                
+            with nvtx.annotate("update cache"):
+                cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
             past_key_values.crop(org_input_len)
-
-        # Obtain the final tree
-        tree = Tree(root_id, dtype)
-        tree.add_nodes(*tree_data.get_data())
-        
-        # Prune to top-n
-        tree.prune_to_top_n(self.draft_params.max_verify_tokens)
+             
+        # Obtain the final tree   
+        with nvtx.annotate("tree related"):
+            with nvtx.annotate("get tree data"):
+                data = tree_data.get_data()
+            with nvtx.annotate("build tree"):
+                tree = Tree(root_id, dtype)
+                tree.add_nodes(*data)
+            with nvtx.annotate("prune tree"):
+                tree.prune_to_top_n(self.draft_params.max_verify_tokens)
         
         return tree

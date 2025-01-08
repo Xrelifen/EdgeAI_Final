@@ -19,52 +19,47 @@ class SDWrapper(WrapperBase):
     def set_ssm(self, ssm):
         self.ssm = ssm
         self.ssm.draft_params = self.draft_params
-        self.ssm.prefill_forward = self.ssm.forward
     
     def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
-        # if self.ssm.lm_head has attribute, use it, otherwise use llm's lm_head
-        if hasattr(self.ssm, "lm_head"):
-            lm_head = self.ssm.lm_head
-        else:
-            lm_head = self.llm.lm_head
-            
         return self.ssm.speculate(
             input_ids,
             hidden_states=hidden_states,
             past_key_values=past_key_values,
-            embed_tokens=self.llm.get_input_embeddings(), 
-            lm_head=lm_head,
             max_cache_len=max_cache_len,
         )
 
     def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
         # Preparing llm's tree decoding data, also updates each node's index (node.ind).
-        node_data = tree.get_node_data()
-        tree_input_ids = node_data['token_ids']
-        tree_position_ids = node_data['depths'] + position_offset
-        tree_mask = tree.create_attention_mask(position_offset)
+        with nvtx.annotate("create attn mask"):
+            node_data = tree.get_node_data()
+            tree_input_ids = node_data['token_ids']
+            tree_position_ids = node_data['depths'] + position_offset
+            tree_mask = tree.create_attention_mask(position_offset)
         
         # Move to device
-        tree_input_ids = tree_input_ids.to(device, non_blocking=True)
-        tree_position_ids = tree_position_ids.to(device, non_blocking=True)
-        tree_mask = tree_mask.to(device, non_blocking=True)
+        with nvtx.annotate("mask to GPU"):
+            tree_input_ids = tree_input_ids.to(device, non_blocking=True)
+            tree_position_ids = tree_position_ids.to(device, non_blocking=True)
+            tree_mask = tree_mask.to(device)
         
         # Assing to tree mask
-        tree_mask_base[:, :, :, :tree_mask.shape[3]] = tree_mask
+        with nvtx.annotate("update mask"):
+            tree_mask_base[:, :, :, :tree_mask.shape[3]] = tree_mask
         
         #invert
         tree_mask = (~tree_mask_base).to(torch.float16) * torch.finfo(torch.float16).min
         
         # llm forward
         #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
-        outputs = self.llm(
-            tree_input_ids.unsqueeze(0),
-            past_key_values=past_key_values,
-            attention_mask=tree_mask,
-            position_ids=tree_position_ids.unsqueeze(0),
-            output_hidden_states=True,
-            cache_position=cache_position
-        )
+        with nvtx.annotate("llm forward", color="red"):
+            outputs = self.llm(
+                tree_input_ids.unsqueeze(0),
+                past_key_values=past_key_values,
+                attention_mask=tree_mask,
+                position_ids=tree_position_ids.unsqueeze(0),
+                output_hidden_states=True,
+                cache_position=cache_position
+            )
         return outputs
     
     def _verify_step(self, p, q, token_ids, do_sample):
@@ -252,12 +247,13 @@ class SDWrapper(WrapperBase):
                     sampled_tokens = sampled_tokens.to(input_ids.device, non_blocking=True)
                     hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
                 
+                with nvtx.annotate("reorder kv"):
+                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
 
-                # * update input_ids, hidden_states, kv-cache, and cache_position
+                # * update input_ids, hidden_states, and cache_position
                 with nvtx.annotate("update_data"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
                     hidden_states = hidden_states[:, hidden_indices].clone()
-                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
                     cache_position += sampled_tokens.shape[1]
                 
                 # * check stopping criteria

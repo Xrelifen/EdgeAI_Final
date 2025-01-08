@@ -64,13 +64,11 @@ def train_one_epoch(
                 t_logits = llm_last(t_hidden_states)
 
             # Student outputs
-            s_hidden_states = model(
+            s_logits, s_hidden_states = model(
                 input_ids=data["input_ids"],
                 hidden_states=data["hidden_states"],
-                embed_tokens=llm_first,
                 attention_mask=data["attention_mask"]
             )
-            s_logits = llm_last(s_hidden_states, head_only=True)
 
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
@@ -142,6 +140,8 @@ def validate(
     epoch, num_epochs, save_dir, accelerator, run=None
 ):
     model.eval()
+    llm_first.eval()
+    llm_last.eval()
     total_correct = 0
     total_samples = 0
     total_expect = 0
@@ -157,13 +157,11 @@ def validate(
         t_logits = llm_last(t_hidden_states)
 
         # Student outputs
-        s_hidden_states = model(
+        s_logits, s_hidden_states = model(
             input_ids=data["input_ids"],
             hidden_states=data["hidden_states"],
-            embed_tokens=llm_first,
             attention_mask=data["attention_mask"]
         )
-        s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
         loss, vloss, ploss = calculate_loss(
@@ -347,6 +345,7 @@ def main(args):
     else:
         logger.info("Loading draft model...")
         model = SSM_Eagle(config=draft_config, keep_embeddings=args.keep_embeddings)
+    model.set_modules(embed_tokens=llm_first, lm_head=llm_last)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)

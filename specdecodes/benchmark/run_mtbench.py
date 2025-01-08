@@ -88,7 +88,8 @@ def load_model(
         
         draft_params = DraftParams(
             max_depth=args.max_depth,
-            topk_len=10,
+            topk_len=args.topk_len,
+            max_verify_tokens=args.max_verify_tokens,
             min_accept_prob=0.01
         )
         print("Draft params:", draft_params)
@@ -124,7 +125,8 @@ def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_file,
     # Warm up the model
     for i in trange(10, desc='Warming up'):
         input_message = f"Generate a extremely long article about William Shakespeare, version {i}"
-        warmup_input = [{"role": "system", "content": "You are a helpful assistant."},
+        system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+        warmup_input = [{"role": "system", "content": system_message},
                         {"role": "user", "content": input_message}]
         input_ids = tokenizer.apply_chat_template(warmup_input, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
         with sdpa_kernel(backends=[SDPBackend.MATH]):
@@ -135,8 +137,9 @@ def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_file,
     # Evaluate dataset
     for idx, query in tqdm(enumerate(dataset), total=len(dataset), desc="Evaluating"):
         input_message = query.replace("[INST]", "").replace("[/INST]\n\nASSISTANT:", "")
+        system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": input_message}
         ]
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
@@ -209,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=1024, help="Max new tokens.")
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float16")
     parser.add_argument("--repeat", type=int, default=3, help="Repeat evaluation.")
-    parser.add_argument("--temp", type=float, default=0.7, help="Temperature for sampling.")
+    parser.add_argument("--temp", type=float, default=0, help="Temperature for sampling.")
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling.")
 
     args = parser.parse_args()

@@ -61,24 +61,14 @@ def load_model(
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         elif args.mode == "sd-eagle":
             # load SSM
-            if args.compile_mode != 'eager':
-                ssm = SSM_Eagle.from_pretrained(
-                    ssm_path,
-                    config=draft_config,
-                    eos_token_id=tokenizer.eos_token_id,
-                    torch_dtype=dtype,
-                    keep_embeddings=True,
-                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-                # Duplicate embed_tokens for torch.compile to work.
-                ssm.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
-            else:
-                ssm = SSM_Eagle.from_pretrained(
-                    ssm_path,
-                    config=draft_config,
-                    eos_token_id=tokenizer.eos_token_id,
-                    torch_dtype=dtype,
-                    keep_embeddings=False,
-                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ssm = SSM_Eagle.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                keep_embeddings=False,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
         else:
             raise ValueError("Invalid sd mode.")
 
@@ -100,6 +90,8 @@ def load_model(
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
+    llm.eval()
+    ssm.eval()
         
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
