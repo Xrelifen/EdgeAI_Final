@@ -41,6 +41,7 @@ class SDWrapper(WrapperBase):
             tree_input_ids = tree_input_ids.to(device, non_blocking=True)
             tree_position_ids = tree_position_ids.to(device, non_blocking=True)
             tree_mask = tree_mask.to(device)
+            torch.cuda.synchronize()
         
         # Assing to tree mask
         with nvtx.annotate("update mask"):
@@ -216,7 +217,7 @@ class SDWrapper(WrapperBase):
         with nvtx.annotate("decoding"):
             finished = False
             while not finished:
-                torch.compiler.cudagraph_mark_step_begin()
+                # torch.compiler.cudagraph_mark_step_begin()
                 
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):

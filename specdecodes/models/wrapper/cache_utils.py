@@ -140,6 +140,7 @@ class TreeStaticCache(StaticCache):
             beam_idx_per_device = {
                 dev: beam_idx.to(dev, non_blocking=True) for dev in device_layers
             }
+            torch.cuda.synchronize()
 
         # In-place reorder + zero leftover per device
         for dev, data in device_layers.items():
