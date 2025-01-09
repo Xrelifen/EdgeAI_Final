@@ -404,10 +404,10 @@ class SSM_Classic(SSMBaseNEFT):
                 past_key_values=past_key_values,
                 cache_position=cache_position,
             )
+            kv_len = org_input_len
             
         with nvtx.annotate("update cache"):
-            next_idx = cache_position[-1] + 1
-            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
+            cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.topk_len, dtype=torch.long, device=device)
         
         # 6) Main loop
         for depth_i in range(self.draft_params.max_depth):
@@ -453,13 +453,14 @@ class SSM_Classic(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
+                kv_len += self.draft_params.topk_len
                 
             with nvtx.annotate("update cache"):
                 cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_input_len)
+            past_key_values.crop(org_input_len, kv_len)
 
         # Obtain the final tree
         with nvtx.annotate("tree related"):
@@ -504,15 +505,15 @@ class SSM_Eagle(SSMBaseNEFT):
     
     @torch.no_grad()
     def speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None, *model_args, **kwargs):
-        # 1-1) Obtain necessary parameters
+        # 1-1) Remove the first token from input_ids (shift by 1)
+        input_ids = input_ids[:, 1:]
+        
+        # 1-2) Obtain necessary parameters
         device = input_ids.device
         if hasattr(self.model, "lm_head"):
             dtype = self.model.lm_head.weight.dtype
         else:
             dtype = self.lm_head.weight.dtype
-        
-        # 1-2) Remove the first token from input_ids (shift by 1)
-        input_ids = input_ids[:, 1:]
         batch_size, org_input_len = input_ids.shape
         kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
@@ -542,7 +543,7 @@ class SSM_Eagle(SSMBaseNEFT):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
             position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
-
+            
         # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
             sampled_probs, hidden_states = self.prefill_forward(
@@ -551,10 +552,10 @@ class SSM_Eagle(SSMBaseNEFT):
                 past_key_values=past_key_values,
                 cache_position=cache_position,
             )
+            kv_len = org_input_len
         
         with nvtx.annotate("update cache"):
-            next_idx = cache_position[-1] + 1
-            cache_position = torch.arange(next_idx, next_idx+self.draft_params.topk_len, dtype=torch.long, device=input_ids.device)
+            cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.topk_len, dtype=torch.long, device=device)
 
         # 6) Main loop
         for depth_i in range(self.draft_params.max_depth):
@@ -606,13 +607,14 @@ class SSM_Eagle(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
+                kv_len += self.draft_params.topk_len
                 
             with nvtx.annotate("update cache"):
                 cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_input_len)
+            past_key_values.crop(org_input_len, kv_len)
              
         # Obtain the final tree   
         with nvtx.annotate("tree related"):

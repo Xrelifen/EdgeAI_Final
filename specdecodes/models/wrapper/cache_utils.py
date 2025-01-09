@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Union
+from typing import Any, Optional, Dict, Tuple, Union
 import nvtx
 import torch
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
@@ -8,18 +8,21 @@ class TreeDynamicCache(DynamicCache):
     def __init__(self) -> None:
         super().__init__()
         
-    def crop(self, max_length: int):
+    def crop(self, start: int, end = None):
         """Crop the past key/values up to a new `max_length` (negative removes from the end)."""
-        if max_length < 0:
-            max_length = self.get_seq_length() - abs(max_length)
-        if self.get_seq_length() <= max_length:
+        if end is None:
+            end = self.get_seq_length()
+            
+        if start < 0:
+            start = end - abs(start)
+        if end <= start:
             return
 
-        self._seen_tokens = max_length
+        self._seen_tokens = start
         for i in range(len(self.key_cache)):
             if self.key_cache[i] != []:
-                self.key_cache[i] = self.key_cache[i][..., :max_length, :]
-                self.value_cache[i] = self.value_cache[i][..., :max_length, :]
+                self.key_cache[i] = self.key_cache[i][..., :start, :]
+                self.value_cache[i] = self.value_cache[i][..., :start, :]
                 
     def reorder_cache(self, beam_idx: torch.LongTensor, dim=0):
         """Reorder cache for beam search (classic approach)."""
@@ -68,27 +71,30 @@ class TreeStaticCache(StaticCache):
             layer_device_map=layer_device_map,
         )
         
-    def crop(self, max_length: int):
+    def crop(self, start: int, end = None):
         """
         Crop past key/values up to `max_length` (negative removes from the end).
         Sets leftover tokens to zero for non-MPS devices using index_fill_.
         """
-        seq_length = self.get_seq_length()
-        if max_length < 0:
-            max_length = seq_length - abs(max_length)
-        if seq_length <= max_length:
+        if end is None:
+            end = self.get_seq_length()
+            
+        if start < 0:
+            start = end - abs(start)
+        if end <= start:
             return
 
         dev = self.key_cache[0].device
         if dev.type != 'mps':
-            idx = torch.arange(max_length, seq_length, device=dev)
+            #! there might be multiple devices
+            idx = torch.arange(start, end, device=dev)
             for k, v in zip(self.key_cache, self.value_cache):
                 k.index_fill_(dim=2, index=idx, value=0)
                 v.index_fill_(dim=2, index=idx, value=0)
         else:
             for k, v in zip(self.key_cache, self.value_cache):
-                k[:, :, max_length:] = 0
-                v[:, :, max_length:] = 0
+                k[:, :, start:] = 0
+                v[:, :, start:] = 0
 
     def naive_reorder_cache_with_offset(self, beam_idx: torch.LongTensor, new_chunk_len=1, offset=0, dim=0):
         """Straightforward reorder of [offset : offset + new_chunk_len] with leftover zeroing."""
