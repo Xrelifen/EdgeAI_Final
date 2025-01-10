@@ -159,9 +159,9 @@ def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir, dtype=torch.fl
 
     print(f"Final Results:")
     tput_mean, tput_std = np.mean(full_tput_list), np.std(full_tput_list)
-    accept_rate_mean, accept_rate_std = np.mean(full_accept_rate_list), np.std(full_accept_rate_list)
+    accept_rate_mean = np.mean(full_accept_rate_list)
     print(f"\tThroughput: {tput_mean:.2f} ± {tput_std:.2f} tokens/sec")
-    print(f"\tAcceptance rate: {accept_rate_mean:.2f} ± {accept_rate_std:.2f} tokens/iter")
+    print(f"\tAcceptance rate: {accept_rate_mean:.2f} tokens/iter")
     
     return tput_mean, accept_rate_mean    
 
