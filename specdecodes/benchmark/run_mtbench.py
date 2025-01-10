@@ -123,7 +123,7 @@ def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir, dtype=torch.fl
             model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     
     # Evaluate dataset
-    full_tput_list, full_accept_rate_list = [], []
+    avg_tput_list, avg_accept_rate_list = [], []
     for i in trange(repeat, desc="Repeat"):
         log_file = os.path.join(log_dir, f"{i}.jsonl")
         tput_list, accept_rate_list = [], []
@@ -154,14 +154,14 @@ def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir, dtype=torch.fl
         print(f"\tThroughput: {avg_tput:.2f} tokens/sec")
         print(f"\tAcceptance rate: {avg_accept_rate:.2f} tokens/iter")
         
-        full_tput_list += tput_list
-        full_accept_rate_list += accept_rate_list
+        avg_tput_list.append(avg_tput)
+        avg_accept_rate_list.append(avg_accept_rate)
 
     print(f"Final Results:")
-    tput_mean, tput_std = np.mean(full_tput_list), np.std(full_tput_list)
-    accept_rate_mean = np.mean(full_accept_rate_list)
+    tput_mean, tput_std = np.mean(avg_tput_list), np.std(avg_tput_list)
+    accept_rate_mean, accept_rate_std = np.mean(avg_accept_rate_list), np.std(avg_accept_rate_list)
     print(f"\tThroughput: {tput_mean:.2f} ± {tput_std:.2f} tokens/sec")
-    print(f"\tAcceptance rate: {accept_rate_mean:.2f} tokens/iter")
+    print(f"\tAcceptance rate: {accept_rate_mean:.2f} ± {accept_rate_std:.2f} tokens/iter")
     
     return tput_mean, accept_rate_mean    
 
@@ -175,12 +175,12 @@ if __name__ == "__main__":
         "--cache-impl",
         type=str,
         choices=["dynamic", "static"],
-        default="static"
+        default="dynamic"
     )
     parser.add_argument(
         "--compile-mode",
         type=str,
-        default='max-autotune',
+        default='eager',
         choices=["eager", 'reduce-overhead', 'max-autotune']
     )
     
