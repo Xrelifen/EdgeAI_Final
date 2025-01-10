@@ -94,8 +94,6 @@ def load_model(
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
-    llm.eval()
-    ssm.eval()
     
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
