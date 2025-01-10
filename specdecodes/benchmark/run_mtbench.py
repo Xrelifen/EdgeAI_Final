@@ -107,14 +107,13 @@ def load_model(
     
     return model, tokenizer
 
-def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir,
-             max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False, repeat=1):
+def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir, dtype=torch.float16, repeat=1):
     
     # Initialize
     model, tokenizer = load_model(llm_path, ssm_path, out_dir=out_dir, dtype=dtype, device="auto", args=args)
 
     # Warm up the model
-    for i in trange(5, desc='Warming up'):
+    for i in trange(10, desc='Warming up'):
         input_message = f"Generate a long article about William Shakespeare."
         system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
         warmup_input = [{"role": "system", "content": system_message},
@@ -242,5 +241,7 @@ if __name__ == "__main__":
     print(f"Log directory: {log_dir}")
     
     avg_tput, avg_accept_rate = run_eval(
-        args.llm_path, args.ssm_path, args.out_dir, args, dataset, log_dir, 
-        args.max_new_tokens, temp=args.temp, dtype=str_to_torch_dtype(args.dtype), do_sample=args.do_sample, repeat=args.repeat)
+        args.llm_path, args.ssm_path, args.out_dir, args, 
+        dataset, log_dir, 
+        dtype=str_to_torch_dtype(args.dtype), repeat=args.repeat
+    )

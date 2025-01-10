@@ -143,7 +143,7 @@ class WrapperBase(nn.Module):
         temperature=None,
         top_p=None,
         top_k=None,
-        max_new_tokens=2048,
+        max_new_tokens=None,
         max_length=None,
         do_sample=True,
     ):        

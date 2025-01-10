@@ -118,9 +118,9 @@ def main(args):
     # warm up
     if not args.no_warm_up:
         print("Warming up... It will take some time for the first few iterations to run.")
-        with nvtx.annotate("Warming up model ..."):
+        with nvtx.annotate("Warming up"):
             model.disable_logging = True
-            for i in trange(5, desc='Warming up'):
+            for i in trange(10, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                 input_message = "What's the best way to start learning a new language?"
