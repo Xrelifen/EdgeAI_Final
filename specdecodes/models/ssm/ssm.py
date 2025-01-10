@@ -380,7 +380,7 @@ class SSM_Classic(SSMBaseNEFT):
         dtype = self.model.lm_head.weight.dtype
         batch_size, org_input_len = input_ids.shape
         kv_len = past_key_values.get_seq_length()
-        assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
+        assert batch_size == 1, "Only support batch_size=1 for now."
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
@@ -522,7 +522,7 @@ class SSM_Eagle(SSMBaseNEFT):
             dtype = self.lm_head.weight.dtype
         batch_size, org_input_len = input_ids.shape
         kv_len = past_key_values.get_seq_length()
-        assert batch_size == 1, "Currently only handling batch_size=1 for simplicity"
+        assert batch_size == 1, "Only support batch_size=1 for now."
         
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]

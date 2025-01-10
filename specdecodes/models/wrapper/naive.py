@@ -23,6 +23,7 @@ class NaiveWrapper(WrapperBase):
         # * clone input_ids
         input_ids = input_ids.clone()
         batch_size, org_input_len = input_ids.shape
+        assert batch_size == 1, "Only support batch_size=1 for now."
 
         # * prepare kv-cache and cache position
         # Raise error if max_length not set while using static cache

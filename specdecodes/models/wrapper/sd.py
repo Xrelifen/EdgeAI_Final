@@ -190,6 +190,7 @@ class SDWrapper(WrapperBase):
         # * clone input_ids 
         input_ids = input_ids.clone()
         batch_size, org_input_len = input_ids.shape
+        assert batch_size == 1, "Only support batch_size=1 for now."
 
         # * prepare kv-cache
         # Raise error if max_length not set while using static cache
@@ -211,7 +212,7 @@ class SDWrapper(WrapperBase):
             llm_past_key_values = self.create_kv_cache(
                 "static",
                 max_cache_len=llm_max_cache_len,
-                max_batch_size=1,
+                max_batch_size=batch_size,
                 config=self.llm.model.config,
                 device=input_ids.device,
                 dtype=self.llm.model.dtype,
@@ -219,7 +220,7 @@ class SDWrapper(WrapperBase):
             ssm_past_key_values = self.create_kv_cache(
                 "static",
                 max_cache_len=ssm_max_cache_len,
-                max_batch_size=1,
+                max_batch_size=batch_size,
                 config=self.ssm.model.config,
                 device=input_ids.device,
                 dtype=self.ssm.model.dtype,
@@ -227,7 +228,7 @@ class SDWrapper(WrapperBase):
         
         
         self._init_tree_mask(self.draft_params.max_verify_tokens, llm_max_cache_len, device=input_ids.device)
-        cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+        cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
