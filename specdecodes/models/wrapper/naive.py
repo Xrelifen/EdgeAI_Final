@@ -22,24 +22,39 @@ class NaiveWrapper(WrapperBase):
         
         # * clone input_ids
         input_ids = input_ids.clone()
+        batch_size, org_input_len = input_ids.shape
 
         # * prepare kv-cache and cache position
-        llm_past_key_values = self.create_kv_cache(
-            cache_implementation=self.cache_implementation,
-            max_cache_len=stopping_criteria.max_length,
-            max_batch_size=1,
-            config=self.llm.model.config,
-            device=input_ids.device,
-            dtype=self.llm.model.dtype,
-        )
-        cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+        # Raise error if max_length not set while using static cache
+        if stopping_criteria.max_length is None:
+            if self.cache_implementation == "static":
+                raise ValueError(
+                    "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
+                )
+                
+        if self.cache_implementation == "dynamic":
+            llm_max_cache_len = None
+            llm_past_key_values = self.create_kv_cache("dynamic")
+            
+        elif self.cache_implementation == "static":
+            llm_max_cache_len = stopping_criteria.max_length
+            llm_past_key_values = self.create_kv_cache(
+                "static",
+                max_cache_len=llm_max_cache_len,
+                max_batch_size=batch_size,
+                config=self.llm.model.config,
+                device=input_ids.device,
+                dtype=self.llm.model.dtype,
+            )
+            
+        cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
         
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
             outputs = self.llm.prefill_forward(
-                input_ids, 
-                past_key_values=llm_past_key_values, 
-                return_dict=True, 
+                input_ids,
+                max_cache_len=llm_max_cache_len,
+                past_key_values=llm_past_key_values,
                 cache_position=cache_position,
                 num_logits_to_keep=1,
             )
@@ -49,14 +64,19 @@ class NaiveWrapper(WrapperBase):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
         
         with nvtx.annotate("update data"):
-            cache_position = cache_position[-1:] + 1
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+            cache_position = cache_position[-1:] + 1
 
         with nvtx.annotate("decoding"):
             finished = False
             while not finished:
                 with nvtx.annotate("llm forward", color="orange"):
-                    outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
+                    outputs = self.llm(
+                        next_tokens, 
+                        past_key_values=llm_past_key_values,
+                        position_ids=cache_position.unsqueeze(0), 
+                        cache_position=cache_position,
+                    )
                     next_token_logits = outputs.logits
                 
                 # * update input_ids and cache_position
