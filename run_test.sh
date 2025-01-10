@@ -48,17 +48,22 @@ SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # Execution parameters
 SEED=9991
 DO_WARMUP=True
-MAX_NEW_TOKENS=1024
 DO_SAMPLE=False
 TEMPERATURE=0
+
+# Stopping criteria parameters (set only one)
+#! Warning: Setting MAX_NEW_TOKENS may alter the maximum token length based on input_ids
+# MAX_NEW_TOKENS=1024
+MAX_LENGTH=1024
 
 # drafting parameters
 DRAFT_MAX_DEPTH=6
 DRAFT_TOPK_LEN=10
-DRAFT_MAX_VERIFY_TOKENS=64
+DRAFT_MAX_VERIFY_TOKENS=60
 DRAFT_MIN_ACCEPT_PROB=1e-2
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
+# MODE="naive"
 MODE="sd-classic"
 # MODE="sd-eagle"
 
@@ -84,7 +89,6 @@ args=(
   -llm "$LLM_PATH"
   -ssm "$SSM_PATH"
   --seed "$SEED"
-  --max-new-tokens "$MAX_NEW_TOKENS"
   --compile-mode "$COMPILE_MODE"
   --max-depth "$DRAFT_MAX_DEPTH"
   --topk-len "$DRAFT_TOPK_LEN"
@@ -93,6 +97,14 @@ args=(
 )
 
 # Optional arguments
+if [ ! -z "$MAX_NEW_TOKENS" ]; then
+  args+=("--max-new-tokens" "$MAX_NEW_TOKENS")
+fi
+
+if [ ! -z "$MAX_LENGTH" ]; then
+  args+=("--max-length" "$MAX_LENGTH")
+fi
+
 if [ "$DO_WARMUP" = False ]; then
   args+=("-nw")
 fi
@@ -100,6 +112,10 @@ fi
 if [ "$DO_SAMPLE" = True ]; then
   args+=("--do-sample" "--temp" "$TEMPERATURE")
 fi
+
+
+  
+  
 
 ###############################################################################
 # Execute command

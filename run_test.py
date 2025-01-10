@@ -95,14 +95,12 @@ def load_model(
         
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
-        # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
-        torch._dynamo.config.capture_scalar_outputs = True
         torch.set_float32_matmul_precision('high')
         
-        llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
+        llm.forward = torch.compile(llm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
         if ssm is not None:
-            ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, fullgraph=True)
-    
+            ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
+
     return model, tokenizer
 
 def main(args):
@@ -122,10 +120,10 @@ def main(args):
         print("Warming up... It will take some time for the first few iterations to run.")
         with nvtx.annotate("Warming up model ..."):
             model.disable_logging = True
-            for i in trange(10, desc='Warming up'):
+            for i in trange(5, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-                input_message = f"Generate a extremely long article about William Shakespeare, version {i}"
+                input_message = "What's the best way to start learning a new language?"
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": input_message},
@@ -138,8 +136,8 @@ def main(args):
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    input_message = "What's the best way to start learning a new language?"
-    # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
+    # input_message = "Extract the following information from the presented texts: The name of the book, the author, the main character, the year of publication. Output in the format of \"main character, book, author, year of publication\", one book per line.\na) In the realm of wizarding literature, a true standout is the work of J.K. Rowling. One of her books that left an indelible mark is 'Harry Potter and the Philosopher's Stone'. This iconic tale, published in 1997, tells the story of Harry, a young orphan who discovers his magical abilities on his 11th birthday. Soon, he finds himself at the Hogwarts School of Witchcraft and Wizardry, a place teeming with magic and adventure, located somewhere in Scotland.\nb) The magic of Middle-earth has entranced readers worldwide, thanks to the brilliance of J.R.R. Tolkien. In one of his seminal works, 'The Lord of the Rings: The Fellowship of the Ring', published in 1954, we meet Frodo Baggins, a brave hobbit tasked with the perilous quest of destroying the One Ring. The epic journey takes him from the peaceful Shire to the tumultuous regions of Middle-earth.\nc) In a galaxy far, far away, the imagination of L.E. Starlighter gives us 'The Prism Galaxy Chronicles: The Awakening of the Starcaster'. Published in 2028, the story is about Zylo, a humble spaceship mechanic, who unexpectedly discovers he's a Starcaster - a rare individual with the power to manipulate stardust. Set against the backdrop of an interstellar empire in turmoil, Zylo's destiny unfolds on numerous alien worlds, each with its unique cosmic charm."
+    input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},
@@ -183,14 +181,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=1024,
+        default=None,
         help="The maximum number of new generated tokens.",
     )
     parser.add_argument(
         "--max-length",
         type=int,
         default=None,
-        help="The maximum number of new generated tokens.",
+        help="The maximum number of total tokens.",
     )
     parser.add_argument(
         "--temp",

@@ -65,31 +65,20 @@ def load_model(
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         elif args.mode == "sd-eagle":
             # load SSM
-            if args.compile_mode != 'eager':
-                ssm = SSM_Eagle.from_pretrained(
-                    ssm_path,
-                    config=draft_config,
-                    eos_token_id=tokenizer.eos_token_id,
-                    torch_dtype=dtype,
-                    keep_embeddings=True,
-                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-                # Duplicate embed_tokens for torch.compile to work.
-                ssm.model.embed_tokens.weight.data = llm.get_input_embeddings().weight.data.clone()
-            else:
-                ssm = SSM_Eagle.from_pretrained(
-                    ssm_path,
-                    config=draft_config,
-                    eos_token_id=tokenizer.eos_token_id,
-                    torch_dtype=dtype,
-                    keep_embeddings=False,
-                ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ssm = SSM_Eagle.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                keep_embeddings=False,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
         else:
             raise ValueError("Invalid sd mode.")
-        
+
         draft_params = DraftParams(
             max_depth=args.max_depth,
-            topk_len=args.topk_len,
-            max_verify_tokens=args.max_verify_tokens,
+            topk_len=10,
             min_accept_prob=0.01
         )
         print("Draft params:", draft_params)
@@ -105,11 +94,13 @@ def load_model(
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
+    llm.eval()
+    ssm.eval()
     
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
         # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
-        torch._dynamo.config.capture_scalar_outputs = True
+        # torch._dynamo.config.capture_scalar_outputs = True
         torch.set_float32_matmul_precision('high')
         
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
@@ -118,48 +109,64 @@ def load_model(
     
     return model, tokenizer
 
-def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_file,
-             max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False):
+def run_eval(llm_path, ssm_path, out_dir, args, dataset, log_dir,
+             max_new_tokens, temp=0.6, dtype=torch.float16, do_sample=False, repeat=1):
+    
+    # Initialize
     model, tokenizer = load_model(llm_path, ssm_path, out_dir=out_dir, dtype=dtype, device="auto", args=args)
 
     # Warm up the model
-    for i in trange(10, desc='Warming up'):
-        input_message = f"Generate a extremely long article about William Shakespeare, version {i}"
+    for i in trange(5, desc='Warming up'):
+        input_message = f"Generate a long article about William Shakespeare."
         system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
         warmup_input = [{"role": "system", "content": system_message},
                         {"role": "user", "content": input_message}]
         input_ids = tokenizer.apply_chat_template(warmup_input, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
         with sdpa_kernel(backends=[SDPBackend.MATH]):
-            model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
+            model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
     
-    tput_list, accept_rate_list = [], []
-
     # Evaluate dataset
-    for idx, query in tqdm(enumerate(dataset), total=len(dataset), desc="Evaluating"):
-        input_message = query.replace("[INST]", "").replace("[/INST]\n\nASSISTANT:", "")
-        system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": input_message}
-        ]
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-        with sdpa_kernel(backends=[SDPBackend.MATH]):
-            output_ids = model.generate(input_ids, temperature=temp, max_new_tokens=max_new_tokens, do_sample=do_sample)
-        output = tokenizer.decode(output_ids[0][input_ids.shape[1]:])
+    full_tput_list, full_accept_rate_list = [], []
+    for i in trange(repeat, desc="Repeat"):
+        log_file = os.path.join(log_dir, f"{i}.jsonl")
+        tput_list, accept_rate_list = [], []
+        for idx, query in tqdm(enumerate(dataset), total=len(dataset), desc="Evaluating", leave=False):
+            input_message = query.replace("[INST]", "").replace("[/INST]\n\nASSISTANT:", "")
+            system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": input_message}
+            ]
+            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+            with sdpa_kernel(backends=[SDPBackend.MATH]):
+                output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+            output = tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
-        exp_log = {**model.exp_log, "query": input_message, "response": output}
-        with open(log_file, 'a+') as f:
-            json.dump(exp_log, f, indent=4)
-            f.write("\n")
+            exp_log = {**model.exp_log, "query": input_message, "response": output}
+            with open(log_file, 'a+') as f:
+                json.dump(exp_log, f, indent=4)
+                f.write("\n")
 
-        tput_list.append(exp_log.get("tput", 0))
-        if "sd" in args.mode:
-            accept_rate_list.append(exp_log.get("avg_sampled", 0))
+            tput_list.append(exp_log.get("tput", 0))
+            if "sd" in args.mode:
+                accept_rate_list.append(exp_log.get("avg_sampled", 0))
+        
+        print(f"Run {i+1}/{args.repeat}:")
+        avg_tput = np.mean(tput_list)
+        avg_accept_rate = np.mean(accept_rate_list) if accept_rate_list else 0
+        print(f"\tThroughput: {avg_tput:.2f} tokens/sec")
+        print(f"\tAcceptance rate: {avg_accept_rate:.2f} tokens/iter")
+        
+        full_tput_list += tput_list
+        full_accept_rate_list += accept_rate_list
 
-    avg_tput = np.mean(tput_list)
-    avg_accept_rate = np.mean(accept_rate_list) if accept_rate_list else 0
+    print(f"Final Results:")
+    tput_mean, tput_std = np.mean(full_tput_list), np.std(full_tput_list)
+    accept_rate_mean, accept_rate_std = np.mean(full_accept_rate_list), np.std(full_accept_rate_list)
+    print(f"\tThroughput: {tput_mean:.2f} ± {tput_std:.2f} tokens/sec")
+    print(f"\tAcceptance rate: {accept_rate_mean:.2f} ± {accept_rate_std:.2f} tokens/iter")
     
-    return avg_tput, avg_accept_rate    
+    return tput_mean, accept_rate_mean    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -195,7 +202,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-verify-tokens",
         type=int,
-        default=64,
+        default=60,
         help="Number of draft tokens to be verified at once.",
     )
     parser.add_argument(
@@ -209,12 +216,12 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", default="specdecodes/experiments/mt_bench/", help="Output directory.")
     parser.add_argument("--log-dir", default="specdecodes/experiments/result/", help="Experiment log directory.")
     parser.add_argument("--bench-name", default="mt_bench", help="Benchmark name.")
-    parser.add_argument("--max-new-tokens", type=int, default=1024, help="Max new tokens.")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="The maximum number of new generated tokens.")
+    parser.add_argument("--max-length", type=int, default=1024, help="The maximum number of total tokens.")
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float16")
     parser.add_argument("--repeat", type=int, default=3, help="Repeat evaluation.")
     parser.add_argument("--temp", type=float, default=0, help="Temperature for sampling.")
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling.")
-
     args = parser.parse_args()
 
     if args.bench_name != "mt_bench":
@@ -236,19 +243,6 @@ if __name__ == "__main__":
     print(f"Output directory: {args.out_dir}")
     print(f"Log directory: {log_dir}")
     
-    tput_list, accept_rate_list = [], []
-    for i in range(args.repeat):
-        log_file = os.path.join(log_dir, f"{i}.jsonl")
-        avg_tput, avg_accept_rate = run_eval(
-            args.llm_path, args.ssm_path, args.out_dir, args, dataset, log_file, 
-            args.max_new_tokens, temp=args.temp, dtype=str_to_torch_dtype(args.dtype), do_sample=args.do_sample
-        )
-        tput_list.append(avg_tput)
-        accept_rate_list.append(avg_accept_rate)
-    
-    tput_mean, tput_std = np.mean(tput_list), np.std(tput_list)
-    accept_rate_mean, accept_rate_std = np.mean(accept_rate_list), np.std(accept_rate_list)
-    print(f"Throughput: {tput_mean:.2f} ± {tput_std:.2f} tokens/sec")
-    if accept_rate_mean > 0:
-        print(f"Acceptance rate: {accept_rate_mean:.2f} ± {accept_rate_std:.2f}")
-        
+    avg_tput, avg_accept_rate = run_eval(
+        args.llm_path, args.ssm_path, args.out_dir, args, dataset, log_dir, 
+        args.max_new_tokens, temp=args.temp, dtype=str_to_torch_dtype(args.dtype), do_sample=args.do_sample, repeat=args.repeat)
