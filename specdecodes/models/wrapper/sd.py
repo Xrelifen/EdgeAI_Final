@@ -31,9 +31,7 @@ class SDWrapper(WrapperBase):
     def _init_tree_mask(self, max_verify_tokens, max_cache_len=None, device='cpu'):
         if not hasattr(self, 'tree_mask_update_method'):
             self.tree_mask_update_method = 'static' if max_cache_len is not None else 'dynamic'
-            logging.debug(
-                f"'max_length' of stopping_criteria is {'set, uses static' if max_cache_len else 'not set, uses dynamic'} tree_mask."
-            )
+            logging.debug(f"'max_cache_len' is {'set, uses static' if max_cache_len else 'not set, uses dynamic'} tree_mask.")
     
         self.tree_mask = (
             torch.zeros((1, 1, max_verify_tokens, max_cache_len), device=device, dtype=torch.bool)
@@ -194,45 +192,39 @@ class SDWrapper(WrapperBase):
         batch_size, org_input_len = input_ids.shape
 
         # * prepare kv-cache
+        # Raise error if max_length not set while using static cache
         if stopping_criteria.max_length is None:
-            if self.cache_implementation != "dynamic":
+            if self.cache_implementation == "static":
                 raise ValueError(
                     "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
                 )
+                
+        if self.cache_implementation == "dynamic":
             llm_max_cache_len = None
-            llm_past_key_values = self.create_kv_cache(
-                max_cache_len=llm_max_cache_len,
-                max_batch_size=1,
-                config=self.llm.model.config,
-                device=input_ids.device,
-                dtype=self.llm.model.dtype,
-            )
             ssm_max_cache_len = None
-            ssm_past_key_values = self.create_kv_cache(
-                max_cache_len=ssm_max_cache_len,
-                max_batch_size=1,
-                config=self.ssm.model.config,
-                device=input_ids.device,
-                dtype=self.ssm.model.dtype,
-            )
+            llm_past_key_values = self.create_kv_cache("dynamic")
+            ssm_past_key_values = self.create_kv_cache("dynamic")
             
-        else:
+        elif self.cache_implementation == "static":
             llm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_verify_tokens # Add extra space for verifying
+            ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
             llm_past_key_values = self.create_kv_cache(
+                "static",
                 max_cache_len=llm_max_cache_len,
                 max_batch_size=1,
                 config=self.llm.model.config,
                 device=input_ids.device,
                 dtype=self.llm.model.dtype,
             )
-            ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
             ssm_past_key_values = self.create_kv_cache(
+                "static",
                 max_cache_len=ssm_max_cache_len,
                 max_batch_size=1,
                 config=self.ssm.model.config,
                 device=input_ids.device,
                 dtype=self.ssm.model.dtype,
             )
+        
         
         self._init_tree_mask(self.draft_params.max_verify_tokens, llm_max_cache_len, device=input_ids.device)
         cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)

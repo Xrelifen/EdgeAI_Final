@@ -175,15 +175,17 @@ class WrapperBase(nn.Module):
     
     def create_kv_cache(
         self,
-        max_cache_len,
-        max_batch_size,
-        config,
-        device,
-        dtype,
+        cache_implementation,
+        max_cache_len=None,
+        max_batch_size=None,
+        config=None,
+        device=None,
+        dtype=None,
     ):
-        if self.cache_implementation == "dynamic":
+        if cache_implementation == "dynamic":
             return TreeDynamicCache()
-        elif self.cache_implementation == "static":
+        
+        elif cache_implementation == "static":
             return TreeStaticCache(
                 max_cache_len=max_cache_len,
                 max_batch_size=max_batch_size,
