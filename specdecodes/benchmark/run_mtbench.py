@@ -99,8 +99,6 @@ def load_model(
     
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
-        # torch._inductor.config.triton.cudagraph_dynamic_shape_warn_limit=None # silence warning
-        # torch._dynamo.config.capture_scalar_outputs = True
         torch.set_float32_matmul_precision('high')
         
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, fullgraph=True)
