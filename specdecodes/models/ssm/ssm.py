@@ -42,7 +42,7 @@ class MergeLinear(nn.Module):
         return self.fc(torch.cat((emb, x), dim=-1))
 
 class SSMBase(nn.Module):
-    def __init__(self, model=None, config=None, eos_token_id=None, sampling_method='greedy', keep_embeddings=False):
+    def __init__(self, model=None, config=None, eos_token_id=None, keep_embeddings=False):
         super().__init__()
         self.eos_token_id = eos_token_id
         
@@ -80,12 +80,11 @@ class SSMBase(nn.Module):
     ):
         # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
         eos_token_id = model_kwargs.pop("eos_token_id", None)
-        sampling_method = model_kwargs.pop("sampling_method", "greedy")
         
         # Load HuggingFace model if config is not provided
         if config is not None: 
             draft_model_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-            model = cls(None, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, keep_embeddings=keep_embeddings, *model_args, **model_kwargs)
+            model = cls(None, config=config, eos_token_id=eos_token_id, keep_embeddings=keep_embeddings, *model_args, **model_kwargs)
             model = load_custom_model(model, draft_model_path, keep_embeddings=keep_embeddings)
         
         else:
@@ -94,7 +93,7 @@ class SSMBase(nn.Module):
                 torch_dtype=torch_dtype,
                 **model_kwargs
             )
-            model = cls(ssm, config=config, eos_token_id=eos_token_id, sampling_method=sampling_method, *model_args, **model_kwargs).to(dtype=torch_dtype)
+            model = cls(ssm, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
         
         # Convert the model to the desired dtype and return
         model.to(dtype=torch_dtype)

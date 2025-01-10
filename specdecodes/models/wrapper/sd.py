@@ -235,18 +235,14 @@ class SDWrapper(WrapperBase):
             # with torch.compiler.set_stance("force_eager"):
             #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
-                input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position
+                input_ids, 
+                past_key_values=llm_past_key_values, 
+                output_hidden_states=True, 
+                cache_position=cache_position,
+                num_logits_to_keep=1,
             )
-
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # (the clone itself is always small)
-            # We keep the seq_len axis considering cases of multiple tokens.
-            next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :] instead
-            hidden_states = outputs.hidden_states[-1].clone()
-
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
+            next_token_logits = outputs.logits
+            hidden_states = outputs.hidden_states[-1]
 
         with nvtx.annotate("sample tokens"):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
@@ -266,15 +262,9 @@ class SDWrapper(WrapperBase):
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = llm_past_key_values.get_seq_length()
                     outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
-                
-                    # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-                    # We keep the seq_len axis considering cases of multiple tokens.
-                    next_token_logits = outputs.logits.clone()
-                    hidden_states = outputs.hidden_states[-1].clone()
-                
-                    # This is needed to properly delete outputs.logits which may be very large for first iteration
-                    # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-                    del outputs
+                    
+                    next_token_logits = outputs.logits
+                    hidden_states = outputs.hidden_states[-1]
 
                 # * verify
                 with nvtx.annotate("verify"):

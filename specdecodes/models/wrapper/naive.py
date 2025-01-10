@@ -5,6 +5,8 @@ from .base import WrapperBase
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 
+import nvtx
+
 class NaiveWrapper(WrapperBase):
     def __init__(self, *model_args, **kwargs):
         super().__init__(*model_args, **kwargs)
@@ -23,6 +25,7 @@ class NaiveWrapper(WrapperBase):
 
         # * prepare kv-cache and cache position
         llm_past_key_values = self.create_kv_cache(
+            cache_implementation=self.cache_implementation,
             max_cache_len=stopping_criteria.max_length,
             max_batch_size=1,
             config=self.llm.model.config,
@@ -32,39 +35,41 @@ class NaiveWrapper(WrapperBase):
         cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
         
         # * prefill stage
-        outputs = self.llm.prefill_forward(input_ids, past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
-        cache_position = cache_position[-1:] + 1
+        with nvtx.annotate("prefill", color="orange"):
+            outputs = self.llm.prefill_forward(
+                input_ids, 
+                past_key_values=llm_past_key_values, 
+                return_dict=True, 
+                cache_position=cache_position,
+                num_logits_to_keep=1,
+            )
+            next_token_logits = outputs.logits
         
-        # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-        # (the clone itself is always small)
-        # We keep the seq_len axis considering cases of multiple tokens.
-        next_token_logits = outputs.logits[:, -1:, :].clone() # hf uses outputs.logits[:, -1, :].clone() here
-
-        # This is needed to properly delete outputs.logits which may be very large for first iteration
-        # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-        del outputs
-        
-        next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
-        input_ids = torch.cat([input_ids, next_tokens], dim=-1)
-
-        finished = False
-        while not finished:
-            outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
-            cache_position += 1
-        
-            # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
-            # We keep the seq_len axis considering cases of multiple tokens.
-            next_token_logits = outputs.logits.clone()
-            
-            # This is needed to properly delete outputs.logits which may be very large for first iteration
-            # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
-            del outputs
-            
+        with nvtx.annotate("sample tokens"):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+        
+        with nvtx.annotate("update data"):
+            cache_position = cache_position[-1:] + 1
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
-            
-            # Stopping criteria
-            finished = stopping_criteria(input_ids, None)
+
+        with nvtx.annotate("decoding"):
+            finished = False
+            while not finished:
+                with nvtx.annotate("llm forward", color="orange"):
+                    outputs = self.llm(input_ids[:, -1:], past_key_values=llm_past_key_values, return_dict=True, cache_position=cache_position)
+                    next_token_logits = outputs.logits
+                
+                # * update input_ids and cache_position
+                with nvtx.annotate("sample tokens"):
+                    next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+                
+                with nvtx.annotate("update data"):
+                    input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+                    cache_position += 1
+                
+                # * check stopping criteria
+                with nvtx.annotate("stopping criteria"):
+                    finished = stopping_criteria(input_ids, None)
             
         return input_ids
     
