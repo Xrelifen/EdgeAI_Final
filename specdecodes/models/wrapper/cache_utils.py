@@ -117,7 +117,7 @@ class TreeStaticCache(StaticCache):
                 k.narrow(dim, offset + slice_len, leftover_len).zero_()
                 v.narrow(dim, offset + slice_len, leftover_len).zero_()
           
-    def reorder_cache_with_offset(
+    def stacked_reorder_cache_with_offset(
         self,
         beam_idx: torch.LongTensor,
         new_chunk_len: int = 1,
@@ -175,3 +175,15 @@ class TreeStaticCache(StaticCache):
                 for i_layer, new_k, new_v in zip(data["idx"], unbound_k, unbound_v):
                     self.key_cache[i_layer] = new_k
                     self.value_cache[i_layer] = new_v
+                    
+    def reorder_cache_with_offset(
+        self,
+        beam_idx: torch.LongTensor,
+        new_chunk_len: int = 1,
+        offset: int = 0,
+        dim: int = 0,
+    ):
+        if len(self.key_cache) > 1:
+            self.stacked_reorder_cache_with_offset(beam_idx, new_chunk_len, offset, dim)
+        else:
+            self.naive_reorder_cache_with_offset(beam_idx, new_chunk_len, offset, dim)
