@@ -7,7 +7,7 @@ from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
 import prettytable as pt
 from .base import WrapperBase
-from ..utils import DraftParams
+from ..utils import DraftParams, invert_mask
 
 import nvtx
 
@@ -27,28 +27,50 @@ class SDWrapper(WrapperBase):
             past_key_values=past_key_values,
             max_cache_len=max_cache_len,
         )
+        
+    def _init_tree_mask(self, max_verify_tokens, max_cache_len=None, device='cpu'):
+        if not hasattr(self, 'tree_mask_update_method'):
+            self.tree_mask_update_method = 'static' if max_cache_len is not None else 'dynamic'
+            logging.debug(
+                f"'max_length' of stopping_criteria is {'set, uses static' if max_cache_len else 'not set, uses dynamic'} tree_mask."
+            )
+    
+        self.tree_mask = (
+            torch.zeros((1, 1, max_verify_tokens, max_cache_len), device=device, dtype=torch.bool)
+            if max_cache_len is not None else None
+        )
+            
+        return self.tree_mask
+        
+    def _update_tree_mask(self, tree_mask_partial):
+        if self.tree_mask_update_method == 'static':
+            self.tree_mask[:, :, :, :tree_mask_partial.shape[3]] = tree_mask_partial
+        else:
+            self.tree_mask = tree_mask_partial
+        
+        return self.tree_mask
+            
+            
 
-    def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
+    def _tree_decoding(self, tree, past_key_values, position_offset, cache_position, device):
         # Preparing llm's tree decoding data, also updates each node's index (node.ind).
         with nvtx.annotate("create attn mask"):
             node_data = tree.get_node_data()
             tree_input_ids = node_data['token_ids']
             tree_position_ids = node_data['depths'] + position_offset
-            tree_mask = tree.create_attention_mask(position_offset)
+            tree_mask_partial = tree.create_attention_mask(position_offset)
         
         # Move to device
         with nvtx.annotate("mask to GPU"):
             tree_input_ids = tree_input_ids.to(device, non_blocking=True)
             tree_position_ids = tree_position_ids.to(device, non_blocking=True)
-            tree_mask = tree_mask.to(device)
+            tree_mask_partial = tree_mask_partial.to(device)
             torch.cuda.synchronize()
         
         # Assing to tree mask
         with nvtx.annotate("update mask"):
-            tree_mask_base[:, :, :, :tree_mask.shape[3]] = tree_mask
-        
-        #invert
-        tree_mask = (~tree_mask_base).to(torch.float16) * torch.finfo(torch.float16).min
+            tree_mask = self._update_tree_mask(tree_mask_partial)
+            tree_mask = invert_mask(tree_mask, dtype=self.llm.model.dtype)
         
         # llm forward
         #TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
@@ -172,32 +194,57 @@ class SDWrapper(WrapperBase):
         batch_size, org_input_len = input_ids.shape
 
         # * prepare kv-cache
-        llm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_verify_tokens # Add extra space for verifying
-        llm_past_key_values = self.create_kv_cache(
-            max_cache_len=llm_max_cache_len,
-            max_batch_size=1,
-            config=self.llm.model.config,
-            device=input_ids.device,
-            dtype=self.llm.model.dtype,
-        )
-        ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
-        ssm_past_key_values = self.create_kv_cache(
-            max_cache_len=ssm_max_cache_len,
-            max_batch_size=1,
-            config=self.ssm.model.config,
-            device=input_ids.device,
-            dtype=self.ssm.model.dtype,
-        )
-        tree_mask_base = torch.zeros(
-            [1, 1, self.draft_params.max_verify_tokens, llm_max_cache_len],
-            device=input_ids.device,
-            dtype=torch.bool,
-        )
+        if stopping_criteria.max_length is None:
+            if self.cache_implementation != "dynamic":
+                raise ValueError(
+                    "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
+                )
+            llm_max_cache_len = None
+            llm_past_key_values = self.create_kv_cache(
+                max_cache_len=llm_max_cache_len,
+                max_batch_size=1,
+                config=self.llm.model.config,
+                device=input_ids.device,
+                dtype=self.llm.model.dtype,
+            )
+            ssm_max_cache_len = None
+            ssm_past_key_values = self.create_kv_cache(
+                max_cache_len=ssm_max_cache_len,
+                max_batch_size=1,
+                config=self.ssm.model.config,
+                device=input_ids.device,
+                dtype=self.ssm.model.dtype,
+            )
+            
+        else:
+            llm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_verify_tokens # Add extra space for verifying
+            llm_past_key_values = self.create_kv_cache(
+                max_cache_len=llm_max_cache_len,
+                max_batch_size=1,
+                config=self.llm.model.config,
+                device=input_ids.device,
+                dtype=self.llm.model.dtype,
+            )
+            ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
+            ssm_past_key_values = self.create_kv_cache(
+                max_cache_len=ssm_max_cache_len,
+                max_batch_size=1,
+                config=self.ssm.model.config,
+                device=input_ids.device,
+                dtype=self.ssm.model.dtype,
+            )
+        
+        self._init_tree_mask(self.draft_params.max_verify_tokens, llm_max_cache_len, device=input_ids.device)
         cache_position = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device)
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            outputs = self.llm.prefill_forward(input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position)
+            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
+            # with torch.compiler.set_stance("force_eager"):
+            #     outputs = self.llm(
+            outputs = self.llm.prefill_forward(
+                input_ids, past_key_values=llm_past_key_values, output_hidden_states=True, cache_position=cache_position
+            )
 
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # (the clone itself is always small)
@@ -226,7 +273,7 @@ class SDWrapper(WrapperBase):
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = llm_past_key_values.get_seq_length()
-                    outputs = self._tree_decoding(tree, tree_mask_base, llm_past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
+                    outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
                 
                     # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
                     # We keep the seq_len axis considering cases of multiple tokens.
@@ -268,12 +315,12 @@ class SDWrapper(WrapperBase):
 class ProfileSDWrapper(SDWrapper):
     def __init__(self, out_dir="specdecodes/experiments/profile_data", prefix="sd", *model_args, **kwargs):
         super().__init__(*model_args, **kwargs)
+        self.out_dir = out_dir
+        self.prefix = prefix
+        
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
         self.iter_count = 1 # assume first step is done (prefill stage)
-        
-        self.out_dir = out_dir
-        self.prefix = prefix
         
         self.exp_log = {}
         self.draft_events = []
@@ -296,15 +343,15 @@ class ProfileSDWrapper(SDWrapper):
         self.draft_events.append((start_event, end_event))
         return root
     
-    def _tree_decoding(self, tree, tree_mask_base, past_key_values, position_offset, cache_position, device):
+    def _tree_decoding(self, tree, past_key_values, position_offset, cache_position, device):
         if self.disable_logging:
-            return super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
+            return super()._tree_decoding(tree, past_key_values, position_offset, cache_position, device)
         
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        outputs = super()._tree_decoding(tree, tree_mask_base, past_key_values, position_offset, cache_position, device)
+        outputs = super()._tree_decoding(tree, past_key_values, position_offset, cache_position, device)
         end_event.record()
         
         self.target_events.append((start_event, end_event))
@@ -400,6 +447,15 @@ class ProfileSDWrapper(SDWrapper):
     ):
         if self.disable_logging:
             return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        
+        self.profile_data = {}
+        self.sampled_count = 1 # assume first token is sampled (prefill stage)
+        self.iter_count = 1 # assume first step is done (prefill stage)
+        
+        self.exp_log = {}
+        self.draft_events = []
+        self.target_events = []
+        self.verify_events = []
         
         cur_time = time.strftime("%Y%m%d-%H%M%S")
         # prepare output directory

@@ -64,6 +64,10 @@ class SSMBase(nn.Module):
         # Initialize additional modules
         self.init_additional_modules(config)
         
+        # set prefill function same as forward so torch.compile() forward will not execute on prefill phase)
+        #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
+        self.prefill_forward = self.forward
+        
     @classmethod
     def from_pretrained(
         cls, 
@@ -108,11 +112,6 @@ class SSMBase(nn.Module):
             return self.model.embed_tokens
         else:
             return None
-    
-    @torch.no_grad()
-    def prefill_forward(self, input_ids, *model_args, **kwargs):
-        # This function can be modified to act differently specifically on prefill stage.
-        return self(input_ids, *model_args, **kwargs)
         
     @torch.no_grad()
     def forward(self, input_ids, *model_args, **kwargs):
@@ -318,46 +317,58 @@ class TreeData(nn.Module):
 
 class TreeMaskCache:
     def __init__(self, prefix_len: int, sample_len: int, max_cache_len: int, dtype: str, device: str):
-        super().__init__()
         self.prefix_len = prefix_len
         self.sample_len = sample_len
         self.max_cache_len = max_cache_len
         self.dtype = dtype
         self.device = device
-        
-        self.tree_mask_cache = torch.zeros(
-            [1, 1, self.sample_len, self.max_cache_len],
-            device=device,
-            dtype=torch.bool,
-        )
-        if not is_torchdynamo_compiling():
-            # Mark the buffer's address as static for optimization purposes
-            torch._dynamo.mark_static_address(self.tree_mask_cache)
-        
-        # set the first prefix_len elements to True
-        self.tree_mask_cache[:, :, 0, :self.prefix_len] = True
-        
-        # set the current length to prefix_len
-        self.current_len = prefix_len
 
-        # create an eye block for later use
-        self.eye_block = torch.eye(self.sample_len, device=device, dtype=torch.bool)[None, None]
+        # build static tree_mask
+        if self.max_cache_len is not None:
+            self.tree_mask_update_method = 'static'
+            self.tree_mask_cache = torch.zeros(
+                (1, 1, self.sample_len, self.max_cache_len),
+                device=self.device,
+                dtype=torch.bool
+            )
+            if not is_torchdynamo_compiling():
+                # Mark the buffer's address as static for optimization purposes
+                torch._dynamo.mark_static_address(self.tree_mask_cache)
+            
+            # Initialize the first `prefix_len` elements to True
+            self.tree_mask_cache[:, :, 0, :self.prefix_len] = True
+            self.current_len = self.prefix_len
+            
+        # build dynamic tree_mask instead
+        else:
+            self.tree_mask_update_method = 'dynamic'
+            self.tree_mask_cache = torch.ones(
+                (1, 1, 1, self.prefix_len),
+                device=self.device,
+                dtype=torch.bool
+            )
+
+        # Create an identity block for later use
+        self.eye_block = torch.eye(self.sample_len, device=self.device, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
     
     def update_tree_mask(self, parent_indices: torch.Tensor) -> torch.Tensor:
-        self.tree_mask_cache[..., :self.current_len] = self.tree_mask_cache[..., parent_indices[0], :self.current_len]
-        self.tree_mask_cache[..., self.current_len:self.current_len + self.sample_len] = self.eye_block
-        # Update the current length
-        self.current_len += self.sample_len
+        if self.tree_mask_update_method == 'static': # static tree mask update
+            # Update existing mask based on parent indices
+            self.tree_mask_cache[..., :self.current_len] = self.tree_mask_cache[..., parent_indices[0], :self.current_len]
+            # Append the eye_block to the mask
+            self.tree_mask_cache[..., self.current_len:self.current_len + self.sample_len] = self.eye_block
+            # Update the current length
+            self.current_len += self.sample_len
+        else: 
+            # Dynamically expand the mask by concatenating the eye_block
+            tree_mask = self.tree_mask_cache[:, :, parent_indices[0]]
+            self.tree_mask_cache = torch.concat((tree_mask, self.eye_block), dim=3)
+        
         # Invert the mask and return
         return invert_mask(self.tree_mask_cache, dtype=self.dtype)
 
     
 class SSM_Classic(SSMBaseNEFT):
-    def prefill_forward(self, input_ids, *model_args, **kwargs):
-        logits = self.model(input_ids, num_logits_to_keep=1, *model_args, **kwargs).logits
-        sampled_probs = torch.softmax(logits, dim=-1)
-        return sampled_probs
-    
     def forward(self, input_ids, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
         sampled_probs = torch.softmax(logits, dim=-1)
@@ -398,11 +409,15 @@ class SSM_Classic(SSMBaseNEFT):
             cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
 
         # 5) First forward pass
-        with nvtx.annotate("first forward", color="red"):
+        with nvtx.annotate("ssm first forward", color="red"):
+            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
+            # with torch.compiler.set_stance("force_eager"):
+            #     sampled_probs = self(
             sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
                 past_key_values=past_key_values,
                 cache_position=cache_position,
+                num_logits_to_keep=1,
             )
             kv_len = org_input_len
             
@@ -487,19 +502,11 @@ class SSM_Eagle(SSMBaseNEFT):
             self.embed_tokens = embed_tokens
         if lm_head is not None:
             self.lm_head = lm_head
-            
-    def prefill_forward(self, input_ids, hidden_states, *model_args, **kwargs):
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = self.fusion(hidden_states, inputs_embeds)
-        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
-        hidden_states = hidden_states[:, -1:]
-        sampled_probs = torch.softmax(self.lm_head(hidden_states), dim=-1)
-        return sampled_probs, hidden_states
     
-    def forward(self, input_ids, hidden_states, *model_args, **kwargs):
+    def forward(self, input_ids, hidden_states, num_logits_to_keep=0, *model_args, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fusion(hidden_states, inputs_embeds)
-        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0]
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0][:, -num_logits_to_keep:]
         sampled_probs = torch.softmax(self.lm_head(hidden_states), dim=-1)
         return sampled_probs, hidden_states
     
@@ -546,11 +553,15 @@ class SSM_Eagle(SSMBaseNEFT):
             
         # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
+            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
+            # with torch.compiler.set_stance("force_eager"):
+            #     sampled_probs, hidden_states = self(
             sampled_probs, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 hidden_states=hidden_states,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
+                num_logits_to_keep=1,
             )
             kv_len = org_input_len
         

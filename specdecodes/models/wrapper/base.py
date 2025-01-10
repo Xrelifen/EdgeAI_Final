@@ -25,6 +25,9 @@ class WrapperBase(nn.Module):
     
     def set_llm(self, llm):
         self.llm = llm
+        
+        # set prefill function same as forward so torch.compile() forward will not execute on prefill phase)
+        #! Not needed on torch version=2.7, after torch.compiler.set_stance("force_eager") is introduced
         self.llm.prefill_forward = self.llm.forward
         
     def set_tokenizer(self, tokenizer):
