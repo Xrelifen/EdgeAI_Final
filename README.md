@@ -41,12 +41,15 @@ bash train.sh
 
 ## TODO
 
-- [ ] Acelerate model using torch Inductor
+Inference
+- [x] Accelerate model using Torch Inductor -> Achieved 1.6x speed-up!
+- [ ] Allow speculative decoding to run using multiple GPUs
+  - May require copying llm's embed_token in each GPU for efficiency.
+  - May require refactoring wrapper and ssm's code.
+- [ ] Support multiple batch size for inference
+  - Currently only support batch size 1
 
+Training
 - [ ] Rewrite data_gen
   - data_gen produces wrong masking. Currently only old version works.
   - Rewrite data_gen with cleaner code.
-
-- [ ] Handle multiple GPU inference correctly
-  - May require copying llm's embed_token in each GPU for efficiency.
-  - May require refactoring wrapper and ssm's code.
