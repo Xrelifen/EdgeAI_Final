@@ -585,11 +585,11 @@ class SSM_Eagle(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     # if depth_i > 3:
-            #     valid_flag = sampled_probs.max() > self.min_sample_prob
-            #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
-            #         break
+            #     if depth_i == 2:
+            #         valid_flag = (child_probs > 0.3).any()
+            #         if not valid_flag:
+            #             print(f"Early stop at depth {depth_i+1}/{self.draft_params.max_depth}")
+            #             break
             
             # --------------------------------------
             # C. Add new nodes to the CPU tree
