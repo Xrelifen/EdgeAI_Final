@@ -236,7 +236,7 @@ class SDWrapper(WrapperBase):
             # with torch.compiler.set_stance("force_eager"):
             #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
-                input_ids, 
+                input_ids,
                 past_key_values=llm_past_key_values, 
                 output_hidden_states=True, 
                 cache_position=cache_position,
@@ -244,6 +244,7 @@ class SDWrapper(WrapperBase):
             )
             next_token_logits = outputs.logits
             hidden_states = outputs.hidden_states[-1]
+            del outputs
 
         with nvtx.annotate("sample tokens"):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
@@ -266,6 +267,7 @@ class SDWrapper(WrapperBase):
                     
                     next_token_logits = outputs.logits
                     hidden_states = outputs.hidden_states[-1]
+                    del outputs
 
                 # * verify
                 with nvtx.annotate("verify"):
