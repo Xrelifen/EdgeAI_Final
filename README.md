@@ -42,7 +42,7 @@ bash train.sh
 ## TODO
 
 Inference
-- [x] Accelerate model using Torch Inductor -> Achieved 1.6x speed-up!
+- [x] Accelerated the model using Torch Inductor, achieving an additional 2.1× speedup on the compiled LLM and 4.48× with the compiled LLM + SD!
 - [ ] Allow speculative decoding to run using multiple GPUs
   - May require copying llm's embed_token in each GPU for efficiency.
   - May require refactoring wrapper and ssm's code.
