@@ -11,7 +11,7 @@ from transformers import AutoTokenizer#, AutoModelForCausalLM
 from fastchat.utils import str_to_torch_dtype
 
 from torch.nn.attention import SDPBackend, sdpa_kernel
-from ..models import HuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
+from ..models import ProfileHuggingFaceWrapper, ProfileNaiveWrapper, ProfileSDWrapper, SSM_Classic, SSM_Eagle
 from ..models import DraftParams, modeling_llama
 
 # Set random seed for reproducibility
@@ -52,7 +52,7 @@ def load_model(
         model = ProfileNaiveWrapper()
         
     elif args.mode == "hf":
-        model = HuggingFaceWrapper() # should not work
+        model = ProfileHuggingFaceWrapper()
         
     elif args.mode.split("-")[0] == "sd":
         if args.mode == "sd-classic":

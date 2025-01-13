@@ -11,12 +11,15 @@ class HuggingFaceWrapper(WrapperBase):
         input_ids: torch.LongTensor, 
         temperature=None, top_p=None, top_k=None, 
         max_length=2048, do_sample=True, 
-        *args, 
+        *args,
         **kwargs
     ):
         assert self.llm is not None, "LLM model must be provided"
         
-        self.llm.generate.cache_implementation = self.cache_implementation
+        if self.cache_implementation == "dynamic":
+            self.llm.generation_config.cache_implementation = None
+        else:
+            self.llm.generation_config.cache_implementation = self.cache_implementation
         return self.llm.generate(
             input_ids=input_ids,
             temperature=temperature,
@@ -34,9 +37,9 @@ class ProfileHuggingFaceWrapper(HuggingFaceWrapper):
         self.exp_log = {}
         self.disable_logging = False
 
-    def _generate(self, input_ids, *model_args, **kwargs):
+    def generate(self, input_ids, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._generate(input_ids, *model_args, **kwargs)
+            return super().generate(input_ids, *model_args, **kwargs)
         
         # run generation
         org_input_len = len(input_ids[0])
@@ -45,7 +48,7 @@ class ProfileHuggingFaceWrapper(HuggingFaceWrapper):
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        input_ids = super()._generate(input_ids, *model_args, **kwargs)
+        input_ids = super().generate(input_ids, *model_args, **kwargs)
         end_event.record()
         
         # Make sure all CUDA ops have finished before measuring

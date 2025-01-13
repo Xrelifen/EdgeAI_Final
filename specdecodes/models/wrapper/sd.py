@@ -314,43 +314,43 @@ class ProfileSDWrapper(SDWrapper):
         
         self.disable_logging = False
         
-    def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
+    def _speculate(self, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
+            return super()._speculate(*model_args, **kwargs)
         
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        root = super()._speculate(input_ids, hidden_states, past_key_values, max_cache_len)
+        root = super()._speculate(*model_args, **kwargs)
         end_event.record()
         
         self.draft_events.append((start_event, end_event))
         return root
     
-    def _tree_decoding(self, tree, past_key_values, position_offset, cache_position, device):
+    def _tree_decoding(self, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._tree_decoding(tree, past_key_values, position_offset, cache_position, device)
+            return super()._tree_decoding(*model_args, **kwargs)
         
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        outputs = super()._tree_decoding(tree, past_key_values, position_offset, cache_position, device)
+        outputs = super()._tree_decoding(*model_args, **kwargs)
         end_event.record()
         
         self.target_events.append((start_event, end_event))
         return outputs
     
-    def _verify(self, tree, logits, logits_warper, do_sample):
+    def _verify(self, tree, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._verify(tree, logits, logits_warper, do_sample)
+            return super()._verify(tree, *model_args, **kwargs)
         
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, logits, logits_warper, do_sample)
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(tree, *model_args, **kwargs)
         end_event.record()
         
         self.verify_events.append((start_event, end_event))
@@ -423,15 +423,9 @@ class ProfileSDWrapper(SDWrapper):
 
         return draft_avg_s, target_avg_s, verify_avg_s
     
-    def _generate(
-        self,
-        input_ids: torch.LongTensor,
-        stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
-        do_sample: bool,
-    ):
+    def _generate(self, input_ids: torch.LongTensor, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+            return super()._generate(input_ids, *model_args, **kwargs)
         
         self.profile_data = {}
         self.sampled_count = 1 # assume first token is sampled (prefill stage)
@@ -457,7 +451,7 @@ class ProfileSDWrapper(SDWrapper):
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        input_ids = super()._generate(input_ids, *model_args, **kwargs)
         end_event.record()
         
         # Make sure all CUDA ops have finished before measuring
