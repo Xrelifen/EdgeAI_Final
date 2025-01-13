@@ -424,7 +424,7 @@ class SSM_Classic(SSMBaseNEFT):
             cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.topk_len, dtype=torch.long, device=device)
         
         # 6) Main loop
-        for depth_i in range(self.draft_params.max_depth):
+        for depth_i in range(self.draft_params.max_depth-1):
             # --------------------------------------
             # A. Compute token distribution & Sample
             # --------------------------------------
