@@ -1,4 +1,4 @@
-gradio==5.10.0
+gradio==5.11.0
 prettytable==3.12.0
 sentencepiece==0.2.0
 transformers==4.47.1
