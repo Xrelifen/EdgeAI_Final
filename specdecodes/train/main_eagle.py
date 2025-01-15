@@ -49,6 +49,8 @@ def train_one_epoch(
     train_config, epoch, num_epochs, accelerator, run=None
 ):
     model.train()
+    llm_first.eval()
+    llm_last.eval()
     total_correct = 0
     total_samples = 0
     total_expect = 0

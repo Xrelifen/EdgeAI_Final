@@ -368,10 +368,12 @@ class TreeMaskCache:
 
     
 class SSM_Classic(SSMBaseNEFT):
-    def forward(self, input_ids, *model_args, **kwargs):
+    def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
-        sampled_probs = torch.softmax(logits, dim=-1)
-        return sampled_probs
+        if with_softmax:
+            logits = torch.softmax(logits, dim=-1)
+            
+        return logits
     
     @torch.no_grad()
     def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
@@ -414,6 +416,7 @@ class SSM_Classic(SSMBaseNEFT):
             #     sampled_probs = self(
             sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
+                with_softmax=True,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
                 num_logits_to_keep=1,
@@ -462,6 +465,7 @@ class SSM_Classic(SSMBaseNEFT):
             with nvtx.annotate("ssm forward", color="red"):
                 sampled_probs = self(
                     token_ids,
+                    with_softmax=True,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     attention_mask=tree_attention_mask,
@@ -502,12 +506,15 @@ class SSM_Eagle(SSMBaseNEFT):
         if lm_head is not None:
             self.lm_head = lm_head
     
-    def forward(self, input_ids, hidden_states, num_logits_to_keep=0, *model_args, **kwargs):
+    def forward(self, input_ids, hidden_states, num_logits_to_keep=0, with_softmax=False, *model_args, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0][:, -num_logits_to_keep:]
-        sampled_probs = torch.softmax(self.lm_head(hidden_states), dim=-1)
-        return sampled_probs, hidden_states
+        logits = self.lm_head(hidden_states)
+        if with_softmax:
+            logits = torch.softmax(logits, dim=-1)
+            
+        return logits, hidden_states
     
     @torch.no_grad()
     def speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None, *model_args, **kwargs):
@@ -557,6 +564,7 @@ class SSM_Eagle(SSMBaseNEFT):
             #     sampled_probs, hidden_states = self(
             sampled_probs, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
+                with_softmax=True,
                 hidden_states=hidden_states,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
@@ -611,6 +619,7 @@ class SSM_Eagle(SSMBaseNEFT):
             with nvtx.annotate("ssm forward", color="red"):
                 sampled_probs, hidden_states = self(
                     token_ids,
+                    with_softmax=True,
                     hidden_states=hidden_states,
                     past_key_values=past_key_values,
                     position_ids=position_ids,
