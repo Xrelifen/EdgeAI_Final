@@ -101,15 +101,9 @@ class ProfileNaiveWrapper(NaiveWrapper):
         
         self.disable_logging = False
 
-    def _generate(
-        self,
-        input_ids: torch.LongTensor,
-        stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
-        do_sample: bool,
-    ):
+    def _generate(self, input_ids: torch.LongTensor, *model_args, **kwargs):
         if self.disable_logging:
-            return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+            return super()._generate(input_ids, *model_args, **kwargs)
         
         # run generation
         org_input_len = len(input_ids[0])
@@ -118,7 +112,7 @@ class ProfileNaiveWrapper(NaiveWrapper):
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        input_ids = super()._generate(input_ids, *model_args, **kwargs)
         end_event.record()
         
         # Make sure all CUDA ops have finished before measuring
