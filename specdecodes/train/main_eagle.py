@@ -10,6 +10,7 @@ from transformers import LlamaForCausalLM, AutoConfig, get_cosine_schedule_with_
 from accelerate import Accelerator
 from accelerate.utils import set_seed, release_memory, tqdm
 from accelerate.logging import get_logger
+from safetensors.torch import save_file
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
@@ -222,9 +223,20 @@ def validate(
 
         # Save model checkpoint
         if (epoch + 1) % train_config["save_freq"] == 0 or (epoch + 1) == num_epochs:
-            save_path = os.path.join(save_dir, f"model_{epoch + 1}")
-            accelerator.save_model(model, save_path)
-            logger.info(f"Model saved at: {save_path}")
+            unwrapped_model = accelerator.unwrap_model(model)
+            
+            # Filter out unwanted keys in one line
+            filtered_sd = {
+                k: v
+                for k, v in unwrapped_model.state_dict().items()
+                if not k.startswith(("embed_tokens.", "lm_head."))
+            }
+
+            # Create subdirectory and save .safetensors
+            save_subdir = os.path.join(save_dir, f"model_{epoch + 1}")
+            os.makedirs(save_subdir, exist_ok=True) # ensure directory exists
+            save_path = os.path.join(save_subdir, "model.safetensors")
+            save_file(filtered_sd, save_path)
             
     accelerator.wait_for_everyone()
             
@@ -425,6 +437,8 @@ def main(args):
 
     # Finish wandb run
     if accelerator.is_main_process and run:
+        accelerator.wait_for_everyone()
+        torch.dist.barrier()
         run.finish()
 
 if __name__ == '__main__':
