@@ -434,11 +434,9 @@ def main(args):
                 model, llm_first, llm_last, test_loader, train_config,
                 epoch, args.epochs, args.savedir, accelerator, run
             )
-
+            
     # Finish wandb run
     if accelerator.is_main_process and run:
-        accelerator.wait_for_everyone()
-        torch.dist.barrier()
         run.finish()
 
 if __name__ == '__main__':
