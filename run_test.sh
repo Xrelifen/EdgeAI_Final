@@ -47,6 +47,7 @@ SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
 # Execution parameters
 SEED=9991
+WARMUP_ITER=20
 DO_WARMUP=True
 DO_SAMPLE=False
 TEMPERATURE=0
@@ -89,6 +90,7 @@ args=(
   -llm "$LLM_PATH"
   -ssm "$SSM_PATH"
   --seed "$SEED"
+  --warmup-iter "$WARMUP_ITER"
   --compile-mode "$COMPILE_MODE"
   --max-depth "$DRAFT_MAX_DEPTH"
   --topk-len "$DRAFT_TOPK_LEN"
@@ -103,10 +105,6 @@ fi
 
 if [ ! -z "$MAX_LENGTH" ]; then
   args+=("--max-length" "$MAX_LENGTH")
-fi
-
-if [ "$DO_WARMUP" = False ]; then
-  args+=("-nw")
 fi
 
 if [ "$DO_SAMPLE" = True ]; then
