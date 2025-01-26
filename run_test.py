@@ -128,8 +128,8 @@ def load_offload_model(
                 sampling_method=sd_method,
                 tree_depth=tree_depth,
                 topk_len=16,
-                min_sample_prob=1e-2,
-                min_accept_prob=1e-2
+                min_sample_prob=1e-8,
+                min_accept_prob=1e-8
             )
 
         ssm = ssm.to(device)
