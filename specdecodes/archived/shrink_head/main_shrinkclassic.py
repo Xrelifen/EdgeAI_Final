@@ -13,7 +13,7 @@ from accelerate.logging import get_logger
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
-from ..models import SSM_Classic, LLM_First_Layers, LLM_Last_Layers
+from ..models import SSM_ShrinkClassic, LLM_First_Layers, LLM_Last_Layers
 from .train_utils import (
     list_files,
     CustomDataset,
@@ -29,16 +29,27 @@ from .train_utils import (
 logging.basicConfig(level=logging.INFO)
 logger = get_logger(__name__)
 
+@torch.no_grad()
+def remap_logits(logits, id_map, limited_vocab_size=8192):
+    logits = logits[:, :, id_map]
+    logits = torch.concat([
+            logits[:, :, :limited_vocab_size-1],
+            logits[:, :, limited_vocab_size-1:].logsumexp(dim=2, keepdim=True),
+        ], dim=2)
+    return logits
+
 def calculate_loss(loss_mask, s_hidden_states, t_hidden_states, s_logits, t_logits, train_config):
     # Upcast to float if we need to compute the loss to avoid potential precision issues
     s_logits = s_logits.float()
     t_logits = t_logits.float()
     
     # Calculate losses
-    vloss = calc_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    # vloss = calc_l1_loss(loss_mask, s_hidden_states, t_hidden_states)
+    # ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
+    # loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+    # return loss, vloss, ploss
     ploss = calc_ce_loss(loss_mask, s_logits, t_logits)
-    loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
-    return loss, vloss, ploss
+    return ploss, ploss, ploss
 
 def train_one_epoch(
     model, llm_first, llm_last, train_loader, optimizer, scheduler,
@@ -58,14 +69,16 @@ def train_one_epoch(
             with torch.no_grad():
                 t_hidden_states = data["target"]
                 t_logits = llm_last(t_hidden_states)
+                
+                # Remap logits
+                t_logits = remap_logits(t_logits, model.module.id_llm_freq_map, model.module.limited_vocab_size)
 
             # Student outputs
-            s_hidden_states = model(
+            s_logits, s_hidden_states = model(
                 input_ids=data["input_ids"],
-                embed_tokens=llm_first,
-                attention_mask=data["attention_mask"]
+                attention_mask=data["attention_mask"],
+                return_logits=True
             )
-            s_logits = llm_last(s_hidden_states, head_only=True)
 
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
@@ -150,14 +163,16 @@ def validate(
         # Teacher outputs
         t_hidden_states = data["target"]
         t_logits = llm_last(t_hidden_states)
+        
+        # Remap logits
+        t_logits = remap_logits(t_logits, model.module.id_llm_freq_map, model.module.limited_vocab_size)
 
         # Student outputs
-        s_hidden_states = model(
+        s_logits, s_hidden_states = model(
             input_ids=data["input_ids"],
-            embed_tokens=llm_first,
-            attention_mask=data["attention_mask"]
+            attention_mask=data["attention_mask"],
+            return_logits=True
         )
-        s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
         loss, vloss, ploss = calculate_loss(
@@ -325,18 +340,13 @@ def main(args):
 
     if args.pretrained:
         logger.info("Loading pretrained model...")
-        model = SSM_Classic.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_ShrinkClassic.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Classic(config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = SSM_ShrinkClassic(config=draft_config, keep_embeddings=args.keep_embeddings)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
-
-    # Transfer embeddings if available
-    if hasattr(model.model, "embed_tokens"):
-        model.model.embed_tokens.weight = llm.get_input_embeddings().weight.clone().detach()
-        model.model.embed_tokens.requires_grad_(False)
 
     # # load llm's norm layer to draft model
     # model.model.norm.weight = llm.model.norm.weight.clone().detach()

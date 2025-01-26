@@ -25,7 +25,9 @@ outdir = os.path.join(args.outdir, 'sharegpt_{}_{}_{}'.format(s, e, args.suffix)
 
 # delete the directory if it exists
 if os.path.exists(outdir):
-    os.system('rm -r ' + outdir)
+    print("Directory already exists. Exiting...")
+    exit(0)
+    # os.system('rm -r ' + outdir)
 
 
 def split_range(start, end, n, over=False):
@@ -68,7 +70,7 @@ for i in range(num_p):
 
     # combine directory with ge_data_all_vicuna.py
     parent_directory = os.path.dirname(os.path.realpath(__file__))
-    exec_dir = os.path.join(parent_directory, 'ge_data_all_llama2chat.py')
+    exec_dir = os.path.join(parent_directory, 'ge_data_all_llama2chat_old.py')
     command = "python {} --start={} --end={} --index={} --gpu_index {} --outdir {} --dtype {}".format(exec_dir, start, end, index,
                                                                                                 gpu_index_str, outdir, args.dtype)
     commands.append(command)

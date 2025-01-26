@@ -12,12 +12,13 @@ from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ, SSM_QTIP
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
 
+import nvtx
+
 def load_model(
     llm_path: str,
     ssm_path: str,
     mode: str,
-    sd_method: str,
-    layers: int,
+    profile_mode: bool = False,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
 ):
@@ -41,21 +42,19 @@ def load_model(
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = layers
+        draft_config.num_hidden_layers = 1
         
     else:
         draft_config = None
 
     if mode == "naive":
-        # model = NaiveWrapper()
-        model = ProfileNaiveWrapper()
+        model = ProfileNaiveWrapper() if profile_mode else NaiveWrapper()
         
     elif mode == "hf":
         model = HuggingFaceWrapper()
         
     elif mode == "sd-classic":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
+        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
         
         # load SSM
         if 'autoawq' in llm_path:
@@ -63,47 +62,24 @@ def load_model(
         else:
             ssm_device = llm.model.layers[-1].self_attn.q_proj.weight.device
 
-        if "QTIP" in ssm_path:
-            ssm = SSM_QTIP.from_pretrained(
-                ssm_path,
-                # config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-                sampling_method=sd_method,
-                tree_depth=tree_depth,
-                topk_len=16,
-                min_sample_prob=1e-8,
-                min_accept_prob=1e-8
-            )
-        else:
-            ssm = SSM_Classic.from_pretrained(
-                ssm_path,
-                # config=draft_config,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-                sampling_method=sd_method,
-                tree_depth=tree_depth,
-                topk_len=16,
-                min_sample_prob=1e-8,
-                min_accept_prob=1e-8
-            )
+        ssm = SSM_Classic.from_pretrained(
+            ssm_path,
+            config=draft_config,
+            eos_token_id=tokenizer.eos_token_id,
+            torch_dtype=dtype,
+        ).to(ssm_device)
         model.set_ssm(ssm)
         
     elif mode == "sd-eagle":
-        # model = SDWrapper()
-        model = ProfileSDWrapper(out_dir=None)
-        
-        # compress
-        # draft_config.compress_hidden = True
-        # draft_config.compress_hidden_ratio = 0.5
+        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
         
         # load SSM
         ssm = SSM_Eagle.from_pretrained(
             ssm_path,
             config=draft_config,
-            sampling_method=sd_method,
             eos_token_id=tokenizer.eos_token_id,
             torch_dtype=dtype,
+            keep_embeddings=True,
         ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
         model.set_ssm(ssm)
     else:
@@ -196,7 +172,6 @@ def load_offload_model(
     return model, tokenizer
 
 def main(args):
-    
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(format='%(levelname)s - %(message)s', level=LOGLEVEL)
@@ -222,8 +197,9 @@ def main(args):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": input_message},
         ]
-        input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-        _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+        with nvtx.annotate("Warm up"):
+            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
 
     # generate response
     print("Generating response...")
@@ -240,7 +216,8 @@ def main(args):
     prompt = tokenizer.decode(input_ids[0])
     
     start_time = time.time()
-    output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+    with nvtx.annotate("Generate"):
+        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
     end_time = time.time()
 
     for key, value in model.exp_log.items():
@@ -306,6 +283,11 @@ if __name__ == "__main__":
         help="The mode of model generation.",
     )
     parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile the model.",
+    )
+    parser.add_argument(
         "--sd-method",
         type=str,
         default="greedy",
@@ -348,6 +330,11 @@ if __name__ == "__main__":
         type=int,
         default=12,
         help="Draft tree depth.",
+    )
+    parser.add_argument(
+        "--use-static-tree-cache",
+        action="store_true",
+        help="Use static tree cache.",
     )
     args = parser.parse_args()
     

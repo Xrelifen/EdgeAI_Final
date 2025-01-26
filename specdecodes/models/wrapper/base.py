@@ -108,6 +108,7 @@ class WrapperBase(nn.Module):
             else: # return sampled token
                 token = torch.multinomial(probs, num_samples=1)
                 return token.view(batch, seq_len) # preserve shape
+
         else:
             
             if return_probs: # return sample prob
@@ -139,6 +140,7 @@ class WrapperBase(nn.Module):
         max_new_tokens=2048,
         max_length=None,
         do_sample=True,
+        use_static_tree_cache=False,
     ):        
         # 1. prepare stopping criteria
         stopping_criteria = self._get_stopping_criteria(
@@ -163,5 +165,6 @@ class WrapperBase(nn.Module):
             stopping_criteria=stopping_criteria,
             logits_warper=logits_warper,
             do_sample=do_sample,
+            use_static_tree_cache=use_static_tree_cache,
         )
         return results
