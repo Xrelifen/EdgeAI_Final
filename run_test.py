@@ -10,8 +10,11 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import specdecodes.models.llm.modeling_llama as modeling_llama
 # from transformers.models.llama import modeling_llama
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper
-from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle
+from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, ShareSDWrapper, ProfileShareSDWrapper
+from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle, SSM_ShareSD
+
+from hqq.core.quantize import *
+from hf_share_sd.base import AutoHQQHFShareSDModel
 
 import nvtx
 
@@ -27,22 +30,37 @@ def load_model(
     
     # load LLM
     # llm = AutoModelForCausalLM.from_pretrained(
-    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+    # llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+    base_model = modeling_llama.LlamaForCausalLM.from_pretrained(
         llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         device_map=device,
         _attn_implementation="sdpa",
     )
+
+    class LLM(nn.Module):
+        def __init__(self, model):
+            super(LLM, self).__init__()
+            self.model = model
+            self.config = model.config
+
+        def forward(self, *args, **kwargs):
+            return self.model(*args, **kwargs)
+    
+    llm = LLM(base_model)
+
+
     ssm = None
     
     # check if ssm_path directory exists
-    if os.path.exists(ssm_path):
-        draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = 1
+    # if os.path.exists(ssm_path):
+    #     draft_config = deepcopy(llm.config)
+    #     draft_config.num_hidden_layers = 1
         
-    else:
-        draft_config = None
+    # else:
+    #     draft_config = None
+    draft_config = None
 
     if args.mode == "naive":
         model = ProfileNaiveWrapper() if args.logging else NaiveWrapper()
@@ -69,17 +87,30 @@ def load_model(
                 keep_embeddings=False,
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
             ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
+        elif args.mode == "sd-share":
+            # quantize
+            print("Quantizing model...")
+            HQQLinear.set_backend(HQQBackend.ATEN)
+            quant_config = BaseQuantizeConfig(nbits=2, group_size=16, axis=0) 
+            AutoHQQHFShareSDModel.quantize_model(base_model, quant_config=quant_config, compute_dtype=dtype, device="cuda")
+            from hqq.utils.patching import prepare_for_inference
+            prepare_for_inference(base_model, backend="gemlite")
+
+            ssm = SSM_ShareSD.from_pretrained(base_model, eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
         else:
             raise ValueError("Invalid sd mode.")
 
         draft_params = DraftParams(
             max_depth=args.max_depth,
-            topk_len=10,
-            min_accept_prob=0.01
+            topk_len=args.topk_len,
+            min_accept_prob=args.min_accept_prob,
         )
         print("Draft params:", draft_params)
         
-        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
+        if args.mode == "sd-share":
+            model = ProfileShareSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else ShareSDWrapper(draft_params=draft_params)
+        else:
+            model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
         model.set_ssm(ssm)
         
     else:
@@ -97,11 +128,12 @@ def load_model(
         
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
         if ssm is not None:
+            # ssm.prefill_forward = torch.compile(ssm.prefill_forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
             ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
 
     return model, tokenizer
 
-def main(args):
+def main(args, dtype=torch.bfloat16):
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -111,7 +143,7 @@ def main(args):
 
     # load model
     print("Loading model...")
-    model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=torch.float16, device="auto", args=args)
+    model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=dtype, device="auto", args=args)
 
     # warm up
     if args.warmup_iter > 0:

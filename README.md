@@ -2,6 +2,15 @@
 
 <br>
 
+# Share-SD Prototype
+This branch is only the prototype of the Share-SD project. Will be merged into the main repo after the project is finished.
+### Current Progress:
+- [x] Quant llm linears, can switch between org/quant on verify/draft. (Slow if not compiled)
+- [ ] Fix Problem: torch.compile slows down inference.
+- [ ] Allow skipping several layers to be quantized.
+- [ ] Fix Problem: SD doesn't obtain 100% accuracy when ssm & llm uses the same model with no sampling.
+
+
 ## 1. Fast Run & Test:
 Simple run the following bash script to test the code:
 ```bash

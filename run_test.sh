@@ -42,13 +42,12 @@ shift $((OPTIND - 1))
 ###############################################################################
 # Paths
 LLM_PATH=meta-llama/Llama-2-7b-chat-hf
-SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
+# SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # SSM_PATH=~/checkpoints/eagle/official/EAGLE-llama2-chat-7B/
 
 # Execution parameters
 SEED=9991
-WARMUP_ITER=20
-DO_WARMUP=True
+WARMUP_ITER=0
 DO_SAMPLE=False
 TEMPERATURE=0
 
@@ -58,24 +57,26 @@ TEMPERATURE=0
 MAX_LENGTH=1024
 
 # drafting parameters
-DRAFT_MAX_DEPTH=6
+DRAFT_MAX_DEPTH=15
 DRAFT_TOPK_LEN=10
 DRAFT_MAX_VERIFY_TOKENS=60
 DRAFT_MIN_ACCEPT_PROB=1e-2
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
 # MODE="naive"
-MODE="sd-classic"
+# MODE="sd-classic"
+# MODE="sd-awq"
 # MODE="sd-eagle"
+MODE="sd-share"
 
 # KV-cache options: ["static", "dynamic"]
 CACHE_IMPL="static"
 # CACHE_IMPL="dynamic"
 
 # Compile mode options: ["eager", "reduce-overhead", "max-autotune"]
-# COMPILE_MODE="eager"
+COMPILE_MODE="eager"
 # COMPILE_MODE="reduce-overhead"
-COMPILE_MODE="max-autotune"
+# COMPILE_MODE="max-autotune"
 
 # NVTX profiling
 # NVTX_PROFILING=True
