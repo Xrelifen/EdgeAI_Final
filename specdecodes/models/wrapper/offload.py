@@ -15,8 +15,16 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from transformers import AutoModelForCausalLM, AutoConfig
 from transformers.generation.logits_process import LogitsWarper
 from transformers.generation.stopping_criteria import StoppingCriteria
-from accelerate import dispatch_model
-# from .my.big_modeling import dispatch_model
+from accelerate import (
+    dispatch_model, 
+    infer_auto_device_map
+)
+from accelerate.utils import named_module_tensors
+from ..modeling_utils import (
+    set_module_tensor_to_device,
+    dispatch_model_with_prefetch
+)
+
 from transformers.cache_utils import StaticCache, DynamicCache
 
 from bigtree import preorder_iter, levelorder_iter
@@ -183,12 +191,12 @@ class OffloadSDWrapper(SDWrapper):
 
     def set_offload_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
-        device_map = {
-            "model.embed_tokens": "cuda:0",
-            "model.norm": "cuda:0",
-            "model.rotary_emb": "cuda:0",
-            "lm_head": "cuda:0",
-        }
+        # device_map = {
+        #     "model.embed_tokens": "cuda:0",
+        #     "model.norm": "cuda:0",
+        #     "model.rotary_emb": "cuda:0",
+        #     "lm_head": "cuda:0",
+        # }
         logging.info(f'[Memory Limit]: {memory_limit} GB')
         if 'autoawq' in llm_path:
             memory_map = {0: "0GiB", "cpu": "99GiB"}
@@ -198,27 +206,6 @@ class OffloadSDWrapper(SDWrapper):
                 low_cpu_mem_usage=True,
                 max_memory=memory_map
             ).model
-            # self.llm = AutoModelForCausalLM.from_pretrained(
-            #     llm_path, 
-            #     device_map='cpu',
-            #     low_cpu_mem_usage=True,
-            # )
-            
-            # Iterate over named buffers
-            # import torch.nn as nn
-            # buffer_keywords = ["qweight", "qzeros", "scales"]
-            # for name, buffer in list(self.llm.named_buffers()):  # Use list() to avoid modification issues during iteration
-            #     if any(keyword in name for keyword in buffer_keywords):
-            #         # Extract the parent module and attribute name
-            #         module_name, buffer_name = name.rsplit('.', 1)
-            #         parent_module = dict(self.llm.named_modules())[module_name]
-                    
-            #         # Unregister the buffer
-            #         buffer_data = getattr(parent_module, buffer_name)
-            #         delattr(parent_module, buffer_name)  # Remove it from the module
-
-            #         # Register it as a parameter
-            #         parent_module.register_parameter(buffer_name, nn.Parameter(buffer_data, requires_grad=False))
 
         else: 
             self.llm = AutoModelForCausalLM.from_pretrained(
@@ -228,67 +215,114 @@ class OffloadSDWrapper(SDWrapper):
                 torch_dtype=torch.float16
             )
 
-        estimated_mem = torch.cuda.memory_allocated(device)
-        logging.info(f"Init Allocated Memory = {estimated_mem / (1024 ** 3)} GB")
-        
-        for param in self.llm.model.embed_tokens.parameters():
-            estimated_mem += param.numel() * param.element_size()
-        for param in self.llm.lm_head.parameters():
-            estimated_mem += param.numel() * param.element_size()
-        estimated_mem = estimated_mem / (1024 ** 3)
-        
-        decoder_layer_mem = 0.0
-        for param in self.llm.model.layers[0].parameters():
-            decoder_layer_mem += param.numel() * param.element_size()
-        for buffer in self.llm.model.layers[0].buffers():
-            decoder_layer_mem += buffer.numel() * buffer.element_size()
-            
-        decoder_layer_mem = decoder_layer_mem / (1024 ** 3)
-        memory_limit = memory_limit / 1.2
-
-        # Estimate Activation & kv-cache
-        # estimated_act = 0
-        # estimated_act += 2 * 256 * llm_config.hidden_size * llm_config.num_hidden_layers * 4  # QKVO
-        # estimated_act += 2 * 256 * llm_config.max_position_embeddings  # lm_head
-        # estimated_act += 2 * 256 * llm_config.intermediate_size * llm_config.num_hidden_layers  # mlp
-        # estimated_kv_cache = 2 * 512 * llm_config.hidden_size * llm_config.num_hidden_layers * 2  # KV-cache
-        # estimated_act /= (1024 ** 3)
-        # estimated_kv_cache /= (1924 ** 3)
-        
-        # print(f"Estimated Activation: {estimated_act} GB")
-        # print(f"Estimated KV-Cache: {estimated_kv_cache} GB")
-
-        # memory_limit = memory_limit - estimated_act - estimated_kv_cache
-
-        # TODO: Check the memory usage to check how much layers to be offloaded
-        for i in range(len(self.llm.model.layers)):
-            if estimated_mem <= memory_limit - decoder_layer_mem:
-                estimated_mem += decoder_layer_mem
-                device_map[f"model.layers.{i}"] = device
-            else:
-                device_map[f"model.layers.{i}"] = "cpu"
-        # logging.info(f"[Check] device_map:")
-        # for key, value in device_map.items():
-        #     logging.info(f"[Check] {key}: {value}")
-
-        
-        # set pin_memory to reduce memory access time
+        llm_config = self.llm.config
         for layer in self.llm.model.layers:
             for param in layer.parameters():
                 param.data = param.data.cpu().pin_memory(device)
             for buffer in layer.buffers():
                 buffer.data = buffer.data.cpu().pin_memory(device)
-        estimated_mem = torch.cuda.memory_allocated(device)
-        logging.info(f"Before dispatch model = {estimated_mem / (1024 ** 3)} GB")
+
+        # Set rotary_emb & rmsnorm to device
+        for tensor_name, _ in named_module_tensors(self.llm.model.rotary_emb):
+            set_module_tensor_to_device(self.llm.model.rotary_emb, tensor_name, device)
+        for tensor_name, _ in named_module_tensors(self.llm.model.norm):
+            set_module_tensor_to_device(self.llm.model.norm, tensor_name, device)
+
+        # Set embed_tokens and lm_head to device
+        embed_tokens = self.llm.get_input_embeddings()
+        for tensor_name, _ in named_module_tensors(embed_tokens):
+            set_module_tensor_to_device(embed_tokens, tensor_name, device)
+        lm_head = self.llm.get_output_embeddings()
+        for tensor_name, _ in named_module_tensors(lm_head):
+            set_module_tensor_to_device(lm_head, tensor_name, device)
+
+        mem_usage = torch.cuda.memory_allocated(device) / (10 ** 9)
+        estimated_mem_usage = mem_usage / 0.9
+        logging.info(f"Init Allocated Memory = {estimated_mem_usage} GB")
+        
+        # Estimated Memory Usage for each sublayer
+        llama_layer = ['input_layernorm', 'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'post_attention_layernorm', \
+                        'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj']
+        
+        max_mem = 0
+        llama_layer_mem = {}
+        for layer_name in llama_layer:
+            layer_mem = 0
+            layer_name_split = layer_name.split('.')
+
+            module = self.llm.model.layers[0]
+            for sublayer_name in layer_name_split:
+                module = getattr(module, sublayer_name, None)
+                assert module is not None, "Sub-Layer not found in current module"
+
+            for param in module.parameters():
+                layer_mem += param.numel() * param.element_size()
+            for buffer in module.buffers():
+                layer_mem += buffer.numel() * buffer.element_size()
+            layer_mem = (layer_mem / 0.9) / (10 ** 9)
+            llama_layer_mem[layer_name] = layer_mem
+            max_mem = max(max_mem, layer_mem)
+        
+        logging.info(f'[Check Llama Layer Mem Usage] {llama_layer_mem}')
+        # Estimated Memory Usage For Device Map
+        estimated_mem_usage += 512 * llm_config.vocab_size * 2 * 2 / (10 ** 9)
+        head_dim = llm_config.hidden_size / llm_config.num_attention_heads
+        kv_dim = head_dim * llm_config.num_key_value_heads
+        estimated_mem_usage += 1024 * kv_dim * 2 * llm_config.num_hidden_layers * 2 * 2 / (10 ** 9)
+
+        prefetch_name_map = {}
+        module_map = {}
+        device_map = {}
+        for block_n in range(llm_config.num_hidden_layers):
+            for layer_n in range(len(llama_layer)):
+                layer_name = llama_layer[layer_n]
+                prefixed_layer_name = f'{block_n}.{layer_name}'
+                
+                next_layer_n = (layer_n+1) % len(llama_layer)
+                if next_layer_n < layer_n:
+                    prefixed_next_layer_name = f'{block_n+1}.{llama_layer[next_layer_n]}'
+                else:
+                    prefixed_next_layer_name = f'{block_n}.{llama_layer[next_layer_n]}'
+
+                if estimated_mem_usage <= memory_limit - 3 * max_mem:
+                    device_map[prefixed_layer_name] = device
+                    estimated_mem_usage += llama_layer_mem[layer_name]
+                    if estimated_mem_usage >= memory_limit - 3 * max_mem:
+                        prefetch_name_map[prefixed_layer_name] = prefixed_next_layer_name
+                else:
+                    device_map[prefixed_layer_name] = 'cpu'
+                    if block_n != llm_config.num_hidden_layers - 1 or layer_n != len(llama_layer) - 1:
+                        prefetch_name_map[prefixed_layer_name] = prefixed_next_layer_name
+
+                layer_name_split = layer_name.split('.')
+                module = self.llm.model.layers[block_n]
+                for sublayer_name in layer_name_split:
+                    module = getattr(module, sublayer_name, None)
+                module_map[prefixed_layer_name] = module
+                assert module_map[prefixed_layer_name] is not None, "module not found"
+        
+        logging.info(f'[Estimated Memory Usage] {estimated_mem_usage} GB')
+        logging.info(f'[Check Device Map]')
+        for module_name, dev in device_map.items():
+            logging.info(f'{module_name}: {dev}')
+        logging.info(f'[Check Prefetch Map]')
+        for module_name, next_module_name in prefetch_name_map.items():
+            logging.info(f'{module_name} - {next_module_name}')
         
         # TODO: prefetch next layer
         if 'autoawq' in llm_path:
             offload_buffers = ["qweight", "qzeros", "scales"]
             self.llm = dispatch_model(self.llm, device_map=device_map, offload_buffers=offload_buffers)
         else:
-            self.llm = dispatch_model(self.llm, device_map=device_map)
-        allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        logging.info(f"Allocated Memory = {allocated_memory} GB")
+            self.llm.model.layers = dispatch_model_with_prefetch(
+                self.llm.model.layers,
+                device_map=device_map,
+                prefetch_name_map=prefetch_name_map,
+                module_map=module_map
+            )
+
+        allocated_memory = (torch.cuda.memory_allocated(device) / 0.9) / (10 ** 9)
+        logging.info(f"[Memory After Dispatch] {allocated_memory} GB")
         
         if allocated_memory > memory_limit:
             logging.info(f"[Warning] memory usage is too much")
@@ -476,3 +510,340 @@ class ProfileOffloadSDWrapper(OffloadSDWrapper):
         )
         
         return input_ids
+    
+class TwoBitOffloadSDWrapper(SDWrapper):
+    def __init__(self, method="greedy"):
+        super(TwoBitOffloadSDWrapper, self).__init__(method=method)
+
+    def set_offload_llm(self, llm_path, memory_limit=8.0, device="cuda:0"):
+        assert self.ssm is not None, "SSM model must first be loaded on gpu"
+        assert hasattr(self.ssm.model.config, '_name_or_path'), "Currently only support QTIP quantize version"
+
+        ssm_config = self.ssm.model.config
+        llama_version = llm_path.split('/')[-1].lower()
+        
+        # logging.info(f'llama_version: {llama_version} - ssm_path: {ssm_config._name_or_path}')
+        assert llama_version in ssm_config._name_or_path.lower(), "SSM must pick 2-bit quantize version of LLM"
+
+        # device_map = {
+        #     "model.embed_tokens": "cuda:0",
+        #     "model.norm": "cuda:0",
+        #     "model.rotary_emb": "cuda:0",
+        #     "lm_head": "cuda:0",
+        # }
+        logging.info(f'[Memory Limit]: {memory_limit} GB')
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            llm_path, 
+            device_map="cpu", 
+            low_cpu_mem_usage=True, 
+            torch_dtype=torch.bfloat16
+        )
+        
+        # Set pin_memory to reduce memory access time
+        for layer in self.llm.model.layers:
+            for param in layer.parameters():
+                param.data = param.data.cpu().pin_memory(device)
+            for buffer in layer.buffers():
+                buffer.data = buffer.data.cpu().pin_memory(device)
+        llm_config = self.llm.config
+
+        mem_usage = torch.cuda.memory_allocated(device)
+        logging.info(f"[SSM Memory Usage] {mem_usage / (10 ** 9)} GB")
+
+        # LLM share lm_head and embedding with SSM
+        llm_embed_tokens = self.llm.get_input_embeddings()
+        ssm_embed_tokens = self.ssm.model.get_input_embeddings()
+        self.llm.set_input_embeddings(ssm_embed_tokens)
+
+        llm_lm_head = self.llm.get_output_embeddings()
+        ssm_lm_head = self.ssm.model.get_output_embeddings()
+        self.llm.set_output_embeddings(ssm_lm_head)
+
+        del llm_embed_tokens, llm_lm_head
+        gc.collect()
+
+        # Set rotary_emb & rmsnorm to device
+        for tensor_name, _ in named_module_tensors(self.llm.model.rotary_emb):
+            set_module_tensor_to_device(self.llm.model.rotary_emb, tensor_name, device)
+        for tensor_name, _ in named_module_tensors(self.llm.model.norm):
+            set_module_tensor_to_device(self.llm.model.norm, tensor_name, device)
+
+        mem_usage = torch.cuda.memory_allocated(device) / (10 ** 9)
+        estimated_mem_usage = mem_usage / 0.9
+        logging.info(f'[Check Share Module Usage] {estimated_mem_usage} GB')
+
+        # Estimated Memory Usage for each sublayer
+        llama_layer = ['input_layernorm', 'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'post_attention_layernorm', \
+                        'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj']
+        
+        max_mem = 0
+        llama_layer_mem = {}
+        for layer_name in llama_layer:
+            layer_mem = 0
+            layer_name_split = layer_name.split('.')
+
+            module = self.llm.model.layers[0]
+            for sublayer_name in layer_name_split:
+                module = getattr(module, sublayer_name, None)
+                assert module is not None, "Sub-Layer not found in current module"
+
+            for param in module.parameters():
+                layer_mem += param.numel() * param.element_size()
+            for buffer in module.buffers():
+                layer_mem += buffer.numel() * buffer.element_size()
+            layer_mem = (layer_mem / 0.9) / (10 ** 9)
+            llama_layer_mem[layer_name] = layer_mem
+            max_mem = max(max_mem, layer_mem)
+        
+        logging.info(f'[Check Llama Layer Mem Usage] {llama_layer_mem}')
+        # Estimated Memory Usage For Device Map
+        estimated_mem_usage += 512 * llm_config.vocab_size * 2 * 2 / (10 ** 9)
+        head_dim = llm_config.hidden_size / llm_config.num_attention_heads
+        kv_dim = head_dim * llm_config.num_key_value_heads
+        estimated_mem_usage += 1024 * kv_dim * 2 * llm_config.num_hidden_layers * 2 * 2 / (10 ** 9)
+
+        prefetch_name_map = {}
+        module_map = {}
+        device_map = {}
+        for block_n in range(llm_config.num_hidden_layers):
+            for layer_n in range(len(llama_layer)):
+                layer_name = llama_layer[layer_n]
+                prefixed_layer_name = f'{block_n}.{layer_name}'
+                
+                next_layer_n = (layer_n+1) % len(llama_layer)
+                if next_layer_n < layer_n:
+                    prefixed_next_layer_name = f'{block_n+1}.{llama_layer[next_layer_n]}'
+                else:
+                    prefixed_next_layer_name = f'{block_n}.{llama_layer[next_layer_n]}'
+
+                if estimated_mem_usage <= memory_limit - 3 * max_mem:
+                    device_map[prefixed_layer_name] = device
+                    estimated_mem_usage += llama_layer_mem[layer_name]
+                    if estimated_mem_usage >= memory_limit - 3 * max_mem:
+                        prefetch_name_map[prefixed_layer_name] = prefixed_next_layer_name
+                else:
+                    device_map[prefixed_layer_name] = 'cpu'
+                    if block_n != llm_config.num_hidden_layers - 1 or layer_n != len(llama_layer) - 1:
+                        prefetch_name_map[prefixed_layer_name] = prefixed_next_layer_name
+
+                layer_name_split = layer_name.split('.')
+                module = self.llm.model.layers[block_n]
+                for sublayer_name in layer_name_split:
+                    module = getattr(module, sublayer_name, None)
+                module_map[prefixed_layer_name] = module
+                assert module_map[prefixed_layer_name] is not None, "module not found"       
+        
+        logging.info(f'[Estimated Memory Usage] {estimated_mem_usage} GB')
+        logging.info(f'[Check Device Map]')
+        for module_name, dev in device_map.items():
+            logging.info(f'{module_name}: {dev}')
+        logging.info(f'[Check Prefetch Map]')
+        for module_name, next_module_name in prefetch_name_map.items():
+            logging.info(f'{module_name} - {next_module_name}')
+
+        
+        # TODO: prefetch next layer
+        # self.llm = prefetch_dispatch_model(
+        #     self.llm, 
+        #     device_map=device_map, 
+        #     prefetch_name_map=prefetch_name_map,
+        #     module_map=module_map
+        # )
+        # self.llm.model.layers = dispatch_model(self.llm.model.layers, device_map=device_map)
+        self.llm.model.layers = dispatch_model_with_prefetch(
+            self.llm.model.layers,
+            device_map=device_map,
+            prefetch_name_map=prefetch_name_map,
+            module_map=module_map
+        )
+
+        # self.llm = dispatch_model(self.llm, device_map=device_map)
+        allocated_memory = (torch.cuda.memory_allocated(device) / 0.9) / (10 ** 9)
+        logging.info(f"[Memory After Dispatch] {allocated_memory} GB")
+        
+        if allocated_memory > memory_limit:
+            logging.info(f"[Warning] memory usage is too much")
+
+    def _speculate(self, input_ids, hidden_states, past_key_values, use_static_tree_cache=False):
+        return super()._speculate(input_ids=input_ids, hidden_states=hidden_states, past_key_values=past_key_values, use_static_tree_cache=use_static_tree_cache)
+
+    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+        return super()._tree_decoding(root, past_key_values, position_offset, device, dtype=dtype)
+
+    def _generate(
+        self, 
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+        use_static_tree_cache: bool = False,
+    ):   
+        return super()._generate(input_ids, stopping_criteria, logits_warper, do_sample, use_static_tree_cache) 
+    
+class ProfileTwoBitOffloadSDWrapper(TwoBitOffloadSDWrapper):
+    def __init__(self, method="greedy", out_dir="specdecodes/experiments/profile_data", prefix="sd"):
+        super(ProfileTwoBitOffloadSDWrapper, self).__init__(method=method)
+        self.profile_data = {}
+        self.sampled_count = 1 # assume first token is sampled (prefill stage)
+        self.iter_count = 1 # assume first step is done (prefill stage)
+        
+        self.out_dir = out_dir
+        self.prefix = prefix
+
+        self.exp_log = {}
+        self.draft_time_per_iter = []
+        self.target_time_per_iter = []
+        self.verify_time_per_iter = []
+        
+    
+    def _speculate(self, input_ids, hidden_states, past_key_values):
+        start_time = time.perf_counter()
+        # with record_function("_speculate"):
+        #     root = super()._speculate(input_ids, hidden_states, past_key_values)
+        root = super()._speculate(input_ids, hidden_states, past_key_values)
+        self.draft_time_per_iter.append(time.perf_counter()-start_time)
+        return root
+    
+    def _tree_decoding(self, root, past_key_values, position_offset, device, dtype=torch.float32):
+        start_time = time.perf_counter()
+        # with record_function("_tree_decoding"):
+        #     outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
+        outputs = super()._tree_decoding(root, past_key_values, position_offset, device, dtype)
+        self.target_time_per_iter.append(time.perf_counter()-start_time)
+        return outputs
+    
+    def _verify(self, root, logits, logits_warper, do_sample):
+        start_time = time.perf_counter()
+        # with record_function("_verify"):
+        #     sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        sampled_tokens, hidden_indices, (total_len, accept_len) = super()._verify(root, logits, logits_warper, do_sample)
+        self.verify_time_per_iter.append(time.perf_counter()-start_time)
+        
+        # tokenize id to text for visualization
+        # nodes = list(preorder_iter(root))
+        # for node in nodes:
+        #     node.id = self.tokenizer.decode(torch.tensor([node.id]), clean_up_tokenization_spaces=False)
+        
+        # profile data
+        # json_graph = tree_to_nested_dict(root, name_key="name", attr_dict={"id": "id", "prob": "prob", "global_prob": "global_prob"})
+        # sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
+        # self.profile_data[self.iter_count] = {}
+        # self.profile_data[self.iter_count]["draft_tree"] = json_graph
+        # self.profile_data[self.iter_count]["sampled_tokens"] = sampled_tokens_list
+        
+        # create profile data if not exist
+        self.profile_data['iter'] = self.profile_data.get('iter', [])
+        self.profile_data['total_len'] = self.profile_data.get('total_len', [])
+        self.profile_data['accept_len'] = self.profile_data.get('accept_len', [])
+            
+        sampled_tokens_list = sampled_tokens.squeeze(0).tolist()
+        self.profile_data['iter'].append(sampled_tokens_list)
+        self.profile_data['total_len'].append(total_len)
+        self.profile_data['accept_len'].append(accept_len)
+        # logging
+        logging.debug(
+            f"Total: {len(list(preorder_iter(root)))},"\
+            f"\tPredicted ({accept_len}/{total_len}): {self.tokenizer.batch_decode(sampled_tokens.squeeze(0), clean_up_tokenization_spaces=False)}"
+        )
+        
+        # update stats
+        self.sampled_count += len(sampled_tokens[0])
+        self.iter_count += 1
+        
+        return sampled_tokens, hidden_indices, (total_len, accept_len)
+    
+    
+    def _generate(
+        self,
+        input_ids: torch.LongTensor,
+        stopping_criteria: StoppingCriteria,
+        logits_warper: LogitsWarper,
+        do_sample: bool,
+    ):
+        cur_time = time.strftime("%Y%m%d-%H%M%S")
+        
+        # prepare output directory
+        if self.out_dir is not None:
+            os.makedirs(self.out_dir, exist_ok=True)
+            out_path = os.path.join(self.out_dir, f"{self.prefix}_{cur_time}.json")
+        else:
+            out_path = None
+        
+        # run generation
+        org_input_len = len(input_ids[0])
+        start_time = time.perf_counter()
+        input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        end_time = time.perf_counter()
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        #     input_ids = super()._generate(input_ids, stopping_criteria, logits_warper, do_sample)
+        # end_time = time.perf_counter()
+
+        # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        # prof.export_chrome_trace("trace.json")
+        
+        # compute stats
+        total_sampled = self.sampled_count
+        total_iterations = self.iter_count
+        avg_sampled = total_sampled / total_iterations
+        depth = max(self.profile_data['total_len']) + 1
+        
+        # alpha (node)
+        total_lens = torch.bincount( torch.tensor(self.profile_data['total_len']), minlength=depth)
+        accept_lens = torch.bincount( torch.tensor(self.profile_data['accept_len']), minlength=depth)
+        depth_total_cnt = total_lens + total_lens.sum() - total_lens.cumsum(dim=-1) # reverse cumsum
+        depth_total_cnt = depth_total_cnt[1:] # remove first element
+        depth_accept_cnt = accept_lens + accept_lens.sum() - accept_lens.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_accept_cnt[1:] # remove first element
+        alpha_per_node = depth_accept_cnt.float() / depth_total_cnt.float()
+        
+        # aLive ratio
+        depth_alive_rate = depth_total_cnt.float() / depth_total_cnt[0]
+        
+        # alpha (depth)
+        sampled_lens = torch.tensor([len(sampled_tokens) for sampled_tokens in self.profile_data["iter"]])
+        sampled_len_bins = torch.bincount(sampled_lens, minlength=depth+1)
+        depth_total_cnt = sampled_len_bins + sampled_len_bins.sum() - sampled_len_bins.cumsum(dim=-1) # reverse cumsum
+        depth_accept_cnt = depth_total_cnt - sampled_len_bins
+        depth_total_cnt = depth_total_cnt[1:depth]
+        depth_accept_cnt = depth_accept_cnt[1:depth]
+        alpha_per_depth = depth_accept_cnt.float() / depth_total_cnt.float()
+        
+        # log stats
+        tb = pt.PrettyTable()
+        tb.field_names = [ "Summary \ Depth" ] + [ f"{i}" for i in range(1, depth) ]
+        tb.add_row([ "Trials count" ] + [ f"{val}" for val in depth_total_cnt.tolist() ])
+        tb.add_row([ "Accept count" ] + [ f"{val}" for val in depth_accept_cnt.tolist() ])
+        tb.add_row([ "Alpha (node)" ] + [ f"{val:.2f}" for val in alpha_per_node.tolist() ])
+        tb.add_row([ "Alpha (depth)" ] + [ f"{val:.2f}" for val in alpha_per_depth.tolist() ])
+        tb.add_row([ "Alive ratio" ] + [ f"{val:.2f}" for val in depth_alive_rate.tolist() ])
+        logging.info(
+            f"Total sampled: {total_sampled},"\
+            f"\tTotal iterations: {total_iterations},"\
+            f"\tAverage sampled: {avg_sampled:.2f}"\
+            f"\n{tb}"
+        )
+        
+        # save profile data
+        self.profile_data["total_sampled"] = total_sampled
+        self.profile_data["total_iterations"] = total_iterations
+        self.profile_data["average_sampled"] = avg_sampled
+        if self.out_dir is not None:
+            with open(out_path, "w") as f:
+                json.dump(self.profile_data, f)
+                
+        # save exp_log
+        self.exp_log['avg_draft_time'] = np.mean(self.draft_time_per_iter)
+        self.exp_log['avg_target_time'] = np.mean(self.target_time_per_iter)
+        self.exp_log['avg_verify_time'] = np.mean(self.verify_time_per_iter)
+        self.exp_log['avg_sampled'] = avg_sampled
+        self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / (end_time-start_time)
+        logging.info(
+            f"Average draft time: {self.exp_log['avg_draft_time']:.4f},"\
+            f"\tAverage target time: {self.exp_log['avg_target_time']:.4f},"\
+            f"\tAverage verify time: {self.exp_log['avg_verify_time']:.4f}"
+            f"\nGenerated {self.exp_log['n_tokens']} tokens in {end_time-start_time:.2f}s, throughput: {self.exp_log['tput']:.2f} tokens/s"
+        )
+        
+        # logging.info(f'Max Memory Usage: {torch.cuda.max_memory_allocated(input_ids.device) / 10 ** 9}')
+        return input_ids    
