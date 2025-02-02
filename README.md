@@ -8,11 +8,6 @@ Simple run the following bash script to test the code:
 bash run_test.sh
 ```
 
-**c. Speculative Decoding with Target Model Offloading**
-```bash
-LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sd-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
-```
-
 ## 2. Run MT-Bench Benchmark:
 
 a. Naive LLM Decoding:
@@ -30,12 +25,6 @@ c. Eagle-based Speculative Decoding:
 LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=1 python -m specdecodes.benchmark.run_mtbench --dtype float16 -llm meta-llama/Llama-2-7b-chat-hf -ssm <draft model directory> --mode sd-eagle --do-sample --temp 1.0 --out-dir <out directory> --log-dir <log directory>
 ```
 
-- New MTBench runner
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m specdecodes.benchmark.run_mtbench --llm-path meta-llama/Llama-3.1-8B-Instruct --ssm-path meta-llama/Llama-3.2-1B-Instruct --mode sd-offload
-```
-
-
 ## 3. To Train Eagle-Based SSM:
 
 ### 1. Generate Dataset
@@ -52,12 +41,15 @@ bash train.sh
 
 ## TODO
 
-- [ ] Acelerate model using torch Inductor
+Inference
+- [x] Accelerated the model using Torch Inductor, achieving an additional 2.1× speedup on the compiled LLM and 4.48× with the compiled LLM + SD!
+- [ ] Allow speculative decoding to run using multiple GPUs
+  - May require copying llm's embed_token in each GPU for efficiency.
+  - May require refactoring wrapper and ssm's code.
+- [ ] Support multiple batch size for inference
+  - Currently only support batch size 1
 
+Training
 - [ ] Rewrite data_gen
   - data_gen produces wrong masking. Currently only old version works.
   - Rewrite data_gen with cleaner code.
-
-- [ ] Handle multiple GPU inference correctly
-  - May require copying llm's embed_token in each GPU for efficiency.
-  - May require refactoring wrapper and ssm's code.

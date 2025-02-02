@@ -122,28 +122,26 @@ class Tree:
             [node.cumulative_probability for node in self.nodes],
             dtype=self.prob_dtype
         )
-        _, keep_idx = torch.topk(probs, k=n, sorted=False)
-        keep_set = set(keep_idx.tolist())
+        _, keep_idx = torch.topk(probs, k=n, sorted=True)
+        keep_list = keep_idx.tolist()
 
-        stack = list(keep_set)
-        while stack:
-            cur = stack.pop()
-            p = self.nodes[cur].parent
-            if p is not None and p not in keep_set:
-                keep_set.add(p)
-                stack.append(p)
-
-        keep_list = sorted(keep_set)
+        # Rebuild the nodes
         old2new = {old_i: new_i for new_i, old_i in enumerate(keep_list)}
-
         new_nodes = []
         for old_i in keep_list:
             o_node = self.nodes[old_i]
-            new_parent = old2new[o_node.parent] if (o_node.parent in old2new) else None
-            n_node = TreeNode(new_parent, o_node.token_id, o_node.cumulative_probability, o_node.depth)
+            # parent might or might not be in keep_list:
+            new_parent = old2new[o_node.parent] if o_node.parent in old2new else None
+            n_node = TreeNode(
+                parent=new_parent,
+                token_id=o_node.token_id,
+                cumulative_probability=o_node.cumulative_probability,
+                depth=o_node.depth
+            )
             n_node.has_been_sampled = o_node.has_been_sampled
             new_nodes.append(n_node)
 
+        # Children references
         for new_i, old_i in enumerate(keep_list):
             for c in self.nodes[old_i].children:
                 if c in old2new:
@@ -205,8 +203,9 @@ class Tree:
             am_tensor = torch.cat([prefix, am_tensor], dim=1)
 
         # Convert to large negative for masking
-        neg_inf_mask = (~am_tensor).to(self.prob_dtype) * torch.finfo(self.prob_dtype).min
-        return neg_inf_mask.unsqueeze(0).unsqueeze(0)
+        # neg_inf_mask = (~am_tensor).to(self.prob_dtype) * torch.finfo(self.prob_dtype).min
+        # return neg_inf_mask.unsqueeze(0).unsqueeze(0)
+        return am_tensor.unsqueeze(0).unsqueeze(0)
 
     def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = True):
         if not (show_token_id or show_probability):

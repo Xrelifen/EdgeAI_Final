@@ -4,13 +4,15 @@ import torch.nn as nn
 from transformers.generation.logits_process import LogitsWarper, LogitsProcessorList, TemperatureLogitsWarper, TopKLogitsWarper, TopPLogitsWarper, LogitNormalization
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList, MaxLengthCriteria, MaxTimeCriteria, EosTokenCriteria
 
+#from transformers.cache_utils import DynamicCache, StaticCache
+from .cache_utils import TreeDynamicCache, TreeStaticCache # Added extra functions to support tree decoding
 
 # https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py
 # Several functions are form class GenerationMixin, simplified.
 class WrapperBase(nn.Module):
-    def __init__(self):
+    def __init__(self, cache_implementation="dynamic"):
         super(WrapperBase, self).__init__()
-        self.exp_log = {}
+        self.cache_implementation = cache_implementation
         
     # calling .config is same as calling .llm.config
     @property
@@ -23,6 +25,10 @@ class WrapperBase(nn.Module):
     
     def set_llm(self, llm):
         self.llm = llm
+        
+        # set prefill function same as forward so torch.compile() forward will not execute on prefill phase)
+        #! Not needed on torch version=2.7, after torch.compiler.set_stance("force_eager") is introduced
+        self.llm.prefill_forward = self.llm.forward
         
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
@@ -137,7 +143,7 @@ class WrapperBase(nn.Module):
         temperature=None,
         top_p=None,
         top_k=None,
-        max_new_tokens=2048,
+        max_new_tokens=None,
         max_length=None,
         do_sample=True,
         use_static_tree_cache=False,
@@ -168,3 +174,24 @@ class WrapperBase(nn.Module):
             use_static_tree_cache=use_static_tree_cache,
         )
         return results
+    
+    def create_kv_cache(
+        self,
+        cache_implementation,
+        max_cache_len=None,
+        max_batch_size=None,
+        config=None,
+        device=None,
+        dtype=None,
+    ):
+        if cache_implementation == "dynamic":
+            return TreeDynamicCache()
+        
+        elif cache_implementation == "static":
+            return TreeStaticCache(
+                max_cache_len=max_cache_len,
+                max_batch_size=max_batch_size,
+                config=config,
+                device=device,
+                dtype=dtype,
+            )

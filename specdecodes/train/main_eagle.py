@@ -10,6 +10,7 @@ from transformers import LlamaForCausalLM, AutoConfig, get_cosine_schedule_with_
 from accelerate import Accelerator
 from accelerate.utils import set_seed, release_memory, tqdm
 from accelerate.logging import get_logger
+from safetensors.torch import save_file
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
@@ -49,6 +50,8 @@ def train_one_epoch(
     train_config, epoch, num_epochs, accelerator, run=None
 ):
     model.train()
+    llm_first.eval()
+    llm_last.eval()
     total_correct = 0
     total_samples = 0
     total_expect = 0
@@ -64,13 +67,11 @@ def train_one_epoch(
                 t_logits = llm_last(t_hidden_states)
 
             # Student outputs
-            s_hidden_states = model(
+            s_logits, s_hidden_states = model(
                 input_ids=data["input_ids"],
                 hidden_states=data["hidden_states"],
-                embed_tokens=llm_first,
                 attention_mask=data["attention_mask"]
             )
-            s_logits = llm_last(s_hidden_states, head_only=True)
 
             # Calculate loss
             loss, vloss, ploss = calculate_loss(
@@ -142,6 +143,8 @@ def validate(
     epoch, num_epochs, save_dir, accelerator, run=None
 ):
     model.eval()
+    llm_first.eval()
+    llm_last.eval()
     total_correct = 0
     total_samples = 0
     total_expect = 0
@@ -157,13 +160,11 @@ def validate(
         t_logits = llm_last(t_hidden_states)
 
         # Student outputs
-        s_hidden_states = model(
+        s_logits, s_hidden_states = model(
             input_ids=data["input_ids"],
             hidden_states=data["hidden_states"],
-            embed_tokens=llm_first,
             attention_mask=data["attention_mask"]
         )
-        s_logits = llm_last(s_hidden_states, head_only=True)
 
         # Calculate loss
         loss, vloss, ploss = calculate_loss(
@@ -222,9 +223,20 @@ def validate(
 
         # Save model checkpoint
         if (epoch + 1) % train_config["save_freq"] == 0 or (epoch + 1) == num_epochs:
-            save_path = os.path.join(save_dir, f"model_{epoch + 1}")
-            accelerator.save_model(model, save_path)
-            logger.info(f"Model saved at: {save_path}")
+            unwrapped_model = accelerator.unwrap_model(model)
+            
+            # Filter out unwanted keys in one line
+            filtered_sd = {
+                k: v
+                for k, v in unwrapped_model.state_dict().items()
+                if not k.startswith(("embed_tokens.", "lm_head."))
+            }
+
+            # Create subdirectory and save .safetensors
+            save_subdir = os.path.join(save_dir, f"model_{epoch + 1}")
+            os.makedirs(save_subdir, exist_ok=True) # ensure directory exists
+            save_path = os.path.join(save_subdir, "model.safetensors")
+            save_file(filtered_sd, save_path)
             
     accelerator.wait_for_everyone()
             
@@ -347,6 +359,7 @@ def main(args):
     else:
         logger.info("Loading draft model...")
         model = SSM_Eagle(config=draft_config, keep_embeddings=args.keep_embeddings)
+    model.set_modules(embed_tokens=llm_first, lm_head=llm_last)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
@@ -421,7 +434,7 @@ def main(args):
                 model, llm_first, llm_last, test_loader, train_config,
                 epoch, args.epochs, args.savedir, accelerator, run
             )
-
+            
     # Finish wandb run
     if accelerator.is_main_process and run:
         run.finish()

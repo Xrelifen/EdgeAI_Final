@@ -1,44 +1,40 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from tqdm import trange
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from copy import deepcopy
 import argparse
 import time
 import os
 import logging
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
+import specdecodes.models.llm.modeling_llama as modeling_llama
+# from transformers.models.llama import modeling_llama
 from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
-from specdecodes.models import SSM_Classic, SSM_Eagle, SSM_SQ, SSM_QTIP
-
-# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-2-7b-chat-hf -ssm TinyLlama/TinyLlama-1.1B-Chat-v1.0
-# LOGLEVEL=INFO CUDA_VISIBLE_DEVICES=0 python run_test.py --max-new-tokens 256 --temp 1.0 --do-sample --seed 999 --mode sq-offload --sd-method greedy -llm meta-llama/Llama-3.1-8B-Instruct -ssm meta-llama/Llama-3.2-1B-Instruct
-
+from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle, SSM_QTIP
 import nvtx
 
 def load_model(
     llm_path: str,
     ssm_path: str,
-    mode: str,
-    profile_mode: bool = False,
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
+    args: dict = {},
 ):
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
     # load LLM
-    if 'autoawq' in llm_path:
-        llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            low_cpu_mem_usage=True,
-            device_map=device
-        )
-    else:
-        llm = AutoModelForCausalLM.from_pretrained(
-            llm_path, 
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
-            device_map=device
-        )
+    # llm = AutoModelForCausalLM.from_pretrained(
+    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+        llm_path, 
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+        device_map=device,
+        _attn_implementation="sdpa",
+    )
+    ssm = None
+    
     # check if ssm_path directory exists
     if os.path.exists(ssm_path):
         draft_config = deepcopy(llm.config)
@@ -47,134 +43,137 @@ def load_model(
     else:
         draft_config = None
 
-    if mode == "naive":
-        model = ProfileNaiveWrapper() if profile_mode else NaiveWrapper()
+    if args.mode == "naive":
+        model = ProfileNaiveWrapper() if args.logging else NaiveWrapper()
         
-    elif mode == "hf":
+    elif args.mode == "hf":
         model = HuggingFaceWrapper()
         
-    elif mode == "sd-classic":
-        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
-        
-        # load SSM
-        if 'autoawq' in llm_path:
-            ssm_device = llm.model.layers[-1].self_attn.q_proj.qweight.device
+    elif args.mode.split("-")[0] == "sd":
+        if args.mode == "sd-classic":
+            # load SSM
+            ssm = SSM_Classic.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        elif args.mode == "sd-eagle":
+            # load SSM
+            ssm = SSM_Eagle.from_pretrained(
+                ssm_path,
+                config=draft_config,
+                eos_token_id=tokenizer.eos_token_id,
+                torch_dtype=dtype,
+                keep_embeddings=False,
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
         else:
-            ssm_device = llm.model.layers[-1].self_attn.q_proj.weight.device
+            raise ValueError("Invalid sd mode.")
 
-        ssm = SSM_Classic.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-        ).to(ssm_device)
+        draft_params = DraftParams(
+            max_depth=args.max_depth,
+            topk_len=10,
+            min_accept_prob=0.01
+        )
+        print("Draft params:", draft_params)
+        
+        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
         model.set_ssm(ssm)
         
-    elif mode == "sd-eagle":
-        model = ProfileSDWrapper(out_dir=None) if profile_mode else SDWrapper()
-        
-        # load SSM
-        ssm = SSM_Eagle.from_pretrained(
-            ssm_path,
-            config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-            keep_embeddings=True,
-        ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
-        model.set_ssm(ssm)
     else:
         raise ValueError("Invalid mode.")
-    
+
     # set model
+    model.cache_implementation = args.cache_impl
     model.set_tokenizer(tokenizer)
     model.set_llm(llm)
     model.eval()
-    
+        
+    if args.compile_mode != 'eager':
+        print("Running with Torch Inductor...")
+        torch.set_float32_matmul_precision('high')
+        
+        llm.forward = torch.compile(llm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
+        if ssm is not None:
+            ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
+
     return model, tokenizer
 
 def load_offload_model(
     llm_path: str,
     ssm_path: str,
-    mode: str,
-    sd_method: str,
     dtype: torch.dtype = torch.float16,
-    device="cuda:0",
-    tree_depth=12    
+    device: str = "cuda:0",
+    args: dict = {},
 ):
     # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
 
-    if mode == "sd-offload":
+    if args.mode == "sd-offload":
+
         estimated_mem_1 = torch.cuda.memory_allocated(device)
         logging.info(f"Before loading ssm = {estimated_mem_1 / (1024 ** 3)} GB")
         if "QTIP" in ssm_path:
             ssm = SSM_QTIP.from_pretrained(
                 ssm_path,
-                # config=draft_config,
+                config=None,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
-                sampling_method=sd_method,
-                tree_depth=tree_depth,
-                topk_len=16,
-                min_sample_prob=1e-8,
-                min_accept_prob=1e-8
-            )
+            ).to(device)
+
         else:
             ssm = SSM_Classic.from_pretrained(
                 ssm_path,
-                # config=draft_config,
+                config=None,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
-                sampling_method=sd_method,
-                tree_depth=tree_depth,
-                topk_len=16,
-                min_sample_prob=1e-8,
-                min_accept_prob=1e-8
-            )
+            ).to(device)
 
         ssm = ssm.to(device)
         estimated_mem_2 = torch.cuda.memory_allocated(device)
         logging.info(f"After loading ssm = {estimated_mem_2 / (1024 ** 3)} GB")
         logging.info(f"ssm mem usage = {(estimated_mem_2-estimated_mem_1) / (1024 ** 3)} GB")
 
-        # Load offload model
-        # model = ProfileOffloadSDWrapper()
-        model = OffloadSDWrapper()
-        model.set_ssm(ssm)
-
-    elif mode == "sq-offload":
-        ssm = SSM_SQ.from_pretrained(
-            ssm_path,
-            # config=draft_config,
-            eos_token_id=tokenizer.eos_token_id,
-            torch_dtype=dtype,
-            sampling_method=sd_method,
+        draft_params = DraftParams(
+            max_depth=args.max_depth,
+            topk_len=10,
+            min_accept_prob=0.01
         )
-        grow_map = torch.load('../Sequoia/demo_tree_512_new.pt')
-        ssm.load_spectree_arch(grow_map['branches'])
+        print("Draft params:", draft_params)
         
-        ssm = ssm.to(device)
         # Load offload model
-        model = OffloadSDWrapper()
-        model.set_ssm(ssm)
-    
+        model = ProfileOffloadSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else OffloadSDWrapper(draft_params=draft_params)
 
-    elif mode == "offload":
+        model.set_ssm(ssm)
+
+    elif args.mode == "offload":
         model = OffloadWrapper()
 
     else:
         raise ValueError("Invalid mode.")
 
+    model.cache_implementation = args.cache_impl
     model.set_tokenizer(tokenizer)
     model.set_offload_llm(llm_path, memory_limit=8.0)
     model.eval()
 
+    if args.compile_mode != 'eager':
+        print("Running with Torch Inductor...")
+        torch.set_float32_matmul_precision('high')
+        
+        ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
+
     return model, tokenizer
 
 def main(args):
+    torch._dynamo.config.inline_inbuilt_nn_modules=False
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)	
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
-    logging.basicConfig(format='%(levelname)s - %(message)s', level=LOGLEVEL)
+    logging.basicConfig(level=LOGLEVEL)
 
     # deterministic
     torch.manual_seed(args.seed)
@@ -182,32 +181,34 @@ def main(args):
     # load model
     print("Loading model...")
     if "offload" in args.mode:
-        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, tree_depth = args.depth)
+        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args=args)
     else:
-        model, tokenizer = load_model(args.llm_path, args.ssm_path, args.mode, args.sd_method, args.layers)
+        model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=torch.float16, device="auto", args=args)
 
     # warm up
-    if not args.no_warm_up:
-        print("Warming up model...")
-
-        # input message
-        system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-        input_message = "Hello."
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": input_message},
-        ]
-        with nvtx.annotate("Warm up"):
-            input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-            _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
-
-    # generate response
-    print("Generating response...")
+    if args.warmup_iter > 0:
+        print("Warming up... It will take some time for the first few iterations to run.")
+        with nvtx.annotate("Warming up"):
+            model.disable_logging = True
+            for i in trange(args.warmup_iter, desc='Warming up'):
+                # input message
+                system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+                input_message = "What's the best way to start learning a new language?"
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": input_message},
+                ]
+                with nvtx.annotate("Warm up"):
+                    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+                    with sdpa_kernel(backends=[SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+                        _  = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+            model.disable_logging = False
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    input_message = "What's the best way to start learning a new language?"
+    # input_message = "Extract the following information from the presented texts: The name of the book, the author, the main character, the year of publication. Output in the format of \"main character, book, author, year of publication\", one book per line.\na) In the realm of wizarding literature, a true standout is the work of J.K. Rowling. One of her books that left an indelible mark is 'Harry Potter and the Philosopher's Stone'. This iconic tale, published in 1997, tells the story of Harry, a young orphan who discovers his magical abilities on his 11th birthday. Soon, he finds himself at the Hogwarts School of Witchcraft and Wizardry, a place teeming with magic and adventure, located somewhere in Scotland.\nb) The magic of Middle-earth has entranced readers worldwide, thanks to the brilliance of J.R.R. Tolkien. In one of his seminal works, 'The Lord of the Rings: The Fellowship of the Ring', published in 1954, we meet Frodo Baggins, a brave hobbit tasked with the perilous quest of destroying the One Ring. The epic journey takes him from the peaceful Shire to the tumultuous regions of Middle-earth.\nc) In a galaxy far, far away, the imagination of L.E. Starlighter gives us 'The Prism Galaxy Chronicles: The Awakening of the Starcaster'. Published in 2028, the story is about Zylo, a humble spaceship mechanic, who unexpectedly discovers he's a Starcaster - a rare individual with the power to manipulate stardust. Set against the backdrop of an interstellar empire in turmoil, Zylo's destiny unfolds on numerous alien worlds, each with its unique cosmic charm."
     # input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
+    input_message = "What's the best way to start learning a new language?"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": input_message},
@@ -215,14 +216,23 @@ def main(args):
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
     prompt = tokenizer.decode(input_ids[0])
     
-    start_time = time.time()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+                  
+    # generate response
+    print("Generating response...")
+    torch.cuda.cudart().cudaProfilerStart() # start profiling from here
+    start_event.record()
     with nvtx.annotate("Generate"):
-        output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample, use_static_tree_cache=args.use_static_tree_cache)
-    end_time = time.time()
-
-    for key, value in model.exp_log.items():
-        print(f"{key}: {value}")
+        with sdpa_kernel(backends=[SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+            output_ids = model.generate(input_ids, temperature=args.temp, max_new_tokens=args.max_new_tokens, max_length=args.max_length, do_sample=args.do_sample)
+    end_event.record()
     
+    # Ensure all CUDA kernels are done
+    torch.cuda.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
+    
+    total_time_s = start_event.elapsed_time(end_event) / 1000.0
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
 
     if not args.no_print_message:
@@ -235,21 +245,21 @@ def main(args):
         print("Output tokens:", len(output_ids[0][input_ids.shape[1]:]))
     
     if not args.no_print_time:
-        print("Time:", end_time - start_time)
+        print("Time:", total_time_s)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=1024,
+        default=None,
         help="The maximum number of new generated tokens.",
     )
     parser.add_argument(
         "--max-length",
         type=int,
         default=None,
-        help="The maximum number of new generated tokens.",
+        help="The maximum number of total tokens.",
     )
     parser.add_argument(
         "--temp",
@@ -282,27 +292,54 @@ if __name__ == "__main__":
         default="naive",
         help="The mode of model generation.",
     )
+    
     parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="Profile the model.",
-    )
-    parser.add_argument(
-        "--sd-method",
+        "--cache-impl",
         type=str,
-        default="greedy",
-        help="The mode of model generation.",
+        choices=["dynamic", "static"],
+        default="dynamic"
     )
     parser.add_argument(
-        "--layers",
+        "--compile-mode",
+        type=str,
+        default='eager',
+        choices=["eager", 'reduce-overhead', 'max-autotune']
+    )
+    
+    parser.add_argument(
+        "--max-depth",
         type=int,
-        default=1,
-        help="The number of layers for SSM.",
+        default=6,
+        help="Max number of draft iterations",
     )
     parser.add_argument(
-        "-nw",
-        "--no-warm-up",
+        "--topk-len",
+        type=int,
+        default=10,
+        help="Number of top draft nodes to keep on each draft iteration",
+    )
+    parser.add_argument(
+        "--max-verify-tokens",
+        type=int,
+        default=64,
+        help="Number of draft tokens to be verified at once.",
+    )
+    parser.add_argument(
+        "--min-accept-prob",
+        type=float,
+        default=1e-2,
+        help="All draft nodes should have probs higher than this value. (Currently not used)",
+    )
+    
+    parser.add_argument(
+        "--logging",
         action="store_true",
+        help="Log output of the model.",
+    )
+    parser.add_argument(
+        "--warmup-iter",
+        type=int,
+        default=20,
         help="Warm up the model.",
     )
     parser.add_argument(
@@ -323,18 +360,6 @@ if __name__ == "__main__":
         type=int,
         default=42,
         help="Random seed.",
-    )
-    parser.add_argument(
-        "-d",
-        "--depth",
-        type=int,
-        default=12,
-        help="Draft tree depth.",
-    )
-    parser.add_argument(
-        "--use-static-tree-cache",
-        action="store_true",
-        help="Use static tree cache.",
     )
     args = parser.parse_args()
     
