@@ -715,7 +715,7 @@ class SSM_ShareSD(SSMBaseNEFT):
 
         with nvtx.annotate("update parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len, device=device, dtype=torch.long)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len+1, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, kv_len+self.draft_params.topk_len, dtype=torch.long, device=device)
         
         # 4) Create TreeData & TreeMaskCache to manage tree structure and intermediate data.
@@ -765,9 +765,6 @@ class SSM_ShareSD(SSMBaseNEFT):
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)
                 
-            with nvtx.annotate("position"):
-                position_ids += 1
-                
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
             
@@ -788,7 +785,8 @@ class SSM_ShareSD(SSMBaseNEFT):
                 #     print("\tcache_position:", cache_position.shape, "stride:", cache_position.stride())
                 kv_len += self.draft_params.topk_len
                 
-            with nvtx.annotate("update cache"):
+            with nvtx.annotate("update position_ids & cache"):
+                position_ids += 1
                 cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
