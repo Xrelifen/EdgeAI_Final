@@ -157,7 +157,7 @@ class SDWrapper(WrapperBase):
         stopping_criteria: StoppingCriteria,
         logits_warper: LogitsWarper,
         do_sample: bool,
-        use_static_tree_cache: bool = False,
+        # use_static_tree_cache: bool = False,
     ):
         """
         Generate sequence of tokens with speculative decoding.

@@ -41,9 +41,12 @@ shift $((OPTIND - 1))
 # Script configuration
 ###############################################################################
 # Paths
-LLM_PATH=meta-llama/Llama-2-7b-chat-hf
-SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
+# LLM_PATH=meta-llama/Llama-2-7b-chat-hf
+# SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # SSM_PATH=~/checkpoints/eagle/official/EAGLE-llama2-chat-7B/
+
+LLM_PATH=meta-llama/Llama-3.1-8B-Instruct
+SSM_PATH=meta-llama/Llama-3.2-1B-Instruct
 
 # Execution parameters
 SEED=9991
@@ -58,10 +61,10 @@ TEMPERATURE=0
 MAX_LENGTH=1024
 
 # drafting parameters
-DRAFT_MAX_DEPTH=6
-DRAFT_TOPK_LEN=10
-DRAFT_MAX_VERIFY_TOKENS=60
-DRAFT_MIN_ACCEPT_PROB=1e-2
+DRAFT_MAX_DEPTH=12
+DRAFT_TOPK_LEN=16
+DRAFT_MAX_VERIFY_TOKENS=192
+DRAFT_MIN_ACCEPT_PROB=1e-8
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
 # MODE="naive"

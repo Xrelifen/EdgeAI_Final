@@ -137,8 +137,9 @@ def load_offload_model(
 
         draft_params = DraftParams(
             max_depth=args.max_depth,
-            topk_len=10,
-            min_accept_prob=0.01
+            topk_len=args.topk_len,
+            min_accept_prob=args.min_accept_prob,
+            max_verify_tokens=args.max_verify_tokens
         )
         print("Draft params:", draft_params)
         
