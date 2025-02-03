@@ -690,11 +690,35 @@ class SSM_ShareSD(SSMBaseNEFT):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
-        batch_size, org_input_len = input_ids.shape
-        kv_len = past_key_values.get_seq_length()
+        batch_size, input_len = input_ids.shape
         assert batch_size == 1, "Only support batch_size=1 for now."
+
+        # 2) Initialize kv_len & cache_position
+        with nvtx.annotate("Initialize kv_len & cache_position"):
+            kv_len = past_key_values.get_seq_length()
+            # convert kv_len to int if it is a tensor
+            if isinstance(kv_len, torch.Tensor):
+                kv_len = kv_len.item()
+            org_kv_len = kv_len
+            cache_position = torch.arange(kv_len, kv_len+input_len, dtype=torch.long, device=device)
         
-        # 2) Create Tree used for target model inference later
+        # 3) First forward pass
+        with nvtx.annotate("ssm first forward", color="red"):
+            sampled_probs = self(
+                input_ids,
+                with_softmax=True,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                num_logits_to_keep=1,
+            )
+            kv_len += input_len
+
+        with nvtx.annotate("update parent_probs & position_ids & cache_position"):
+            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len, device=device, dtype=torch.long)
+            cache_position = torch.arange(kv_len, kv_len+self.draft_params.topk_len, dtype=torch.long, device=device)
+        
+        # 4) Create TreeData & TreeMaskCache to manage tree structure and intermediate data.
         root_id = input_ids[0, -1]
         tree_data = TreeData(
             root_id,
@@ -703,40 +727,15 @@ class SSM_ShareSD(SSMBaseNEFT):
             dtype=dtype,
             device=device,
         )
-        
-        # 3) Initialize tree mask cache for draft model inference
         tree_mask_cache = TreeMaskCache(
-            prefix_len=org_input_len,
+            prefix_len=kv_len,
             sample_len=self.draft_params.topk_len,
             max_cache_len=max_cache_len,
             dtype=dtype,
             device=device,
         )
 
-        # 4) Initialize parent probabilities & position ids & cache_position
-        with nvtx.annotate("init parent_probs & position_ids"):
-            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
-            cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
-
-        # 5) First forward pass
-        with nvtx.annotate("ssm first forward", color="red"):
-            sampled_probs = self.prefill_forward(
-                input_ids[:, -1:],
-                with_softmax=True,
-                past_key_values=past_key_values,
-                cache_position=cache_position,
-                num_logits_to_keep=1,
-            )
-            # print("SSM - Prefiil shapes:")
-            # print("\tinput_ids:", input_ids[:, -1:].shape)
-            # print("\tcache_position:", cache_position.shape)
-            kv_len = org_input_len
-            
-        with nvtx.annotate("update cache"):
-            cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.topk_len, dtype=torch.long, device=device)
-        
-        # 6) Main loop
+        # 5) Main loop
         for depth_i in range(self.draft_params.max_depth):
             # --------------------------------------
             # A. Compute token distribution & Sample
@@ -781,12 +780,12 @@ class SSM_ShareSD(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-                # if depth_i== 0:
-                #     print("SSM - Forward shapes:")
-                #     print("\ttoken_ids:", token_ids.shape)
-                #     print("\tposition_ids:", position_ids.shape)
-                #     print("\tattention_mask:", tree_attention_mask.shape)
-                #     print("\tcache_position:", cache_position.shape)
+                # if depth_i <= 1:
+                #     print(f"SSM - Forward {depth_i+1} shapes:")
+                #     print("\ttoken_ids:", token_ids.shape, "stride:", token_ids.stride())
+                #     print("\tposition_ids:", position_ids.shape, "stride:", position_ids.stride())
+                #     print("\tattention_mask:", tree_attention_mask.shape, "stride:", tree_attention_mask.stride())
+                #     print("\tcache_position:", cache_position.shape, "stride:", cache_position.stride())
                 kv_len += self.draft_params.topk_len
                 
             with nvtx.annotate("update cache"):
@@ -794,7 +793,7 @@ class SSM_ShareSD(SSMBaseNEFT):
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_input_len-1, kv_len)
+            past_key_values.crop(org_kv_len, kv_len)
 
         # Obtain the final tree
         with nvtx.annotate("tree related"):

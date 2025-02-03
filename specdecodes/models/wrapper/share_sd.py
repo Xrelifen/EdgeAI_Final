@@ -75,6 +75,7 @@ class ShareSDWrapper(SDWrapper):
                 device=input_ids.device,
                 dtype=self.llm.model.dtype,
             )
+            # past_key_values = torch.compile(past_key_values, mode="max-autotune")
         
         self._init_tree_mask(self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device)
         cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
@@ -97,6 +98,7 @@ class ShareSDWrapper(SDWrapper):
 
         with nvtx.annotate("sample tokens"):
             next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+            sampled_tokens = next_tokens
 
         with nvtx.annotate("update data"):
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
@@ -107,9 +109,8 @@ class ShareSDWrapper(SDWrapper):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    self.llm.model.set_draft_mode(True)
-                    tree = self._speculate(input_ids, hidden_states, past_key_values, max_cache_len=max_cache_len)
-                    self.llm.model.set_draft_mode(False)
+                    test_tokens = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
+                    tree = self._speculate(test_tokens, hidden_states, past_key_values, max_cache_len=max_cache_len)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
@@ -123,12 +124,12 @@ class ShareSDWrapper(SDWrapper):
                 # * verify
                 with nvtx.annotate("verify"):
                     sampled_tokens, hidden_indices, _ = self._verify(
-                                                        tree, next_token_logits, 
-                                                        logits_warper,
-                                                        do_sample
-                                                    )
+                                                            tree, next_token_logits, 
+                                                            logits_warper,
+                                                            do_sample
+                                                        )
                     
-                    sampled_tokens = sampled_tokens.to(input_ids.device, non_blocking=True)
+                    sampled_tokens = sampled_tokens.to(next_tokens.device, non_blocking=True)
                     hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
                 
                 with nvtx.annotate("reorder kv"):

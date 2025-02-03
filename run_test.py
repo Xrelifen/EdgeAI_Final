@@ -14,9 +14,13 @@ from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWra
 from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle, SSM_ShareSD
 
 from hqq.core.quantize import *
-from hf_share_sd.base import AutoHQQHFShareSDModel
+from hf_sd.base import AutoHQQHFModel
+# from hqq.models.hf.base import AutoHQQHFModel
+from hqq.utils.patching import prepare_for_inference
+import gemlite
 
 import nvtx
+
 
 def load_model(
     llm_path: str,
@@ -25,6 +29,11 @@ def load_model(
     device: str = "auto",
     args: dict = {},
     ):
+
+    nbits = 4
+    group_size = 64
+    dtype = torch.bfloat16 if nbits == 4 else torch.float16
+
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
     
@@ -88,15 +97,49 @@ def load_model(
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
             ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
         elif args.mode == "sd-share":
+            # Build the memo dictionary from the model's parameters (and optionally buffers)
+            model_memo = {}
+            for _, param in base_model.named_parameters():
+                model_memo[id(param)] = param
+            for _, buf in base_model.named_buffers():
+                model_memo[id(buf)] = buf
+
+            # Clone the model using the memo dictionary.
+            qmodule = copy.deepcopy(base_model, memo=model_memo)
+            
             # quantize
             print("Quantizing model...")
-            HQQLinear.set_backend(HQQBackend.ATEN)
-            quant_config = BaseQuantizeConfig(nbits=2, group_size=16, axis=0) 
-            AutoHQQHFShareSDModel.quantize_model(base_model, quant_config=quant_config, compute_dtype=dtype, device="cuda")
-            from hqq.utils.patching import prepare_for_inference
-            prepare_for_inference(base_model, backend="gemlite")
+            backend = "torchao_int4" if nbits == 4 else "gemlite"
+            dtype = torch.bfloat16 if backend == "torchao_int4" else torch.float16
 
-            ssm = SSM_ShareSD.from_pretrained(base_model, eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
+            # quantize only the center layers, extend base_quant_config with keys for each layer
+            start = 5
+            end = 26
+
+            base_quant_config_a = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
+            base_quant_config_b = BaseQuantizeConfig(nbits=nbits, group_size=group_size, axis=1)
+            quant_config = {}
+            for i in range(start, end+1):
+                quant_config[f"layers.{i}.self_attn.q_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.k_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.v_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.o_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.mlp.gate_proj"] = base_quant_config_b
+                quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
+                quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
+
+            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device="cuda")
+            HQQLinear.set_backend(HQQBackend.PYTORCH)
+            # HQQLinear.set_backend(HQQBackend.ATEN)
+
+            #Load GemLite cache
+            # gemlite.core.GEMLITE_TRITON_RESTRICT_M = True
+            # gemlite.core.GemLiteLinear.load_config('/tmp/gemlite_config.json')
+
+            prepare_for_inference(qmodule, backend=backend)
+            # prepare_for_inference(qmodule)
+
+            ssm = SSM_ShareSD.from_pretrained(qmodule, eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
         else:
             raise ValueError("Invalid sd mode.")
 
@@ -125,7 +168,7 @@ def load_model(
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
         torch.set_float32_matmul_precision('high')
-        
+
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
         if ssm is not None:
             # ssm.prefill_forward = torch.compile(ssm.prefill_forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
@@ -133,7 +176,7 @@ def load_model(
 
     return model, tokenizer
 
-def main(args, dtype=torch.bfloat16):
+def main(args, dtype=torch.float16):
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -153,7 +196,7 @@ def main(args, dtype=torch.bfloat16):
             for i in trange(args.warmup_iter, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-                input_message = "What's the best way to start learning a new language?"
+                input_message = "Write an essay about large language models."
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": input_message},
@@ -166,7 +209,7 @@ def main(args, dtype=torch.bfloat16):
 
     # input message
     system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    # input_message = "Extract the following information from the presented texts: The name of the book, the author, the main character, the year of publication. Output in the format of \"main character, book, author, year of publication\", one book per line.\na) In the realm of wizarding literature, a true standout is the work of J.K. Rowling. One of her books that left an indelible mark is 'Harry Potter and the Philosopher's Stone'. This iconic tale, published in 1997, tells the story of Harry, a young orphan who discovers his magical abilities on his 11th birthday. Soon, he finds himself at the Hogwarts School of Witchcraft and Wizardry, a place teeming with magic and adventure, located somewhere in Scotland.\nb) The magic of Middle-earth has entranced readers worldwide, thanks to the brilliance of J.R.R. Tolkien. In one of his seminal works, 'The Lord of the Rings: The Fellowship of the Ring', published in 1954, we meet Frodo Baggins, a brave hobbit tasked with the perilous quest of destroying the One Ring. The epic journey takes him from the peaceful Shire to the tumultuous regions of Middle-earth.\nc) In a galaxy far, far away, the imagination of L.E. Starlighter gives us 'The Prism Galaxy Chronicles: The Awakening of the Starcaster'. Published in 2028, the story is about Zylo, a humble spaceship mechanic, who unexpectedly discovers he's a Starcaster - a rare individual with the power to manipulate stardust. Set against the backdrop of an interstellar empire in turmoil, Zylo's destiny unfolds on numerous alien worlds, each with its unique cosmic charm."
+    input_message = "What's the best way to start learning a new language?"
     input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
     messages = [
         {"role": "system", "content": system_prompt},
@@ -179,6 +222,8 @@ def main(args, dtype=torch.bfloat16):
     end_event = torch.cuda.Event(enable_timing=True)
                   
     # generate response
+
+    # torch.cuda.memory._record_memory_history()
     print("Generating response...")
     torch.cuda.cudart().cudaProfilerStart() # start profiling from here
     start_event.record()
@@ -193,6 +238,7 @@ def main(args, dtype=torch.bfloat16):
     
     total_time_s = start_event.elapsed_time(end_event) / 1000.0
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
+    # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
     if not args.no_print_message:
         print("\nPrompt:")
@@ -321,5 +367,4 @@ if __name__ == "__main__":
         help="Random seed.",
     )
     args = parser.parse_args()
-    
     main(args)
