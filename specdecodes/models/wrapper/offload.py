@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from .base import WrapperBase
 from .sd import SDWrapper
+from .share_sd import ShareSDWrapper
 import numpy as np
 import logging
 import gc
@@ -42,7 +43,7 @@ class OffloadWrapper(WrapperBase):
         super(OffloadWrapper, self).__init__()
         self.pin_memory = pin_memory
 
-    def set_offload_llm(self, llm_path, memory_limit=4.0, device="cuda:0"):
+    def set_llm(self, llm_path, memory_limit=4.0, device="cuda:0"):
         device_map = {
             "model.embed_tokens": "cuda:0",
             "model.rotary_emb": "cuda:0",
@@ -193,7 +194,7 @@ class OffloadSDWrapper(SDWrapper):
     def __init__(self, draft_params: DraftParams, *model_args, **kwargs):
         super(OffloadSDWrapper, self).__init__(draft_params, *model_args, **kwargs)
 
-    def set_offload_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
+    def set_llm(self, llm_path, memory_limit=6.0, device="cuda:0"):
         assert self.ssm is not None, "SSM model must first be loaded on gpu"
         # device_map = {
         #     "model.embed_tokens": "cuda:0",
@@ -585,3 +586,9 @@ class ProfileOffloadSDWrapper(SDWrapper):
         )
         
         return input_ids
+    
+class OffloadShareSDWrapper(ShareSDWrapper):
+    pass 
+
+class ProfileOffloadShareSDWrapper(OffloadShareSDWrapper):
+    pass

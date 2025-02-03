@@ -50,8 +50,7 @@ SSM_PATH=meta-llama/Llama-3.2-1B-Instruct
 
 # Execution parameters
 SEED=9991
-WARMUP_ITER=20
-DO_WARMUP=True
+WARMUP_ITER=10
 DO_SAMPLE=False
 TEMPERATURE=0
 
@@ -63,13 +62,14 @@ MAX_LENGTH=1024
 # drafting parameters
 DRAFT_MAX_DEPTH=12
 DRAFT_TOPK_LEN=16
-DRAFT_MAX_VERIFY_TOKENS=192
+DRAFT_MAX_VERIFY_TOKENS=256
 DRAFT_MIN_ACCEPT_PROB=1e-8
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
 # MODE="naive"
-MODE="sd-offload"
 # MODE="sd-eagle"
+MODE="sd-share"
+OFFLOAD=True
 
 # KV-cache options: ["static", "dynamic"]
 CACHE_IMPL="static"
@@ -81,8 +81,8 @@ CACHE_IMPL="static"
 COMPILE_MODE="max-autotune"
 
 # NVTX profiling
-# NVTX_PROFILING=True
-NVTX_PROFILING=False
+NVTX_PROFILING=True
+# NVTX_PROFILING=False
 
 ###############################################################################
 # Construct arguments for run_test.py
@@ -114,7 +114,9 @@ if [ "$DO_SAMPLE" = True ]; then
   args+=("--do-sample" "--temp" "$TEMPERATURE")
 fi
 
-
+if [ "$OFFLOAD" = True ]; then
+  args+=("--offload")
+fi
   
   
 
@@ -125,10 +127,10 @@ if [ "$NVTX_PROFILING" = True ]; then
   # https://dev-discuss.pytorch.org/t/using-nsight-systems-to-profile-gpu-workload/59
   echo "LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES nsys profile python run_test.py ${args[*]}"
   LOGLEVEL="$LOGLEVEL" CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
-    nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas -s cpu -o nsight_report -f true --capture-range=cudaProfilerApi --capture-range-end=stop-shutdown --cudabacktrace=true --osrt-threshold=10000 -x true \
+    nsys profile -w true -t cuda,nvtx,osrt,cudnn,cublas -s cpu --capture-range=cudaProfilerApi --capture-range-end=stop-shutdown --cudabacktrace=all --force-overwrite=true --python-sampling-frequency=1000 --python-sampling=true --cuda-memory-usage=true --gpuctxsw=true --python-backtrace -x true -o nsight_report \
     python run_test.py "${args[@]}"
 else
   echo "LOGLEVEL=$LOGLEVEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python run_test.py ${args[*]}"
   LOGLEVEL="$LOGLEVEL" CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
-    python run_test.py "${args[@]}"
+    python run_test.py "${args[@]}" --logging
 fi

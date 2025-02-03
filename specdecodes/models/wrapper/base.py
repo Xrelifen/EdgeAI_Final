@@ -23,6 +23,10 @@ class WrapperBase(nn.Module):
     def dtype(self):
         return self.llm.dtype
     
+    @property
+    def device(self):
+        return self.llm.device
+    
     def set_llm(self, llm):
         self.llm = llm
         

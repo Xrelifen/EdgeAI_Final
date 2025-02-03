@@ -68,6 +68,15 @@ class SSMBase(nn.Module):
         #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
         self.prefill_forward = self.forward
         
+    @property
+    def dtype(self):
+        return self.model.dtype
+    
+    @property
+    def device(self):
+        return self.model.device
+    
+        
     @classmethod
     def from_pretrained(
         cls, 
@@ -91,6 +100,7 @@ class SSMBase(nn.Module):
             ssm = AutoModelForCausalLM.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
+                *model_args, 
                 **model_kwargs
             )
             model = cls(ssm, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
@@ -666,3 +676,153 @@ class SSM_QTIP(SSM_Classic):
         model = cls(ssm, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs)
         
         return model
+    
+    
+class SSM_ShareSD(SSMBaseNEFT):
+    @classmethod
+    def from_pretrained(
+        cls, 
+        base_model,
+        *model_args,
+        config = None,
+        torch_dtype=torch.float32,
+        keep_embeddings = False,
+        **model_kwargs
+    ):
+        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
+        eos_token_id = model_kwargs.pop("eos_token_id", None)
+
+        model = cls(base_model, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
+        
+        # Convert the model to the desired dtype and return
+        model.to(dtype=torch_dtype)
+        return model
+    
+    def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
+        logits = self.model(input_ids, *model_args, **kwargs).logits
+        if with_softmax:
+            logits = torch.softmax(logits, dim=-1)
+            
+        return logits
+    
+    @torch.no_grad()
+    def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
+        # 1) Obtain necessary parameters
+        device = input_ids.device
+        dtype = self.model.lm_head.weight.dtype
+        batch_size, input_len = input_ids.shape
+        assert batch_size == 1, "Only support batch_size=1 for now."
+
+        # 2) Initialize kv_len & cache_position
+        with nvtx.annotate("Initialize kv_len & cache_position"):
+            kv_len = past_key_values.get_seq_length()
+            # convert kv_len to int if it is a tensor
+            if isinstance(kv_len, torch.Tensor):
+                kv_len = kv_len.item()
+            org_kv_len = kv_len
+            cache_position = torch.arange(kv_len, kv_len+input_len, dtype=torch.long, device=device)
+        
+        # 3) First forward pass
+        with nvtx.annotate("ssm first forward", color="red"):
+            sampled_probs = self(
+                input_ids,
+                with_softmax=True,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                num_logits_to_keep=1,
+            )
+            kv_len += input_len
+
+        with nvtx.annotate("update parent_probs & position_ids & cache_position"):
+            parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len, device=device, dtype=torch.long)
+            cache_position = torch.arange(kv_len, kv_len+self.draft_params.topk_len, dtype=torch.long, device=device)
+        
+        # 4) Create TreeData & TreeMaskCache to manage tree structure and intermediate data.
+        root_id = input_ids[0, -1]
+        tree_data = TreeData(
+            root_id,
+            sample_len=self.draft_params.topk_len,
+            max_sample_depth=self.draft_params.max_depth,
+            dtype=dtype,
+            device=device,
+        )
+        tree_mask_cache = TreeMaskCache(
+            prefix_len=kv_len,
+            sample_len=self.draft_params.topk_len,
+            max_cache_len=max_cache_len,
+            dtype=dtype,
+            device=device,
+        )
+
+        # 5) Main loop
+        for depth_i in range(self.draft_params.max_depth):
+            # --------------------------------------
+            # A. Compute token distribution & Sample
+            # --------------------------------------
+            with nvtx.annotate("sample nodes", color="green"):
+                token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
+                    sampled_probs,
+                    parent_probs,
+                    self.draft_params.topk_len, 
+                    self.draft_params.min_accept_prob
+                )
+                parent_probs = child_probs
+            
+            # --------------------------------------
+            # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
+            # --------------------------------------
+            # with nvtx.annotate("early stop"):
+            #     # if depth_i > 3:
+            #     valid_flag = sampled_probs.max() > self.min_sample_prob
+            #     if not valid_flag:
+            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
+            #         break
+            
+            # --------------------------------------
+            # C. Add new nodes to the CPU tree
+            # --------------------------------------
+            with nvtx.annotate("add nodes", color="green"):
+                tree_data.update(token_ids, child_probs, parent_indices)
+                
+            with nvtx.annotate("position"):
+                position_ids += 1
+                
+            with nvtx.annotate("tree mask"):
+                tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
+            
+            with nvtx.annotate("ssm forward", color="red"):
+                sampled_probs = self(
+                    token_ids,
+                    with_softmax=True,
+                    past_key_values=past_key_values,
+                    position_ids=position_ids,
+                    attention_mask=tree_attention_mask,
+                    cache_position=cache_position,
+                )
+                # if depth_i <= 1:
+                #     print(f"SSM - Forward {depth_i+1} shapes:")
+                #     print("\ttoken_ids:", token_ids.shape, "stride:", token_ids.stride())
+                #     print("\tposition_ids:", position_ids.shape, "stride:", position_ids.stride())
+                #     print("\tattention_mask:", tree_attention_mask.shape, "stride:", tree_attention_mask.stride())
+                #     print("\tcache_position:", cache_position.shape, "stride:", cache_position.stride())
+                kv_len += self.draft_params.topk_len
+                
+            with nvtx.annotate("update cache"):
+                cache_position += self.draft_params.topk_len
+        
+        # Discard new calcs in KV cache after original input length
+        with nvtx.annotate("crop kv"):
+            past_key_values.crop(org_kv_len, kv_len)
+
+        # Obtain the final tree
+        with nvtx.annotate("tree related"):
+            with nvtx.annotate("get tree data"):
+                data = tree_data.get_data()
+            with nvtx.annotate("build tree"):
+                tree = Tree(root_id, dtype)
+                tree.add_nodes(*data)
+            with nvtx.annotate("prune tree"):
+                tree.prune_to_top_n(self.draft_params.max_verify_tokens)
+        
+        return tree

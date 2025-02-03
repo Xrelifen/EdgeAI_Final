@@ -56,8 +56,8 @@ class TreeStaticCache(StaticCache):
     def __init__(
         self,
         config: PretrainedConfig,
-        max_cache_len: int = None,
-        device: torch.device = None,
+        max_cache_len: Optional[int] = None,
+        device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
         max_batch_size: Optional[int] = None,
         layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
@@ -70,120 +70,80 @@ class TreeStaticCache(StaticCache):
             max_batch_size=max_batch_size,
             layer_device_map=layer_device_map,
         )
-        
-    def crop(self, start: int, end = None):
+
+    def crop(self, start: int, end: Optional[int] = None) -> None:
         """
-        Crop past key/values up to `max_length` (negative removes from the end).
-        Sets leftover tokens to zero for non-MPS devices using index_fill_.
+        Crop past key/values in [start : end] (along dimension 2).
+        Negative start is counted from the end.
+        Zero out tokens in the specified range.
         """
         if end is None:
             end = self.get_seq_length()
-            
         if start < 0:
-            start = end - abs(start)
+            start = end + start
         if end <= start:
             return
 
-        dev = self.key_cache[0].device
-        if dev.type != 'mps':
-            #! there might be multiple devices
-            idx = torch.arange(start, end, device=dev)
-            for k, v in zip(self.key_cache, self.value_cache):
-                k.index_fill_(dim=2, index=idx, value=0)
-                v.index_fill_(dim=2, index=idx, value=0)
-        else:
-            for k, v in zip(self.key_cache, self.value_cache):
-                k[:, :, start:] = 0
-                v[:, :, start:] = 0
-
-    def naive_reorder_cache_with_offset(self, beam_idx: torch.LongTensor, new_chunk_len=1, offset=0, dim=0):
-        """Straightforward reorder of [offset : offset + new_chunk_len] with leftover zeroing."""
-        slice_len = beam_idx.size(0)
-        leftover_len = new_chunk_len - slice_len
-        beam_idx_device_cache = {}
-
+        # Group (k, v) pairs by device.
+        device_groups = {}
         for k, v in zip(self.key_cache, self.value_cache):
-            dev = k.device
-            if dev not in beam_idx_device_cache:
-                beam_idx_device_cache[dev] = beam_idx.to(dev)
-            b_idx = beam_idx_device_cache[dev]
-            
-            reorder_indices = offset + b_idx
-            r_k = k.index_select(dim, reorder_indices)
-            r_v = v.index_select(dim, reorder_indices)
-            k.narrow(dim, offset, slice_len).copy_(r_k)
-            v.narrow(dim, offset, slice_len).copy_(r_v)
-            if leftover_len > 0:
-                k.narrow(dim, offset + slice_len, leftover_len).zero_()
-                v.narrow(dim, offset + slice_len, leftover_len).zero_()
-          
-    def stacked_reorder_cache_with_offset(
-        self,
-        beam_idx: torch.LongTensor,
-        new_chunk_len: int = 1,
-        offset: int = 0,
-        dim: int = 0,
-    ):
-        """
-        Reorder [offset : offset + new_chunk_len] in the key/value cache using beam_idx,
-        then zero leftover. Batches layers by device and uses in-place ops for efficiency.
-        """
-        slice_len = beam_idx.size(0)
-        leftover_len = new_chunk_len - slice_len
+            device_groups.setdefault(k.device, []).append((k, v))
+        for dev, kv_list in device_groups.items():
+            # For non‑MPS devices, use index_fill_ along dim 2.
+            if dev.type != 'mps':
+                idx = torch.arange(start, end, device=dev)
+                for k, v in kv_list:
+                    k.index_fill_(2, idx, 0)
+                    v.index_fill_(2, idx, 0)
+            else:
+                # For MPS, use slicing.
+                for k, v in kv_list:
+                    k[:, :, start:end] = 0
+                    v[:, :, start:end] = 0
 
-        # Group layers by device
-        with nvtx.annotate("group by device", color="green"):
-            device_layers = {}
-            for i, (k, v) in enumerate(zip(self.key_cache, self.value_cache)):
-                dev = k.device
-                device_layers.setdefault(dev, {"k_list": [], "v_list": [], "idx": []})
-                device_layers[dev]["k_list"].append(k)
-                device_layers[dev]["v_list"].append(v)
-                device_layers[dev]["idx"].append(i)
-
-        # Transfer beam_idx to each device non-blocking
-        with nvtx.annotate("beam_idx transfer", color="blue"):
-            beam_idx_per_device = {
-                dev: beam_idx.to(dev, non_blocking=True) for dev in device_layers
-            }
-            torch.cuda.synchronize()
-
-        # In-place reorder + zero leftover per device
-        for dev, data in device_layers.items():
-            with nvtx.annotate(f"reorder device={dev}", color="purple"):
-                b_idx = beam_idx_per_device[dev]
-                k_cat = torch.stack(data["k_list"], dim=0)
-                v_cat = torch.stack(data["v_list"], dim=0)
-
-                # Build in-place reorder indices
-                reorder_dest = offset + torch.arange(slice_len, device=dev)
-                reorder_src = offset + b_idx
-
-                # Reorder slice in-place
-                k_cat.index_copy_(dim + 1, reorder_dest, k_cat.index_select(dim + 1, reorder_src))
-                v_cat.index_copy_(dim + 1, reorder_dest, v_cat.index_select(dim + 1, reorder_src))
-
-                # Zero leftover
-                if leftover_len > 0:
-                    leftover_range = offset + torch.arange(slice_len, new_chunk_len, device=dev)
-                    k_cat.index_fill_(dim + 1, leftover_range, 0)
-                    v_cat.index_fill_(dim + 1, leftover_range, 0)
-
-                # Split back into per-layer Tensors
-                unbound_k = torch.unbind(k_cat, dim=0)
-                unbound_v = torch.unbind(v_cat, dim=0)
-                for i_layer, new_k, new_v in zip(data["idx"], unbound_k, unbound_v):
-                    self.key_cache[i_layer] = new_k
-                    self.value_cache[i_layer] = new_v
-                    
     def reorder_cache_with_offset(
         self,
         beam_idx: torch.LongTensor,
         new_chunk_len: int = 1,
         offset: int = 0,
         dim: int = 0,
-    ):
-        if len(self.key_cache) > 1:
-            self.stacked_reorder_cache_with_offset(beam_idx, new_chunk_len, offset, dim)
-        else:
-            self.naive_reorder_cache_with_offset(beam_idx, new_chunk_len, offset, dim)
+    ) -> None:
+        """
+        Reorder the slice [offset : offset + new_chunk_len] of each key/value cache
+        according to the order specified by beam_idx, then zero out any leftover positions.
+        The update is performed in batch for all layers on a device so that the underlying
+        tensor objects (their memory pointers) remain unchanged—a requirement for CUDA graphs.
+        
+        Parameters:
+          beam_idx (LongTensor): 1D tensor of indices indicating the new ordering.
+          new_chunk_len (int): The new length of the updated slice.
+          offset (int): The starting offset along dimension `dim` to update.
+          dim (int): The dimension along which the update occurs.
+        """
+        slice_len = beam_idx.size(0)
+        # Group cache indices by device.
+        dev_groups = {}
+        for i, (k, _) in enumerate(zip(self.key_cache, self.value_cache)):
+            dev_groups.setdefault(k.device, []).append(i)
+        
+        # Process each device group.
+        for dev, indices in dev_groups.items():
+            # Ensure beam_idx is on the correct device.
+            b_idx = beam_idx.to(dev)
+            reorder_src = offset + b_idx
+            reorder_dest = offset + torch.arange(slice_len, device=dev)
+            leftover_range = (offset + torch.arange(slice_len, new_chunk_len, device=dev)
+                              if new_chunk_len > slice_len else None)
+            # Stack the caches for this device.
+            k_cat = torch.stack([self.key_cache[i] for i in indices], dim=0)
+            v_cat = torch.stack([self.value_cache[i] for i in indices], dim=0)
+            # Batched update along dimension `dim`
+            k_cat.index_copy_(dim+1, reorder_dest, k_cat.index_select(dim+1, reorder_src))
+            v_cat.index_copy_(dim+1, reorder_dest, v_cat.index_select(dim+1, reorder_src))
+            if leftover_range is not None:
+                k_cat.index_fill_(dim+1, leftover_range, 0)
+                v_cat.index_fill_(dim+1, leftover_range, 0)
+            # Scatter the updated results back.
+            for j, i in enumerate(indices):
+                self.key_cache[i].copy_(k_cat[j], non_blocking=True)
+                self.value_cache[i].copy_(v_cat[j], non_blocking=True)

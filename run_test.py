@@ -10,9 +10,31 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import specdecodes.models.llm.modeling_llama as modeling_llama
 # from transformers.models.llama import modeling_llama
-from specdecodes.models import HuggingFaceWrapper, NaiveWrapper, ProfileNaiveWrapper, SDWrapper, ProfileSDWrapper, OffloadSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper
-from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle, SSM_QTIP
+from specdecodes.models import (
+    HuggingFaceWrapper, 
+    NaiveWrapper, 
+    ProfileNaiveWrapper, 
+    SDWrapper, 
+    ProfileSDWrapper, 
+    OffloadSDWrapper, 
+    ProfileOffloadSDWrapper, 
+    OffloadWrapper, 
+    ShareSDWrapper, 
+    ProfileShareSDWrapper,
+    OffloadShareSDWrapper,
+    ProfileOffloadShareSDWrapper
+)
+
+from specdecodes.models import DraftParams, SSM_Classic, SSM_Eagle, SSM_QTIP, SSM_ShareSD
+
+from hqq.core.quantize import *
+from hf_sd.base import AutoHQQHFModel
+# from hqq.models.hf.base import AutoHQQHFModel
+from hqq.utils.patching import prepare_for_inference
+import gemlite
+
 import nvtx
+
 
 def load_model(
     llm_path: str,
@@ -21,27 +43,48 @@ def load_model(
     device: str = "auto",
     args: dict = {},
 ):
+
+    nbits = 4
+    group_size = 64
+    dtype = torch.bfloat16 if nbits == 4 else torch.float16
+
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
+    load_device = device if not args.offload else "cpu"
     
     # load LLM
     # llm = AutoModelForCausalLM.from_pretrained(
-    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+    # llm = modeling_llama.LlamaForCausalLM.from_pretrained(
+    base_model = modeling_llama.LlamaForCausalLM.from_pretrained(
         llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
-        device_map=device,
+        device_map=load_device,
         _attn_implementation="sdpa",
     )
+
+    class LLM(nn.Module):
+        def __init__(self, model):
+            super(LLM, self).__init__()
+            self.model = model
+            self.config = model.config
+
+        def forward(self, *args, **kwargs):
+            return self.model(*args, **kwargs)
+    
+    llm = LLM(base_model)
+
+
     ssm = None
     
     # check if ssm_path directory exists
-    if os.path.exists(ssm_path):
-        draft_config = deepcopy(llm.config)
-        draft_config.num_hidden_layers = 1
+    # if os.path.exists(ssm_path):
+    #     draft_config = deepcopy(llm.config)
+    #     draft_config.num_hidden_layers = 1
         
-    else:
-        draft_config = None
+    # else:
+    #     draft_config = None
+    draft_config = None
 
     if args.mode == "naive":
         model = ProfileNaiveWrapper() if args.logging else NaiveWrapper()
@@ -57,7 +100,7 @@ def load_model(
                 config=draft_config,
                 eos_token_id=tokenizer.eos_token_id,
                 torch_dtype=dtype,
-            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+            ).to(llm.model.layers[-1].self_attn.q_proj.weight.device if not args.offload else device)
         elif args.mode == "sd-eagle":
             # load SSM
             ssm = SSM_Eagle.from_pretrained(
@@ -68,17 +111,68 @@ def load_model(
                 keep_embeddings=False,
             ).to(llm.model.layers[-1].self_attn.q_proj.weight.device)
             ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
+        elif args.mode == "sd-share":
+            # Build the memo dictionary from the model's parameters (and optionally buffers)
+            model_memo = {}
+            for _, param in base_model.named_parameters():
+                model_memo[id(param)] = param
+            for _, buf in base_model.named_buffers():
+                model_memo[id(buf)] = buf
+
+            # Clone the model using the memo dictionary.
+            qmodule = copy.deepcopy(base_model, memo=model_memo)
+            
+            # quantize
+            print("Quantizing model...")
+            backend = "torchao_int4" if nbits == 4 else "gemlite"
+            dtype = torch.bfloat16 if backend == "torchao_int4" else torch.float16
+
+            # quantize only the center layers, extend base_quant_config with keys for each layer
+            start = 5
+            end = 26
+
+            base_quant_config_a = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
+            base_quant_config_b = BaseQuantizeConfig(nbits=nbits, group_size=group_size, axis=1)
+            quant_config = {}
+            for i in range(start, end+1):
+                quant_config[f"layers.{i}.self_attn.q_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.k_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.v_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.self_attn.o_proj"] = base_quant_config_a
+                quant_config[f"layers.{i}.mlp.gate_proj"] = base_quant_config_b
+                quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
+                quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
+
+            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if not args.offload else device))
+            HQQLinear.set_backend(HQQBackend.PYTORCH)
+            # HQQLinear.set_backend(HQQBackend.ATEN)
+
+            #Load GemLite cache
+            # gemlite.core.GEMLITE_TRITON_RESTRICT_M = True
+            # gemlite.core.GemLiteLinear.load_config('/tmp/gemlite_config.json')
+
+            prepare_for_inference(qmodule, backend=backend)
+            # prepare_for_inference(qmodule)
+
+            ssm = SSM_ShareSD.from_pretrained(qmodule, eos_token_id=tokenizer.eos_token_id, torch_dtype=dtype)
         else:
             raise ValueError("Invalid sd mode.")
 
         draft_params = DraftParams(
             max_depth=args.max_depth,
-            topk_len=10,
-            min_accept_prob=0.01
+            topk_len=args.topk_len,
+            min_accept_prob=args.min_accept_prob,
         )
         print("Draft params:", draft_params)
         
-        model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
+        if args.offload and args.mode == "sd-share":
+            model = ProfileOffloadShareSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else OffloadShareSDWrapper(draft_params=draft_params)
+        elif args.mode == "sd-share":
+            model = ProfileShareSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else ShareSDWrapper(draft_params=draft_params)
+        elif args.offload and args.mode == "sd-classic":
+            model = ProfileOffloadSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else OffloadSDWrapper(draft_params=draft_params)
+        else:
+            model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else SDWrapper(draft_params=draft_params)
         model.set_ssm(ssm)
         
     else:
@@ -93,85 +187,20 @@ def load_model(
     if args.compile_mode != 'eager':
         print("Running with Torch Inductor...")
         torch.set_float32_matmul_precision('high')
-        
+
         llm.forward = torch.compile(llm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
         if ssm is not None:
+            # ssm.prefill_forward = torch.compile(ssm.prefill_forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
             ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
 
     return model, tokenizer
 
-def load_offload_model(
-    llm_path: str,
-    ssm_path: str,
-    dtype: torch.dtype = torch.float16,
-    device: str = "cuda:0",
-    args: dict = {},
-):
-    # Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False)
-
-    if args.mode == "sd-offload":
-
-        estimated_mem_1 = torch.cuda.memory_allocated(device)
-        logging.info(f"Before loading ssm = {estimated_mem_1 / (1024 ** 3)} GB")
-        if "QTIP" in ssm_path:
-            ssm = SSM_QTIP.from_pretrained(
-                ssm_path,
-                config=None,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            ).to(device)
-
-        else:
-            ssm = SSM_Classic.from_pretrained(
-                ssm_path,
-                config=None,
-                eos_token_id=tokenizer.eos_token_id,
-                torch_dtype=dtype,
-            ).to(device)
-
-        ssm = ssm.to(device)
-        estimated_mem_2 = torch.cuda.memory_allocated(device)
-        logging.info(f"After loading ssm = {estimated_mem_2 / (1024 ** 3)} GB")
-        logging.info(f"ssm mem usage = {(estimated_mem_2-estimated_mem_1) / (1024 ** 3)} GB")
-
-        draft_params = DraftParams(
-            max_depth=args.max_depth,
-            topk_len=args.topk_len,
-            min_accept_prob=args.min_accept_prob,
-            max_verify_tokens=args.max_verify_tokens
-        )
-        print("Draft params:", draft_params)
-        
-        # Load offload model
-        model = ProfileOffloadSDWrapper(draft_params=draft_params, out_dir=None) if args.logging else OffloadSDWrapper(draft_params=draft_params)
-
-        model.set_ssm(ssm)
-
-    elif args.mode == "offload":
-        model = OffloadWrapper()
-
-    else:
-        raise ValueError("Invalid mode.")
-
-    model.cache_implementation = args.cache_impl
-    model.set_tokenizer(tokenizer)
-    model.set_offload_llm(llm_path, memory_limit=8.0)
-    model.eval()
-
-    if args.compile_mode != 'eager':
-        print("Running with Torch Inductor...")
-        torch.set_float32_matmul_precision('high')
-        
-        ssm.forward = torch.compile(ssm.forward, mode=args.compile_mode, dynamic=False, fullgraph=True)
-
-    return model, tokenizer
-
-def main(args):
+def main(args, dtype=torch.float16):
     torch._dynamo.config.inline_inbuilt_nn_modules=False
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(False)	
+
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -181,10 +210,10 @@ def main(args):
 
     # load model
     print("Loading model...")
-    if "offload" in args.mode:
-        model, tokenizer = load_offload_model(args.llm_path, args.ssm_path, args=args)
+    if args.offload:
+        model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=dtype, device="cuda:0", args=args)
     else:
-        model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=torch.float16, device="auto", args=args)
+        model, tokenizer = load_model(args.llm_path, args.ssm_path, dtype=dtype, device="auto", args=args)
 
     # warm up
     if args.warmup_iter > 0:
@@ -194,7 +223,7 @@ def main(args):
             for i in trange(args.warmup_iter, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-                input_message = "What's the best way to start learning a new language?"
+                input_message = "Write an essay about large language models."
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": input_message},
@@ -221,6 +250,8 @@ def main(args):
     end_event = torch.cuda.Event(enable_timing=True)
                   
     # generate response
+
+    # torch.cuda.memory._record_memory_history()
     print("Generating response...")
     torch.cuda.cudart().cudaProfilerStart() # start profiling from here
     start_event.record()
@@ -235,6 +266,7 @@ def main(args):
     
     total_time_s = start_event.elapsed_time(end_event) / 1000.0
     output = model.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
+    # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
     if not args.no_print_message:
         print("\nPrompt:")
@@ -362,6 +394,16 @@ if __name__ == "__main__":
         default=42,
         help="Random seed.",
     )
+    parser.add_argument(
+        "--offload",
+        action="store_true",
+        help="Offload LLM."
+    )
+    parser.add_argument(
+        "--max-mem",
+        type=float,
+        default=8.0,
+        help="Set max mem usage for offload mode."
+    )
     args = parser.parse_args()
-    
     main(args)
