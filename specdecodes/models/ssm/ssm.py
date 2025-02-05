@@ -9,11 +9,10 @@ from typing import List, Tuple
 import nvtx
 
 from .training_hooks import TrainingHook, NEFTuneHook
-
-from ..utils import invert_mask
 from ..llm import modeling_llama as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..cpu_tree import Tree
+from ..utils.utils import invert_mask
+from ..utils.cpu_tree import Tree
      
 def load_custom_model(model, model_path, keep_embeddings=False):
     # Load the model

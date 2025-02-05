@@ -1,15 +1,14 @@
-
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from .wrapper.huggingface import HuggingFaceWrapper
-from .wrapper.naive import NaiveWrapper, ProfileNaiveWrapper
-from .wrapper.sd import SDWrapper, ProfileSDWrapper
-from .wrapper.share_sd import ShareSDWrapper, ProfileShareSDWrapper
-from .ssm import SSM_Classic, SSM_Eagle, SSM_ShareSD
-
 import os
 from copy import deepcopy
 from dataclasses import dataclass
+
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from ..wrapper.huggingface import HuggingFaceWrapper
+from ..wrapper.naive import NaiveWrapper, ProfileNaiveWrapper
+from ..wrapper.sd import SDWrapper, ProfileSDWrapper
+from ..wrapper.share_sd import ShareSDWrapper, ProfileShareSDWrapper
+from ..ssm import SSM_Classic, SSM_Eagle, SSM_ShareSD
 
 from hqq.core.quantize import *
 from hqq.utils.patching import prepare_for_inference

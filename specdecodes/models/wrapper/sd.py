@@ -7,7 +7,7 @@ from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteria
 import prettytable as pt
 from .base import WrapperBase
-from ..utils import DraftParams, invert_mask
+from ..utils.utils import DraftParams, invert_mask
 
 import nvtx
 
