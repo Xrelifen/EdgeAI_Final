@@ -9,11 +9,10 @@ from typing import List, Tuple
 import nvtx
 
 from .training_hooks import TrainingHook, NEFTuneHook
-
-from ..utils import invert_mask
 from ..llm import modeling_llama as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..cpu_tree import Tree
+from ..utils.utils import invert_mask
+from ..utils.cpu_tree import Tree
      
 def load_custom_model(model, model_path, keep_embeddings=False):
     # Load the model
@@ -386,11 +385,12 @@ class SSM_Classic(SSMBaseNEFT):
         return logits
     
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
+    def speculate(self, input_ids, past_key_values, **kwargs):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
         batch_size, org_input_len = input_ids.shape
+        max_cache_len = getattr(past_key_values, "max_cache_len", None)
         kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Only support batch_size=1 for now."
         
@@ -405,25 +405,23 @@ class SSM_Classic(SSMBaseNEFT):
         )
         
         # 3) Initialize tree mask cache for draft model inference
-        tree_mask_cache = TreeMaskCache(
-            prefix_len=org_input_len,
-            sample_len=self.draft_params.topk_len,
-            max_cache_len=max_cache_len,
-            dtype=dtype,
-            device=device,
-        )
+        with nvtx.annotate("init tree mask cache"):
+            tree_mask_cache = TreeMaskCache(
+                prefix_len=org_input_len,
+                sample_len=self.draft_params.topk_len,
+                max_cache_len=max_cache_len,
+                dtype=dtype,
+                device=device,
+            )
 
         # 4) Initialize parent probabilities & position ids & cache_position
-        with nvtx.annotate("init parent_probs & position_ids"):
+        with nvtx.annotate("init parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
             position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
 
-        # 5) First forward pass
+        # 5) First forward pass 
         with nvtx.annotate("ssm first forward", color="red"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     sampled_probs = self(
             sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
                 with_softmax=True,
@@ -454,11 +452,11 @@ class SSM_Classic(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     # if depth_i > 3:
-            #     valid_flag = sampled_probs.max() > self.min_sample_prob
-            #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
-            #         break
+            #     if (depth_i % 3 == 0) and (depth_i > 0):
+            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
+            #         if not valid_flag:
+            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
+            #             break
             
             # --------------------------------------
             # C. Add new nodes to the CPU tree
@@ -488,7 +486,7 @@ class SSM_Classic(SSMBaseNEFT):
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_input_len, kv_len)
+            past_key_values.crop(org_input_len, kv_len, dim=2)
 
         # Obtain the final tree
         with nvtx.annotate("tree related"):
@@ -522,13 +520,14 @@ class SSM_Eagle(SSMBaseNEFT):
         hidden_states = self.fusion(hidden_states, inputs_embeds)
         hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0][:, -num_logits_to_keep:]
         logits = self.lm_head(hidden_states)
+        
         if with_softmax:
             logits = torch.softmax(logits, dim=-1)
             
         return logits, hidden_states
     
     @torch.no_grad()
-    def speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None, *model_args, **kwargs):
+    def speculate(self, input_ids, hidden_states, past_key_values, **kwargs):
         # 1-1) Remove the first token from input_ids (shift by 1)
         input_ids = input_ids[:, 1:]
         
@@ -539,6 +538,7 @@ class SSM_Eagle(SSMBaseNEFT):
         else:
             dtype = self.lm_head.weight.dtype
         batch_size, org_input_len = input_ids.shape
+        max_cache_len = getattr(past_key_values, "max_cache_len", None)
         kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Only support batch_size=1 for now."
         
@@ -563,16 +563,13 @@ class SSM_Eagle(SSMBaseNEFT):
             )
 
         # 4) Initialize parent probabilities & position ids & cache_position
-        with nvtx.annotate("init parent_probs & position_ids"):
+        with nvtx.annotate("init parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
             position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
             
         # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     sampled_probs, hidden_states = self(
             sampled_probs, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 with_softmax=True,
@@ -604,10 +601,10 @@ class SSM_Eagle(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     if depth_i == 2:
-            #         valid_flag = (child_probs > 0.3).any()
+            #     if (depth_i % 3 == 0) and (depth_i > 0):
+            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
             #         if not valid_flag:
-            #             print(f"Early stop at depth {depth_i+1}/{self.draft_params.max_depth}")
+            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
             #             break
             
             # --------------------------------------
@@ -644,7 +641,7 @@ class SSM_Eagle(SSMBaseNEFT):
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_input_len, kv_len)
+            past_key_values.crop(org_input_len, kv_len, dim=2)
              
         # Obtain the final tree   
         with nvtx.annotate("tree related"):
@@ -706,11 +703,12 @@ class SSM_ShareSD(SSMBaseNEFT):
         return logits
     
     @torch.no_grad()
-    def speculate(self, input_ids, past_key_values, max_cache_len=None, *model_args, **kwargs):
+    def speculate(self, input_ids, past_key_values, *model_args, **kwargs):
         # 1) Obtain necessary parameters
         device = input_ids.device
         dtype = self.model.lm_head.weight.dtype
         batch_size, input_len = input_ids.shape
+        max_cache_len = getattr(past_key_values, "max_cache_len", None)
         assert batch_size == 1, "Only support batch_size=1 for now."
 
         # 2) Initialize kv_len & cache_position
@@ -735,7 +733,7 @@ class SSM_ShareSD(SSMBaseNEFT):
 
         with nvtx.annotate("update parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len, device=device, dtype=torch.long)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len+1, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, kv_len+self.draft_params.topk_len, dtype=torch.long, device=device)
         
         # 4) Create TreeData & TreeMaskCache to manage tree structure and intermediate data.
@@ -773,20 +771,17 @@ class SSM_ShareSD(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     # if depth_i > 3:
-            #     valid_flag = sampled_probs.max() > self.min_sample_prob
-            #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
-            #         break
+            #     if (depth_i % 3 == 0) and (depth_i > 0):
+            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
+            #         if not valid_flag:
+            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
+            #             break
             
             # --------------------------------------
             # C. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)
-                
-            with nvtx.annotate("position"):
-                position_ids += 1
                 
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
@@ -800,20 +795,15 @@ class SSM_ShareSD(SSMBaseNEFT):
                     attention_mask=tree_attention_mask,
                     cache_position=cache_position,
                 )
-                # if depth_i <= 1:
-                #     print(f"SSM - Forward {depth_i+1} shapes:")
-                #     print("\ttoken_ids:", token_ids.shape, "stride:", token_ids.stride())
-                #     print("\tposition_ids:", position_ids.shape, "stride:", position_ids.stride())
-                #     print("\tattention_mask:", tree_attention_mask.shape, "stride:", tree_attention_mask.stride())
-                #     print("\tcache_position:", cache_position.shape, "stride:", cache_position.stride())
                 kv_len += self.draft_params.topk_len
                 
-            with nvtx.annotate("update cache"):
+            with nvtx.annotate("update position_ids & cache"):
+                position_ids += 1
                 cache_position += self.draft_params.topk_len
         
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
-            past_key_values.crop(org_kv_len, kv_len)
+            past_key_values.crop(org_kv_len, kv_len, dim=2)
 
         # Obtain the final tree
         with nvtx.annotate("tree related"):

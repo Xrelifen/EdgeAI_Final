@@ -107,7 +107,6 @@ class AutoHQQHFModel(AutoHQQHFModel):
         quant_config: dict,
         compute_dtype: torch.dtype = float16,
         device: Union[str, list, dict] = "cuda",
-        offload: bool = False
     ):
         # Check if the model was already quantized
         if getattr(model, "hqq_quantized", False):

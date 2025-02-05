@@ -9,8 +9,9 @@ This branch is only the prototype of the Share-SD project. Will be merged into t
 - [x] Fix Problem: torch.compile on shared-kv using same model slows down inference.
 - [x] Fix Problem: torch.compile using hqq as draft model fails.
 - [x] Allow skipping several layers to be quantized.
-- [ ] Fix Problem: Gemlite kernel doesn't work well with torch.compile.
+- [x] Fix Problem: Gemlite kernel doesn't work well with torch.compile.
 - [ ] Fix Problem: SD doesn't obtain 100% accuracy when ssm & llm uses the same model with no sampling.
+- [ ] Integrate offloading with ShareSD.
 
 
 ## 1. Fast Run & Test:

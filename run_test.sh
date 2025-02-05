@@ -43,16 +43,18 @@ shift $((OPTIND - 1))
 # Paths
 # LLM_PATH=meta-llama/Llama-2-7b-chat-hf
 # SSM_PATH=TinyLlama/TinyLlama-1.1B-Chat-v1.0
-# SSM_PATH=~/checkpoints/eagle/official/EAGLE-llama2-chat-7B/
 
 LLM_PATH=meta-llama/Llama-3.1-8B-Instruct
 SSM_PATH=meta-llama/Llama-3.2-1B-Instruct
 
 # Execution parameters
 SEED=9991
-WARMUP_ITER=10
+WARMUP_ITER=5
 DO_SAMPLE=False
 TEMPERATURE=0
+# DEVICE="auto"
+DEVICE="cuda:0"
+DTYPE="float16"
 
 # Stopping criteria parameters (set only one)
 #! Warning: Setting MAX_NEW_TOKENS may alter the maximum token length based on input_ids
@@ -67,6 +69,7 @@ DRAFT_MIN_ACCEPT_PROB=1e-8
 
 # Mode can be one of: ["naive", "sd-classic", "sd-eagle"]
 # MODE="naive"
+# MODE="sd-classic"
 # MODE="sd-eagle"
 MODE="sd-share"
 OFFLOAD=True
@@ -92,6 +95,8 @@ args=(
   --cache-impl "$CACHE_IMPL"
   -llm "$LLM_PATH"
   -ssm "$SSM_PATH"
+  --device "$DEVICE"
+  --dtype "$DTYPE"
   --seed "$SEED"
   --warmup-iter "$WARMUP_ITER"
   --compile-mode "$COMPILE_MODE"

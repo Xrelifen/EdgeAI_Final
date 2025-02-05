@@ -1,11 +1,9 @@
 import logging
 import torch
 import torch.nn as nn
-from transformers.generation.logits_process import LogitsWarper, LogitsProcessorList, TemperatureLogitsWarper, TopKLogitsWarper, TopPLogitsWarper, LogitNormalization
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper, TopKLogitsWarper, TopPLogitsWarper, LogitNormalization
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList, MaxLengthCriteria, MaxTimeCriteria, EosTokenCriteria
-
-#from transformers.cache_utils import DynamicCache, StaticCache
-from .cache_utils import TreeDynamicCache, TreeStaticCache # Added extra functions to support tree decoding
+from specdecodes.models.utils.cache_utils import TreeDynamicCache, TreeStaticCache
 
 # https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py
 # Several functions are form class GenerationMixin, simplified.
@@ -37,7 +35,7 @@ class WrapperBase(nn.Module):
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
         
-    def _get_logits_warper(
+    def _get_logits_processor(
         self,
         temperature: float = 1.0,
         top_k: int = None,
@@ -45,7 +43,7 @@ class WrapperBase(nn.Module):
     ):
         """
         Simplified HuggingFace's `LogitsProcessorList` for multinomial sampling.
-        This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsWarper`] instances
+        This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsProcessor`] instances
         used for multinomial sampling.
         Visit https://github.com/huggingface/transformers/pull/5420/files for more details.
         """
@@ -97,7 +95,7 @@ class WrapperBase(nn.Module):
     def _sample_token(
         self,
         logits: torch.FloatTensor,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessorList,
         do_sample: bool,
         return_probs: bool = False,
     ):
@@ -108,7 +106,7 @@ class WrapperBase(nn.Module):
             logits = logits.view(-1, vocab_size)
             
             # Apply logits warper
-            next_token_scores = logits_warper(None, logits)
+            next_token_scores = logits_processor(None, logits)
             
             # Apply softmax to get probabilities
             probs = torch.softmax(next_token_scores, dim=-1)
@@ -130,7 +128,7 @@ class WrapperBase(nn.Module):
         self,
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessor,
         do_sample: bool,
         *args,
         **kwargs,
@@ -150,6 +148,7 @@ class WrapperBase(nn.Module):
         max_new_tokens=None,
         max_length=None,
         do_sample=True,
+        **model_kwargs,
     ):        
         # 1. prepare stopping criteria
         stopping_criteria = self._get_stopping_criteria(
@@ -160,8 +159,8 @@ class WrapperBase(nn.Module):
         )
         
         # 2. prepare logits warper (if `do_sample` is `True`)
-        logits_warper = (
-            self._get_logits_warper(
+        logits_processor = (
+            self._get_logits_processor(
                 temperature=temperature, 
                 top_p=top_p, 
                 top_k=top_k,
@@ -172,8 +171,9 @@ class WrapperBase(nn.Module):
         results = self._generate(
             input_ids=input_ids,
             stopping_criteria=stopping_criteria,
-            logits_warper=logits_warper,
+            logits_processor=logits_processor,
             do_sample=do_sample,
+            **model_kwargs,
         )
         return results
     

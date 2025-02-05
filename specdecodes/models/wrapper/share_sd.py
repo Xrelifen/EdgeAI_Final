@@ -3,11 +3,10 @@ import logging
 import os
 import time
 import torch
-from transformers.generation.logits_process import LogitsWarper
+from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteria
 import prettytable as pt
 from .sd import SDWrapper
-from ..utils import DraftParams, invert_mask
 
 import nvtx
 
@@ -16,8 +15,9 @@ class ShareSDWrapper(SDWrapper):
         self,
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessorList,
         do_sample: bool,
+        **model_kwargs,
     ):
         """
         Generate sequence of tokens with speculative decoding.
@@ -38,7 +38,7 @@ class ShareSDWrapper(SDWrapper):
         Args:
             input_ids (torch.LongTensor): The input token IDs. 
             stopping_criteria (StoppingCriteria): The criteria to stop the generation.
-            logits_warper (LogitsWarper): The warper to modify the logits.
+            logits_processor (LogitsProcessor): The processor to modify the logits.
             do_sample (bool): Whether to sample tokens during generation. If False, the generation will be deterministic.
 
         Returns:
@@ -47,6 +47,7 @@ class ShareSDWrapper(SDWrapper):
         assert self.llm is not None, "LLM model must be provided"
         assert self.ssm is not None, "SSM model must be provided"
         assert self.tokenizer is not None, "Tokenizer must be provided"
+        device = self.ssm.model.device
 
         # * clone input_ids 
         input_ids = input_ids.clone()
@@ -60,34 +61,22 @@ class ShareSDWrapper(SDWrapper):
                 raise ValueError(
                     "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
                 )
-                
-        if self.cache_implementation == "dynamic":
-            max_cache_len = None
-            past_key_values = self.create_kv_cache("dynamic")
             
-        elif self.cache_implementation == "static":
-            max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for verifying & sampling
-            past_key_values = self.create_kv_cache(
-                "static",
-                max_cache_len=max_cache_len,
-                max_batch_size=batch_size,
-                config=self.llm.model.config,
-                device=input_ids.device,
-                dtype=self.llm.model.dtype,
-            )
-            # past_key_values = torch.compile(past_key_values, mode="max-autotune")
+        if model_kwargs.get("past_key_values") is not None:
+            past_key_values = model_kwargs["past_key_values"]
+            max_cache_len = getattr(past_key_values, "max_cache_len", None)
+        else:
+            raise ValueError("past_key_values is not provided")
+            
         
         self._init_tree_mask(self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device)
         cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
                 input_ids,
-                past_key_values=past_key_values, 
+                past_key_values=past_key_values,
                 output_hidden_states=True, 
                 cache_position=cache_position,
                 num_logits_to_keep=1,
@@ -97,11 +86,10 @@ class ShareSDWrapper(SDWrapper):
             del outputs
 
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
-            sampled_tokens = next_tokens
+            sampled_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
 
         with nvtx.annotate("update data"):
-            input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.max_verify_tokens, dtype=torch.long, device=input_ids.device)
 
         with nvtx.annotate("decoding"):
@@ -109,28 +97,24 @@ class ShareSDWrapper(SDWrapper):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    test_tokens = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
-                    tree = self._speculate(test_tokens, hidden_states, past_key_values, max_cache_len=max_cache_len)
+                    last_token_id = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
+                    tree = self._speculate(last_token_id, hidden_states, past_key_values)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = past_key_values.get_seq_length()
                     outputs = self._tree_decoding(tree, past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
-                    
                     next_token_logits = outputs.logits
-                    hidden_states = outputs.hidden_states[-1]
                     del outputs
 
                 # * verify
                 with nvtx.annotate("verify"):
                     sampled_tokens, hidden_indices, _ = self._verify(
                                                             tree, next_token_logits, 
-                                                            logits_warper,
+                                                            logits_processor,
                                                             do_sample
                                                         )
-                    
-                    sampled_tokens = sampled_tokens.to(next_tokens.device, non_blocking=True)
-                    hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
+                    sampled_tokens = sampled_tokens.to(device, non_blocking=True)
                 
                 with nvtx.annotate("reorder kv"):
                     past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
@@ -138,13 +122,11 @@ class ShareSDWrapper(SDWrapper):
                 # * update input_ids, hidden_states, and cache_position
                 with nvtx.annotate("update data"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-                    hidden_states = hidden_states[:, hidden_indices].clone()
                     cache_position += sampled_tokens.shape[1]
                 
                 # * check stopping criteria
                 with nvtx.annotate("stopping criteria"):
-                    finished = stopping_criteria(input_ids, None)
-                    finished = finished.item()
+                    finished = stopping_criteria(input_ids, None).item()
                 
         return input_ids
     
