@@ -156,8 +156,7 @@ class SDWrapper(WrapperBase):
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
         logits_warper: LogitsWarper,
-        do_sample: bool,
-        # use_static_tree_cache: bool = False,
+        do_sample: bool
     ):
         """
         Generate sequence of tokens with speculative decoding.

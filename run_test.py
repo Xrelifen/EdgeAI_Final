@@ -35,7 +35,6 @@ import gemlite
 
 import nvtx
 
-
 def load_model(
     llm_path: str,
     ssm_path: str,
@@ -44,7 +43,7 @@ def load_model(
     args: dict = {},
 ):
 
-    nbits = 4
+    nbits = 2
     group_size = 64
     dtype = torch.bfloat16 if nbits == 4 else torch.float16
 
@@ -55,24 +54,13 @@ def load_model(
     # load LLM
     # llm = AutoModelForCausalLM.from_pretrained(
     # llm = modeling_llama.LlamaForCausalLM.from_pretrained(
-    base_model = modeling_llama.LlamaForCausalLM.from_pretrained(
+    llm = modeling_llama.LlamaForCausalLM.from_pretrained(
         llm_path, 
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         device_map=load_device,
         _attn_implementation="sdpa",
     )
-
-    class LLM(nn.Module):
-        def __init__(self, model):
-            super(LLM, self).__init__()
-            self.model = model
-            self.config = model.config
-
-        def forward(self, *args, **kwargs):
-            return self.model(*args, **kwargs)
-    
-    llm = LLM(base_model)
 
 
     ssm = None
@@ -114,13 +102,13 @@ def load_model(
         elif args.mode == "sd-share":
             # Build the memo dictionary from the model's parameters (and optionally buffers)
             model_memo = {}
-            for _, param in base_model.named_parameters():
+            for _, param in llm.named_parameters():
                 model_memo[id(param)] = param
-            for _, buf in base_model.named_buffers():
+            for _, buf in llm.named_buffers():
                 model_memo[id(buf)] = buf
 
             # Clone the model using the memo dictionary.
-            qmodule = copy.deepcopy(base_model, memo=model_memo)
+            qmodule = copy.deepcopy(llm, memo=model_memo)
             
             # quantize
             print("Quantizing model...")
@@ -128,10 +116,10 @@ def load_model(
             dtype = torch.bfloat16 if backend == "torchao_int4" else torch.float16
 
             # quantize only the center layers, extend base_quant_config with keys for each layer
-            start = 5
-            end = 26
-
-            base_quant_config_a = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
+            start = 0
+            end = 31
+            
+            base_quant_config_a = BaseQuantizeConfig(nbits=2, group_size=64, axis=1)
             base_quant_config_b = BaseQuantizeConfig(nbits=nbits, group_size=group_size, axis=1)
             quant_config = {}
             for i in range(start, end+1):
@@ -143,7 +131,7 @@ def load_model(
                 quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
                 quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
 
-            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if not args.offload else device))
+            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if not args.offload else device), offload=args.offload)
             HQQLinear.set_backend(HQQBackend.PYTORCH)
             # HQQLinear.set_backend(HQQBackend.ATEN)
 
@@ -162,6 +150,7 @@ def load_model(
             max_depth=args.max_depth,
             topk_len=args.topk_len,
             min_accept_prob=args.min_accept_prob,
+            max_verify_tokens=args.max_verify_tokens
         )
         print("Draft params:", draft_params)
         

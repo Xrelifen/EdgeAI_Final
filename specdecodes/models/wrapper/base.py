@@ -150,7 +150,6 @@ class WrapperBase(nn.Module):
         max_new_tokens=None,
         max_length=None,
         do_sample=True,
-        use_static_tree_cache=False,
     ):        
         # 1. prepare stopping criteria
         stopping_criteria = self._get_stopping_criteria(
@@ -175,7 +174,6 @@ class WrapperBase(nn.Module):
             stopping_criteria=stopping_criteria,
             logits_warper=logits_warper,
             do_sample=do_sample,
-            use_static_tree_cache=use_static_tree_cache,
         )
         return results
     

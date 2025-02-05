@@ -14,6 +14,10 @@ from hqq.models.base import _QUANT_LAYERS, _IGNORE_LINEAR
 from hqq.core.quantize import *
 from hqq.core.utils import cleanup
 
+from specdecodes.models.utils import set_module_tensor_to_device
+from accelerate.utils import named_module_tensors
+import logging
+
 # [MODIFIED]
 def name_to_linear_tag_with_layer(name: str) -> str:
     return ".".join(
@@ -103,6 +107,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
         quant_config: dict,
         compute_dtype: torch.dtype = float16,
         device: Union[str, list, dict] = "cuda",
+        offload: bool = False
     ):
         # Check if the model was already quantized
         if getattr(model, "hqq_quantized", False):
@@ -194,16 +199,20 @@ class AutoHQQHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
+                linear_layer.to('cpu')
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
-            out_module.device = current_device
             return out_module
 
         def _patch_other(layer):
             current_device = device_map[layer.name]
             layer.device = current_device
-            return layer.to(device=current_device, dtype=compute_dtype)
+
+            for tensor_name, _ in named_module_tensors(layer):
+                set_module_tensor_to_device(layer, tensor_name, current_device)
+
+            return layer
 
         cls.patch_model(model, _patch_other, _patch_linear, patch_params)
 
