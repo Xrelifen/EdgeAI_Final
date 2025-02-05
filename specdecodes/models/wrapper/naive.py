@@ -2,7 +2,7 @@ import logging
 import torch
 from .base import WrapperBase
 
-from transformers.generation.logits_process import LogitsWarper
+from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteria
 
 import nvtx
@@ -15,7 +15,7 @@ class NaiveWrapper(WrapperBase):
         self,
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessorList,
         do_sample: bool,
     ):
         assert self.llm is not None, "LLM model must be provided"
@@ -62,7 +62,7 @@ class NaiveWrapper(WrapperBase):
             next_token_logits = outputs.logits
         
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+            next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
         
         with nvtx.annotate("update data"):
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
@@ -82,7 +82,7 @@ class NaiveWrapper(WrapperBase):
                 
                 # * update input_ids and cache_position
                 with nvtx.annotate("sample tokens"):
-                    next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+                    next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
                 
                 with nvtx.annotate("update data"):
                     input_ids = torch.cat([input_ids, next_tokens], dim=-1)

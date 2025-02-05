@@ -1,4 +1,4 @@
-from typing import Any, Optional, Dict, Tuple, Union
+from typing import Any, List, Optional, Dict, Tuple, Union
 import nvtx
 import torch
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
@@ -8,7 +8,7 @@ class TreeDynamicCache(DynamicCache):
     def __init__(self) -> None:
         super().__init__()
         
-    def crop(self, start: int, end = None):
+    def crop(self, start: int, end = None, dim=0):
         """Crop the past key/values up to a new `max_length` (negative removes from the end)."""
         if end is None:
             end = self.get_seq_length()
@@ -50,6 +50,12 @@ class TreeDynamicCache(DynamicCache):
             
             self.key_cache[i] = self.key_cache[i].index_select(dim, r_idx)
             self.value_cache[i] = self.value_cache[i].index_select(dim, r_idx)
+            
+    def reset(self):
+        """Resets the cache."""
+        self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
 
 
 class TreeStaticCache(StaticCache):
@@ -71,7 +77,7 @@ class TreeStaticCache(StaticCache):
             layer_device_map=layer_device_map,
         )
 
-    def crop(self, start: int, end: Optional[int] = None) -> None:
+    def crop(self, start: int, end: Optional[int] = None, dim: int = 2) -> None:
         """
         Crop past key/values in [start : end] (along dimension 2).
         Negative start is counted from the end.
@@ -93,8 +99,8 @@ class TreeStaticCache(StaticCache):
             if dev.type != 'mps':
                 idx = torch.arange(start, end, device=dev)
                 for k, v in kv_list:
-                    k.index_fill_(2, idx, 0)
-                    v.index_fill_(2, idx, 0)
+                    k.index_fill_(dim, idx, 0)
+                    v.index_fill_(dim, idx, 0)
             else:
                 # For MPS, use slicing.
                 for k, v in kv_list:

@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import torch
-from transformers.generation.logits_process import LogitsWarper
+from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteria
 import prettytable as pt
 from .base import WrapperBase
@@ -20,12 +20,11 @@ class SDWrapper(WrapperBase):
         self.ssm = ssm
         self.ssm.draft_params = self.draft_params
     
-    def _speculate(self, input_ids, hidden_states, past_key_values, max_cache_len=None):
+    def _speculate(self, input_ids, hidden_states, past_key_values):
         return self.ssm.speculate(
             input_ids,
             hidden_states=hidden_states,
             past_key_values=past_key_values,
-            max_cache_len=max_cache_len,
         )
         
     def _init_tree_mask(self, max_verify_tokens, max_cache_len=None, device='cpu'):
@@ -93,9 +92,9 @@ class SDWrapper(WrapperBase):
         p[token_ids].zero_()
         return None, p
 
-    def _verify(self, tree, logits, logits_warper, do_sample):
+    def _verify(self, tree, logits, logits_processor, do_sample):
         def sample_token_method(logits, return_probs=False):
-            return self._sample_token(logits, logits_warper, do_sample=do_sample, return_probs=return_probs)
+            return self._sample_token(logits, logits_processor, do_sample=do_sample, return_probs=return_probs)
         
         # Obtain LLM sample logits
         global_p = sample_token_method(logits, return_probs=True).squeeze(0).to(device='cpu', non_blocking=True) # remove batch dim
@@ -155,8 +154,9 @@ class SDWrapper(WrapperBase):
         self,
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessorList,
         do_sample: bool,
+        **model_kwargs,
     ):
         """
         Generate sequence of tokens with speculative decoding.
@@ -177,7 +177,7 @@ class SDWrapper(WrapperBase):
         Args:
             input_ids (torch.LongTensor): The input token IDs. 
             stopping_criteria (StoppingCriteria): The criteria to stop the generation.
-            logits_warper (LogitsWarper): The warper to modify the logits.
+            logits_processor (LogitsProcessor): The processor to modify the logits.
             do_sample (bool): Whether to sample tokens during generation. If False, the generation will be deterministic.
 
         Returns:
@@ -199,35 +199,17 @@ class SDWrapper(WrapperBase):
                 raise ValueError(
                     "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
                 )
-                
-        if self.cache_implementation == "dynamic":
-            llm_max_cache_len = None
-            ssm_max_cache_len = None
-            llm_past_key_values = self.create_kv_cache("dynamic")
-            ssm_past_key_values = self.create_kv_cache("dynamic")
             
-        elif self.cache_implementation == "static":
-            llm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_verify_tokens # Add extra space for verifying
-            ssm_max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for sampling
-            llm_past_key_values = self.create_kv_cache(
-                "static",
-                max_cache_len=llm_max_cache_len,
-                max_batch_size=batch_size,
-                config=self.llm.model.config,
-                device=input_ids.device,
-                dtype=self.llm.model.dtype,
-            )
-            ssm_past_key_values = self.create_kv_cache(
-                "static",
-                max_cache_len=ssm_max_cache_len,
-                max_batch_size=batch_size,
-                config=self.ssm.model.config,
-                device=input_ids.device,
-                dtype=self.ssm.model.dtype,
-            )
+        if model_kwargs.get("past_key_values") is not None and model_kwargs.get("ssm_past_key_values") is not None:
+            past_key_values = model_kwargs["past_key_values"]
+            max_cache_len = getattr(past_key_values, "max_cache_len", None)
+            
+            ssm_past_key_values = model_kwargs["ssm_past_key_values"]
+        else:
+            raise ValueError("past_key_values and ssm_past_key_values should both be provided")
         
         
-        self._init_tree_mask(self.draft_params.max_verify_tokens, llm_max_cache_len, device=input_ids.device)
+        self._init_tree_mask(self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device)
         cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
 
         # * prefill stage
@@ -237,7 +219,7 @@ class SDWrapper(WrapperBase):
             #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
                 input_ids,
-                past_key_values=llm_past_key_values, 
+                past_key_values=past_key_values, 
                 output_hidden_states=True, 
                 cache_position=cache_position,
                 num_logits_to_keep=1,
@@ -247,7 +229,7 @@ class SDWrapper(WrapperBase):
             del outputs
 
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+            next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
 
         with nvtx.annotate("update data"):
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
@@ -258,12 +240,12 @@ class SDWrapper(WrapperBase):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values, max_cache_len=ssm_max_cache_len)
+                    tree = self._speculate(input_ids, hidden_states, ssm_past_key_values)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
-                    prev_kv_len = llm_past_key_values.get_seq_length()
-                    outputs = self._tree_decoding(tree, llm_past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
+                    prev_kv_len = past_key_values.get_seq_length()
+                    outputs = self._tree_decoding(tree, past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
                     
                     next_token_logits = outputs.logits
                     hidden_states = outputs.hidden_states[-1]
@@ -273,7 +255,7 @@ class SDWrapper(WrapperBase):
                 with nvtx.annotate("verify"):
                     sampled_tokens, hidden_indices, _ = self._verify(
                                                         tree, next_token_logits, 
-                                                        logits_warper,
+                                                        logits_processor,
                                                         do_sample
                                                     )
                     
@@ -281,7 +263,7 @@ class SDWrapper(WrapperBase):
                     hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
                 
                 with nvtx.annotate("reorder kv"):
-                    llm_past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
+                    past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
 
                 # * update input_ids, hidden_states, and cache_position
                 with nvtx.annotate("update data"):

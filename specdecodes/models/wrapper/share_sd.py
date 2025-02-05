@@ -3,11 +3,10 @@ import logging
 import os
 import time
 import torch
-from transformers.generation.logits_process import LogitsWarper
+from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteria
 import prettytable as pt
 from .sd import SDWrapper
-from ..utils import DraftParams, invert_mask
 
 import nvtx
 
@@ -16,8 +15,9 @@ class ShareSDWrapper(SDWrapper):
         self,
         input_ids: torch.LongTensor,
         stopping_criteria: StoppingCriteria,
-        logits_warper: LogitsWarper,
+        logits_processor: LogitsProcessorList,
         do_sample: bool,
+        **model_kwargs,
     ):
         """
         Generate sequence of tokens with speculative decoding.
@@ -38,7 +38,7 @@ class ShareSDWrapper(SDWrapper):
         Args:
             input_ids (torch.LongTensor): The input token IDs. 
             stopping_criteria (StoppingCriteria): The criteria to stop the generation.
-            logits_warper (LogitsWarper): The warper to modify the logits.
+            logits_processor (LogitsProcessor): The processor to modify the logits.
             do_sample (bool): Whether to sample tokens during generation. If False, the generation will be deterministic.
 
         Returns:
@@ -60,22 +60,13 @@ class ShareSDWrapper(SDWrapper):
                 raise ValueError(
                     "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
                 )
-                
-        if self.cache_implementation == "dynamic":
-            max_cache_len = None
-            past_key_values = self.create_kv_cache("dynamic")
             
-        elif self.cache_implementation == "static":
-            max_cache_len = stopping_criteria.max_length + self.draft_params.max_sample_tokens # Add extra space for verifying & sampling
-            past_key_values = self.create_kv_cache(
-                "static",
-                max_cache_len=max_cache_len,
-                max_batch_size=batch_size,
-                config=self.llm.model.config,
-                device=input_ids.device,
-                dtype=self.llm.model.dtype,
-            )
-            # past_key_values = torch.compile(past_key_values, mode="max-autotune")
+        if model_kwargs.get("past_key_values") is not None:
+            past_key_values = model_kwargs["past_key_values"]
+            max_cache_len = getattr(past_key_values, "max_cache_len", None)
+        else:
+            raise ValueError("past_key_values is not provided")
+            
         
         self._init_tree_mask(self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device)
         cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
@@ -87,7 +78,7 @@ class ShareSDWrapper(SDWrapper):
             #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
                 input_ids,
-                past_key_values=past_key_values, 
+                past_key_values=past_key_values,
                 output_hidden_states=True, 
                 cache_position=cache_position,
                 num_logits_to_keep=1,
@@ -97,7 +88,7 @@ class ShareSDWrapper(SDWrapper):
             del outputs
 
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_warper, do_sample)
+            next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
             sampled_tokens = next_tokens
 
         with nvtx.annotate("update data"):
@@ -110,7 +101,7 @@ class ShareSDWrapper(SDWrapper):
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
                     test_tokens = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
-                    tree = self._speculate(test_tokens, hidden_states, past_key_values, max_cache_len=max_cache_len)
+                    tree = self._speculate(test_tokens, hidden_states, past_key_values)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
@@ -125,7 +116,7 @@ class ShareSDWrapper(SDWrapper):
                 with nvtx.annotate("verify"):
                     sampled_tokens, hidden_indices, _ = self._verify(
                                                             tree, next_token_logits, 
-                                                            logits_warper,
+                                                            logits_processor,
                                                             do_sample
                                                         )
                     
