@@ -422,9 +422,6 @@ class SSM_Classic(SSMBaseNEFT):
 
         # 5) First forward pass 
         with nvtx.annotate("ssm first forward", color="red"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     sampled_probs = self(
             sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
                 with_softmax=True,
@@ -455,11 +452,11 @@ class SSM_Classic(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     # if depth_i > 3:
-            #     valid_flag = sampled_probs.max() > self.min_sample_prob
-            #     if not valid_flag:
-            #         print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
-            #         break
+            #     if (depth_i % 3 == 0) and (depth_i > 0):
+            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
+            #         if not valid_flag:
+            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
+            #             break
             
             # --------------------------------------
             # C. Add new nodes to the CPU tree
@@ -572,9 +569,6 @@ class SSM_Eagle(SSMBaseNEFT):
             
         # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     sampled_probs, hidden_states = self(
             sampled_probs, hidden_states = self.prefill_forward(
                 input_ids[:, kv_len:],
                 with_softmax=True,
@@ -606,10 +600,10 @@ class SSM_Eagle(SSMBaseNEFT):
             # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
             # --------------------------------------
             # with nvtx.annotate("early stop"):
-            #     if depth_i == 2:
-            #         valid_flag = (child_probs > 0.3).any()
+            #     if (depth_i % 3 == 0) and (depth_i > 0):
+            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
             #         if not valid_flag:
-            #             print(f"Early stop at depth {depth_i+1}/{self.draft_params.max_depth}")
+            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
             #             break
             
             # --------------------------------------

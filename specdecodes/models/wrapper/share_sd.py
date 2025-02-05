@@ -47,6 +47,7 @@ class ShareSDWrapper(SDWrapper):
         assert self.llm is not None, "LLM model must be provided"
         assert self.ssm is not None, "SSM model must be provided"
         assert self.tokenizer is not None, "Tokenizer must be provided"
+        device = self.ssm.model.device
 
         # * clone input_ids 
         input_ids = input_ids.clone()
@@ -73,9 +74,6 @@ class ShareSDWrapper(SDWrapper):
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            #! Not needed after torch version=2.7, where torch.compiler.set_stance("force_eager") is introduced
-            # with torch.compiler.set_stance("force_eager"):
-            #     outputs = self.llm(
             outputs = self.llm.prefill_forward(
                 input_ids,
                 past_key_values=past_key_values,
@@ -88,11 +86,10 @@ class ShareSDWrapper(SDWrapper):
             del outputs
 
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
-            sampled_tokens = next_tokens
+            sampled_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
 
         with nvtx.annotate("update data"):
-            input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+            input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
             cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.max_verify_tokens, dtype=torch.long, device=input_ids.device)
 
         with nvtx.annotate("decoding"):
@@ -100,16 +97,14 @@ class ShareSDWrapper(SDWrapper):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    test_tokens = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
-                    tree = self._speculate(test_tokens, hidden_states, past_key_values)
+                    last_token_id = sampled_tokens[:, -1:].clone(memory_format=torch.contiguous_format)
+                    tree = self._speculate(last_token_id, hidden_states, past_key_values)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
                     prev_kv_len = past_key_values.get_seq_length()
                     outputs = self._tree_decoding(tree, past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
-                    
                     next_token_logits = outputs.logits
-                    hidden_states = outputs.hidden_states[-1]
                     del outputs
 
                 # * verify
@@ -119,9 +114,7 @@ class ShareSDWrapper(SDWrapper):
                                                             logits_processor,
                                                             do_sample
                                                         )
-                    
-                    sampled_tokens = sampled_tokens.to(next_tokens.device, non_blocking=True)
-                    hidden_indices = hidden_indices.to(hidden_states.device, non_blocking=True)
+                    sampled_tokens = sampled_tokens.to(device, non_blocking=True)
                 
                 with nvtx.annotate("reorder kv"):
                     past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
@@ -129,13 +122,11 @@ class ShareSDWrapper(SDWrapper):
                 # * update input_ids, hidden_states, and cache_position
                 with nvtx.annotate("update data"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-                    hidden_states = hidden_states[:, hidden_indices].clone()
                     cache_position += sampled_tokens.shape[1]
                 
                 # * check stopping criteria
                 with nvtx.annotate("stopping criteria"):
-                    finished = stopping_criteria(input_ids, None)
-                    finished = finished.item()
+                    finished = stopping_criteria(input_ids, None).item()
                 
         return input_ids
     
