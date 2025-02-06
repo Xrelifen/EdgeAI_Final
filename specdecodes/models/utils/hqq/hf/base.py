@@ -14,7 +14,7 @@ from hqq.models.base import _QUANT_LAYERS, _IGNORE_LINEAR
 from hqq.core.quantize import *
 from hqq.core.utils import cleanup
 
-from specdecodes.models.utils import set_module_tensor_to_device
+from specdecodes.models.utils.modeling_utils import set_module_tensor_to_device
 from accelerate.utils import named_module_tensors
 import logging
 
@@ -202,6 +202,8 @@ class AutoHQQHFModel(AutoHQQHFModel):
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
+            # logging.info(f'Memory Usage: {torch.cuda.memory_allocated(current_device) / 0.9 / (10 ** 9)} GB')
+
             return out_module
 
         def _patch_other(layer):
@@ -210,6 +212,8 @@ class AutoHQQHFModel(AutoHQQHFModel):
 
             for tensor_name, _ in named_module_tensors(layer):
                 set_module_tensor_to_device(layer, tensor_name, current_device)
+
+            # logging.info(f'Memory Usage: {torch.cuda.memory_allocated(current_device) / 0.9 / (10 ** 9)} GB')
 
             return layer
 

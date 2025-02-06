@@ -11,7 +11,7 @@ import nvtx
 from .training_hooks import TrainingHook, NEFTuneHook
 from ..llm import modeling_llama as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
-from ..utils.utils import invert_mask
+from ..utils.modeling_utils import invert_mask
 from ..utils.cpu_tree import Tree
      
 def load_custom_model(model, model_path, keep_embeddings=False):

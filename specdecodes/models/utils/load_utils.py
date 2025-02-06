@@ -14,10 +14,8 @@ from ..ssm import SSM_Classic, SSM_Eagle, SSM_ShareSD
 from hqq.core.quantize import *
 from hqq.utils.patching import prepare_for_inference
 from .cache_utils import TreeDynamicCache, TreeStaticCache
-from .utils import DraftParams
+from .modeling_utils import DraftParams
 from .hqq.hf.base import AutoHQQHFModel
-
-import logging
 
         
 def create_kv_cache(
@@ -62,6 +60,7 @@ def load_model(
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     offload: bool = False,
+    max_mem: float = 8.0,
     **kwargs
 ):
     # load tokenizer
@@ -87,7 +86,7 @@ def load_model(
         if draft_config:
             draft_config.num_hidden_layers = 1
         draft_params = kwargs.get("draft_params", DraftParams())
-        logging.info(f"Draft params: {draft_params}")
+        print(f"Draft params: {draft_params}")
         
         if mode == "sd-share":
             # Clone the model using the memo dictionary.
@@ -144,7 +143,11 @@ def load_model(
         if mode not in ssm_map:
             raise ValueError("Invalid sd mode.")
         
-        ssm = ssm_map[mode]().to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+        if offload:
+            ssm = ssm_map[mode]().to(device)
+        else:
+            ssm = ssm_map[mode]().to(llm.model.layers[-1].self_attn.q_proj.weight.device)
+
         if mode == "sd-eagle":
             ssm.set_modules(embed_tokens=llm.get_input_embeddings(), lm_head=llm.lm_head)
         
@@ -152,7 +155,7 @@ def load_model(
             if not offload:
                 model = ProfileShareSDWrapper(draft_params=draft_params, out_dir=None) if logging else ShareSDWrapper(draft_params=draft_params)
             else:
-                model = ProfileOffloadShareSDWrapper(draft_params=draft_params, out_dir=None) if logging else ShareSDWrapper(draft_params=draft_params)
+                model = ProfileOffloadShareSDWrapper(draft_params=draft_params, out_dir=None) if logging else OffloadShareSDWrapper(draft_params=draft_params)
         else:
             if not offload:
                 model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if logging else SDWrapper(draft_params=draft_params)
@@ -166,7 +169,11 @@ def load_model(
         
     model.cache_implementation = cache_impl
     model.set_tokenizer(tokenizer)
-    model.set_llm(llm)
+    
+    if offload:
+        model.set_llm(llm, memory_limit=max_mem)
+    else:
+        model.set_llm(llm)
     model.eval()
         
     if compile_mode != 'eager':

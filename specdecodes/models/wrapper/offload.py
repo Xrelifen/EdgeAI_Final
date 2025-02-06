@@ -21,7 +21,7 @@ from accelerate import (
     infer_auto_device_map
 )
 from accelerate.utils import named_module_tensors
-from ..utils import (
+from specdecodes.models.utils.modeling_utils import (
     set_module_tensor_to_device,
     dispatch_model_with_prefetch,
     DraftParams, 
@@ -633,6 +633,11 @@ class OffloadShareSDWrapper(ShareSDWrapper):
         llm_lm_head = self.llm.get_output_embeddings()
         ssm_lm_head = self.ssm.model.get_output_embeddings()
         self.llm.set_output_embeddings(ssm_lm_head)
+
+        # for tensor_name, _ in named_module_tensors(self.llm.get_input_embeddings()):
+        #     set_module_tensor_to_device(self.llm.get_input_embeddings(), tensor_name, device)
+        # for tensor_name, _ in named_module_tensors(self.llm.get_output_embeddings()):
+        #     set_module_tensor_to_device(self.llm.get_output_embeddings(), tensor_name, device)
         
         # for tensor_name, _ in named_module_tensors(ssm_embed_tokens):
         #     set_module_tensor_to_device(ssm_embed_tokens, tensor_name, device)
@@ -641,6 +646,7 @@ class OffloadShareSDWrapper(ShareSDWrapper):
 
         # del llm_lm_head
         del llm_lm_head, llm_embed_tokens
+        gc.collect()
         torch.cuda.empty_cache()
 
         est_mem_usage = (torch.cuda.memory_allocated(device) / 0.9) / (10 ** 9)
