@@ -654,26 +654,6 @@ class SSM_Eagle(SSMBaseNEFT):
                 tree.prune_to_top_n(self.draft_params.max_verify_tokens)
         
         return tree
-
-from .lib.utils.unsafe_import import model_from_hf_path
-class SSM_QTIP(SSM_Classic):
-    @classmethod
-    def from_pretrained(
-        cls, 
-        pretrained_model_name_or_path,
-        *model_args,
-        config = None,
-        torch_dtype=torch.float32,
-        **model_kwargs
-    ):
-        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
-        eos_token_id = model_kwargs.pop("eos_token_id", None)
-        
-        ssm, model_str = model_from_hf_path(pretrained_model_name_or_path, )
-        model = cls(ssm, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs)
-        
-        return model
-    
     
 class SSM_ShareSD(SSMBaseNEFT):
     @classmethod

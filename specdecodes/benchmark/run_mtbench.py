@@ -12,7 +12,7 @@ from fastchat.utils import str_to_torch_dtype
 import logging
 
 from torch.nn.attention import SDPBackend, sdpa_kernel
-from ..models import ProfileHuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper, SSM_Classic, SSM_Eagle, SSM_QTIP
+from ..models import ProfileHuggingFaceWrapper, ProfileNaiveWrapper, NaiveWrapper, SDWrapper, ProfileSDWrapper, ProfileOffloadSDWrapper, OffloadWrapper, SSM_Classic, SSM_Eagle
 from ..models import DraftParams, modeling_llama
 
 # Set random seed for reproducibility
