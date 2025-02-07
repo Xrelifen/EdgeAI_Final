@@ -38,8 +38,8 @@ def main(args):
         dtype=args.dtype, device=args.device,
         offload=args.offload,
         draft_params=draft_params,
-        nbits=2,
-        group_size=32,
+        nbits=4,
+        group_size=64,
         quant_range=(0, 31)
     )
 

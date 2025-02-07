@@ -54,7 +54,8 @@ DO_SAMPLE=False
 TEMPERATURE=0
 # DEVICE="auto"
 DEVICE="cuda:0"
-DTYPE="float16"
+# DTYPE="float16"
+DTYPE="bfloat16"
 
 # Stopping criteria parameters (set only one)
 #! Warning: Setting MAX_NEW_TOKENS may alter the maximum token length based on input_ids
