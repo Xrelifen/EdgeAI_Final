@@ -3,7 +3,7 @@
 import torch
 from torch import nn
 from torch import float16
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 from functools import partial
 from tqdm import tqdm
 from transformers.models.llama import LlamaModel
@@ -107,8 +107,8 @@ class AutoHQQHFModel(AutoHQQHFModel):
         quant_config: dict,
         compute_dtype: torch.dtype = float16,
         device: Union[str, list, dict] = "cuda",
-        offload: bool = False
     ):
+        
         # Check if the model was already quantized
         if getattr(model, "hqq_quantized", False):
             print("Model was already quantized")
@@ -192,6 +192,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
             current_device = device_map[linear_layer.name]
 
             if quant_config is not None:
+                org_device = linear_layer.weight.device # [MODIFIED] Store original device
                 out_module = HQQLinear(
                     linear_layer,
                     quant_config,
@@ -199,8 +200,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                if offload:
-                    linear_layer.to('cpu')
+                linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 

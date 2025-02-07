@@ -8,7 +8,7 @@ from ..wrapper.huggingface import HuggingFaceWrapper
 from ..wrapper.naive import NaiveWrapper, ProfileNaiveWrapper
 from ..wrapper.sd import SDWrapper, ProfileSDWrapper
 from ..wrapper.share_sd import ShareSDWrapper, ProfileShareSDWrapper
-from ..wrapper.offload import OffloadWrapper, OffloadSDWrapper, OffloadShareSDWrapper, ProfileOffloadSDWrapper, ProfileOffloadShareSDWrapper
+from ..wrapper.offload import OffloadShareSDWrapper, ProfileOffloadShareSDWrapper
 from ..ssm import SSM_Classic, SSM_Eagle, SSM_ShareSD
 
 from hqq.core.quantize import *
@@ -60,7 +60,8 @@ def load_model(
     dtype: torch.dtype = torch.float16,
     device: str = "auto",
     offload: bool = False,
-    max_mem: float = 8.0,
+    max_mem: float = 16.0,
+    out_dir: str = None,
     **kwargs
 ):
     # load tokenizer
@@ -120,7 +121,7 @@ def load_model(
                 quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
                 quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
 
-            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if device == "auto" else device), offload=offload)
+            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=device)
             if compile_mode != 'eager':
                 HQQLinear.set_backend(HQQBackend.PYTORCH)
             else:
@@ -153,14 +154,15 @@ def load_model(
         
         if mode == "sd-share":
             if not offload:
-                model = ProfileShareSDWrapper(draft_params=draft_params, out_dir=None) if logging else ShareSDWrapper(draft_params=draft_params)
+                model = ProfileShareSDWrapper(draft_params=draft_params, out_dir=out_dir) if logging else ShareSDWrapper(draft_params=draft_params)
             else:
-                model = ProfileOffloadShareSDWrapper(draft_params=draft_params, out_dir=None) if logging else OffloadShareSDWrapper(draft_params=draft_params)
+                model = ProfileOffloadShareSDWrapper(draft_params=draft_params, out_dir=out_dir) if logging else OffloadShareSDWrapper(draft_params=draft_params)
         else:
             if not offload:
-                model = ProfileSDWrapper(draft_params=draft_params, out_dir=None) if logging else SDWrapper(draft_params=draft_params)
+                model = ProfileSDWrapper(draft_params=draft_params, out_dir=out_dir) if logging else SDWrapper(draft_params=draft_params)
             else:
-                model = ProfileOffloadSDWrapper(draft_params=draft_params, out_dir=None) if logging else OffloadSDWrapper(draft_params=draft_params)
+                raise ValueError("Offload currently not available for sd-classic and sd-eagle.") #TODO: Update OffloadSDWrapper to newer version.
+                #model = ProfileOffloadSDWrapper(draft_params=draft_params, out_dir=out_dir) if logging else OffloadSDWrapper(draft_params=draft_params)
         model.set_ssm(ssm)
     else:
         model = model_map.get(mode, lambda: None)()
