@@ -107,6 +107,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
         quant_config: dict,
         compute_dtype: torch.dtype = float16,
         device: Union[str, list, dict] = "cuda",
+        offload: bool = False
     ):
         # Check if the model was already quantized
         if getattr(model, "hqq_quantized", False):
@@ -198,7 +199,8 @@ class AutoHQQHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                linear_layer.to('cpu')
+                if offload:
+                    linear_layer.to('cpu')
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
@@ -211,9 +213,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
             layer.device = current_device
 
             for tensor_name, _ in named_module_tensors(layer):
-                set_module_tensor_to_device(layer, tensor_name, current_device)
-
-            # logging.info(f'Memory Usage: {torch.cuda.memory_allocated(current_device) / 0.9 / (10 ** 9)} GB')
+                set_module_tensor_to_device(layer, tensor_name, current_device, dtype=compute_dtype)
 
             return layer
 

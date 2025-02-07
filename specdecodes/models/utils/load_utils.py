@@ -120,7 +120,7 @@ def load_model(
                 quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
                 quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
 
-            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if device == "auto" else device))
+            AutoHQQHFModel.quantize_model(qmodule, quant_config=quant_config, compute_dtype=dtype, device=("cuda" if device == "auto" else device), offload=offload)
             if compile_mode != 'eager':
                 HQQLinear.set_backend(HQQBackend.PYTORCH)
             else:
@@ -180,7 +180,8 @@ def load_model(
         print("Running with Torch Inductor...")
         torch.set_float32_matmul_precision('high')
 
-        llm.forward = torch.compile(llm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+        if not offload:
+            llm.forward = torch.compile(llm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
         if ssm is not None:
             ssm.forward = torch.compile(ssm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
             #TODO: Modify sd/ssm to support prefill_forward compilation on sd-eagle and sd-classic

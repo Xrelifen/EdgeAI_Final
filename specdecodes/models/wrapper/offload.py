@@ -727,9 +727,9 @@ class OffloadShareSDWrapper(ShareSDWrapper):
                 assert module_map[prefixed_layer_name] is not None, "module not found"
         
         logging.info(f'[Estimated Memory Usage] {est_mem_usage} GB')
-        # logging.info(f'[Check Device Map]')
-        # for module_name, dev in device_map.items():
-        #     logging.info(f'{module_name}: {dev}')
+        logging.info(f'[Check Device Map]')
+        for module_name, dev in device_map.items():
+            logging.info(f'{module_name}: {dev}')
         # # logging.info(f'[Check Prefetch Map]')
         # for module_name, next_module_name in prefetch_name_map.items():
         #     logging.info(f'{module_name} - {next_module_name}')
