@@ -1,5 +1,5 @@
 import typer
-
+from .run_test import main as main_run_test
 
 def run_app(runner):
     app = typer.Typer()
@@ -12,10 +12,11 @@ def run_app(runner):
             python custom.py run-test
         """
         pipeline, tokenizer = runner.build_pipeline()
-        print(f"Running test with pipeline: {pipeline}")
+        main_run_test(pipeline, tokenizer, args=runner)
+        
         
     @app.command()
-    def run_benchmark(bench_name: str = "mt_bench"):
+    def run_benchmark(bench_name: str = "mt-bench"):
         """
         Example subcommand for benchmarking.
         Usage: 

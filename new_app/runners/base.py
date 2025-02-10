@@ -1,4 +1,4 @@
-from configs.app import run_app
+from ..app import run_app
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -21,7 +21,7 @@ class BaseRunner:
         self.temperature = 0
         
         # Additional configurations
-        self.warmup_iters = 0
+        self.warmup_iter = 0
         self.compile_mode = None
         self.cache_implementation = "dynamic"
         
@@ -36,6 +36,10 @@ class BaseRunner:
         self.offload_recipe = None
         self.target_config = None
         self.draft_config = None
+        
+        # Print Results
+        self.print_time = True
+        self.print_message = True
         
         # Logging and profiling
         self.logging = False
@@ -57,8 +61,15 @@ class BaseRunner:
         # No draft model is needed for the base runner
         return None
         
-    def _load_pipeline_method(self, *args):
-        return ProfileNaiveWrapper(*args)
+    def _load_pipeline(self, **kwargs):
+        return ProfileNaiveWrapper(**kwargs)
+    
+    def _compile_pipeline(self, pipeline, compile_mode):
+        if compile_mode is not None:
+            torch.set_float32_matmul_precision('high')
+            pipeline.llm.forward = torch.compile(pipeline.llm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+            if pipeline.ssm is not None:
+                pipeline.ssm.forward = torch.compile(pipeline.ssm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
     def build_pipeline(self):
         # 1. Load model and tokenizer
@@ -82,12 +93,17 @@ class BaseRunner:
         # if target_config is not None and target_config.get("device_map"):
         #     Offloader.dispatch_model(model, target_config["device_map"], compute_device=self.device)
 
-        # 5. Build up the pipeline       
-        pipeline = self._load_pipeline_method()
+        # 5. Build up the pipeline
+        pipeline = self._load_pipeline(draft_params=self.draft_params)
+        pipeline.cache_implementation = self.cache_implementation
         pipeline.set_llm(model)
+        pipeline.set_tokenizer(tokenizer)
         if draft_model:
             pipeline.set_ssm(draft_model)
         pipeline.eval()
+        
+        # 6. Compile pipeline if needed
+        self._compile_pipeline(pipeline, self.compile_mode)
         
         return pipeline, tokenizer
             
