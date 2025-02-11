@@ -1,3 +1,4 @@
+from copy import deepcopy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -13,6 +14,18 @@ from ..llm import modeling_llama as modeling_llama
 from ..llm import modeling_llama_no_inout_norm as modeling_llama_eagle
 from ..utils.modeling_utils import invert_mask
 from ..utils.cpu_tree import Tree
+
+def share_param_deepcopy(model):
+    # Build the memo dictionary from the model's parameters (and optionally buffers)
+    model_memo = {}
+    for _, param in model.named_parameters():
+        model_memo[id(param)] = param
+    for _, buf in model.named_buffers():
+        model_memo[id(buf)] = buf
+
+    # Clone the model using the memo dictionary.
+    share_model = deepcopy(model, memo=model_memo)
+    return share_model
      
 def load_custom_model(model, model_path, keep_embeddings=False):
     # Load the model
@@ -159,6 +172,12 @@ class SSMBase(nn.Module):
         
         # batch_size, N_available_leaves = parent_probs.shape
         batch_size, N_available_leaves, vocab_size = sampled_probs.shape
+        
+        #! Test
+        # if sample_k == 1:
+        #     device = sampled_probs.device
+        #     return sampled_probs.argmax(dim=-1), sampled_probs.max(dim=-1).values, torch.zeros(batch_size, dtype=torch.long, device=device)[None], True
+        
 
         with nvtx.annotate("sampling_0"):
             # Ensure input tensors are contiguous (Not sure if this is needed)
@@ -668,8 +687,9 @@ class SSM_ShareSD(SSMBaseNEFT):
     ):
         # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
         eos_token_id = model_kwargs.pop("eos_token_id", None)
-
-        model = cls(base_model, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
+        
+        model = share_param_deepcopy(base_model)
+        model = cls(model, config=config, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
         
         # Convert the model to the desired dtype and return
         model.to(dtype=torch_dtype)

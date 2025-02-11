@@ -26,9 +26,9 @@ class MyBuilder(BaseBuilder):
         self.vram_limit = None # in GB
         
         # Speed up inference using torch.compile
+        self.cache_implementation = "static"
         self.warmup_iter = 10
         self.compile_mode = "max-autotune"
-        self.cache_implementation = "static"
     
     def _load_draft_model(self, model, tokenizer, draft_path):
         draft_config = deepcopy(model.config)
