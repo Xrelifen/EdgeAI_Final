@@ -94,11 +94,15 @@ class BaseRunner:
         #     Offloader.dispatch_model(model, target_config["device_map"], compute_device=self.device)
 
         # 5. Build up the pipeline
-        pipeline = self._load_pipeline(draft_params=self.draft_params)
+        if draft_model is not None:
+            pipeline = self._load_pipeline(draft_params=self.draft_params)
+        else:
+            pipeline = self._load_pipeline()
+            
         pipeline.cache_implementation = self.cache_implementation
         pipeline.set_llm(model)
         pipeline.set_tokenizer(tokenizer)
-        if draft_model:
+        if draft_model is not None:
             pipeline.set_ssm(draft_model)
         pipeline.eval()
         

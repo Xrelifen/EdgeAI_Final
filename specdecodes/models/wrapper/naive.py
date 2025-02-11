@@ -19,6 +19,7 @@ class NaiveWrapper(WrapperBase):
         stopping_criteria: StoppingCriteria,
         logits_processor: LogitsProcessorList,
         do_sample: bool,
+        **model_kwargs,
     ):
         assert self.llm is not None, "LLM model must be provided"
         
@@ -35,20 +36,12 @@ class NaiveWrapper(WrapperBase):
                     "max_length is not set. Only 'dynamic' kv-cache is supported when max_length is unspecified."
                 )
                 
-        if self.cache_implementation == "dynamic":
-            llm_max_cache_len = None
-            llm_past_key_values = self.create_kv_cache("dynamic")
+        if model_kwargs.get("past_key_values") is not None:
+            past_key_values = model_kwargs["past_key_values"]
+            max_cache_len = getattr(past_key_values, "max_cache_len", None)
             
-        elif self.cache_implementation == "static":
-            llm_max_cache_len = stopping_criteria.max_length
-            llm_past_key_values = self.create_kv_cache(
-                "static",
-                max_cache_len=llm_max_cache_len,
-                max_batch_size=batch_size,
-                config=self.llm.model.config,
-                device=input_ids.device,
-                dtype=self.llm.model.dtype,
-            )
+        else:
+            raise ValueError("past_key_values should be provided")
             
         cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
         
@@ -56,8 +49,8 @@ class NaiveWrapper(WrapperBase):
         with nvtx.annotate("prefill", color="orange"):
             outputs = self.llm.prefill_forward(
                 input_ids,
-                max_cache_len=llm_max_cache_len,
-                past_key_values=llm_past_key_values,
+                max_cache_len=max_cache_len,
+                past_key_values=past_key_values,
                 cache_position=cache_position,
                 num_logits_to_keep=1,
             )
@@ -76,7 +69,7 @@ class NaiveWrapper(WrapperBase):
                 with nvtx.annotate("llm forward", color="orange"):
                     outputs = self.llm(
                         next_tokens, 
-                        past_key_values=llm_past_key_values,
+                        past_key_values=past_key_values,
                         position_ids=cache_position.unsqueeze(0), 
                         cache_position=cache_position,
                     )
