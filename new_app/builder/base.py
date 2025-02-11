@@ -5,13 +5,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from specdecodes.models.utils.modeling_utils import DraftParams
 from specdecodes.models import ProfileNaiveWrapper
 
-class BaseRunner:
+class BaseBuilder:
     def __init__(self):
         self.device = "cuda:0"
         self.dtype = torch.float16
         self.seed = 0
         
-        # Load model paths
+        # Load model configurations
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
         self.draft_path = None
         
@@ -20,17 +20,14 @@ class BaseRunner:
         self.do_sample = False
         self.temperature = 0
         
+        # Generator configurations
+        self.generator_class = ProfileNaiveWrapper
+        self.draft_params = None
+        
         # Additional configurations
         self.warmup_iter = 0
         self.compile_mode = None
         self.cache_implementation = "dynamic"
-        
-        self.draft_params = DraftParams(
-            max_depth=12,
-            topk_len=1,
-            max_verify_tokens=64,
-            min_accept_prob=1e-8,
-        )
 
         # Offloading
         self.offload_recipe = None
@@ -61,17 +58,17 @@ class BaseRunner:
         # No draft model is needed for the base runner
         return None
         
-    def _load_pipeline(self, **kwargs):
+    def _load_generator(self, **kwargs):
         return ProfileNaiveWrapper(**kwargs)
     
-    def _compile_pipeline(self, pipeline, compile_mode):
+    def _compile_generator(self, generator, compile_mode):
         if compile_mode is not None:
             torch.set_float32_matmul_precision('high')
-            pipeline.llm.forward = torch.compile(pipeline.llm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
-            if pipeline.ssm is not None:
-                pipeline.ssm.forward = torch.compile(pipeline.ssm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+            generator.llm.forward = torch.compile(generator.llm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+            if generator.ssm is not None:
+                generator.ssm.forward = torch.compile(generator.ssm.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
-    def build_pipeline(self):
+    def build_generator(self):
         # 1. Load model and tokenizer
         model, tokenizer = self._load_model_and_tokenizer(self.llm_path)
         draft_model = self._load_draft_model(model, tokenizer, self.draft_path)
@@ -95,22 +92,22 @@ class BaseRunner:
 
         # 5. Build up the pipeline
         if draft_model is not None:
-            pipeline = self._load_pipeline(draft_params=self.draft_params)
+            generator = self.generator_class(draft_params=self.draft_params)
         else:
-            pipeline = self._load_pipeline()
+            generator = self._load_generator()
             
-        pipeline.cache_implementation = self.cache_implementation
-        pipeline.set_llm(model)
-        pipeline.set_tokenizer(tokenizer)
+        generator.cache_implementation = self.cache_implementation
+        generator.set_llm(model)
+        generator.set_tokenizer(tokenizer)
         if draft_model is not None:
-            pipeline.set_ssm(draft_model)
-        pipeline.eval()
+            generator.set_ssm(draft_model)
+        generator.eval()
         
         # 6. Compile pipeline if needed
-        self._compile_pipeline(pipeline, self.compile_mode)
+        self._compile_generator(generator, self.compile_mode)
         
-        return pipeline, tokenizer
+        return generator, tokenizer
             
         
 if __name__ == "__main__":
-  run_app(BaseRunner())
+  run_app(BaseBuilder())

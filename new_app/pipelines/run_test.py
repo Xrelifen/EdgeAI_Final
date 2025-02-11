@@ -9,7 +9,7 @@ import gemlite
 from specdecodes.models import create_kv_cache
 
 
-def main(pipeline, tokenizer, args):
+def main(generator, tokenizer, args):
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -33,18 +33,19 @@ def main(pipeline, tokenizer, args):
             "static",
             max_cache_len=max_cache_len,
             max_batch_size=1,
-            config=pipeline.llm.model.config,
-            device=pipeline.llm.model.device,
-            dtype=pipeline.llm.model.dtype,
+            config=generator.llm.model.config,
+            device=generator.llm.model.device,
+            dtype=generator.llm.model.dtype,
         )
-        if pipeline.ssm is not None:
+        # if generator.ssm is not None:
+        if getattr(generator, 'ssm', None) is not None:
             ssm_past_key_values = create_kv_cache(
                 "static",
                 max_cache_len=max_cache_len,
                 max_batch_size=1,
-                config=pipeline.ssm.model.config,
-                device=pipeline.ssm.model.device,
-                dtype=pipeline.ssm.model.dtype,
+                config=generator.ssm.model.config,
+                device=generator.ssm.model.device,
+                dtype=generator.ssm.model.dtype,
             )
         else:
             ssm_past_key_values = None
@@ -52,7 +53,8 @@ def main(pipeline, tokenizer, args):
     else:
         # Create dynamic kv-cache
         past_key_values = create_kv_cache("dynamic")
-        if pipeline.ssm is not None:
+        # if generator.ssm is not None:
+        if getattr(generator, 'ssm', None) is not None:
             ssm_past_key_values = create_kv_cache("dynamic")
         else:
             ssm_past_key_values = None
@@ -62,7 +64,7 @@ def main(pipeline, tokenizer, args):
     if args.warmup_iter > 0:
         print("Warming up... It will take some time for the first few iterations to run.")
         with nvtx.annotate("Warming up"):
-            pipeline.disable_logging = True
+            generator.disable_logging = True
             for i in trange(args.warmup_iter, desc='Warming up'):
                 # input message
                 system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
@@ -74,13 +76,13 @@ def main(pipeline, tokenizer, args):
                 with nvtx.annotate("Warm up"):
                     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
                     with sdpa_kernel(backends=[SDPBackend.MATH]):
-                        pipeline.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, ssm_past_key_values=ssm_past_key_values)
+                        generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, ssm_past_key_values=ssm_past_key_values)
                 
                 past_key_values.reset()
                 if ssm_past_key_values is not None:
                     ssm_past_key_values.reset()
                     
-            pipeline.disable_logging = False
+            generator.disable_logging = False
             
     gemlite.core.GemLiteLinear.cache_config('/tmp/gemlite_config.json')
 
@@ -106,15 +108,15 @@ def main(pipeline, tokenizer, args):
     start_event.record()
     with nvtx.annotate("Generate"):
         with sdpa_kernel(backends=[SDPBackend.MATH]):
-            output_ids = pipeline.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, ssm_past_key_values=ssm_past_key_values)
+            output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, ssm_past_key_values=ssm_past_key_values)
     end_event.record()
     
-    # Ensure all CUDA kernels are done
+    # Ensure all CUDA kernels are done.
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStop()
     
     total_time_s = start_event.elapsed_time(end_event) / 1000.0
-    output = pipeline.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
+    output = generator.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
     # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
     if args.print_message:

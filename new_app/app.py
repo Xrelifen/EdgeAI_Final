@@ -1,7 +1,7 @@
 import typer
-from .run_test import main as main_run_test
+from .pipelines.run_test import main as main_run_test
 
-def run_app(runner):
+def run_app(builder):
     app = typer.Typer()
 
     @app.command()
@@ -11,8 +11,8 @@ def run_app(runner):
         Usage:
             python custom.py run-test
         """
-        pipeline, tokenizer = runner.build_pipeline()
-        main_run_test(pipeline, tokenizer, args=runner)
+        generator, tokenizer = builder.build_generator()
+        main_run_test(generator, tokenizer, args=builder)
         
         
     @app.command()

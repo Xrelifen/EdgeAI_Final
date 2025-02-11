@@ -1,22 +1,27 @@
 from ..app import run_app
-from .base import BaseRunner
+from .base import BaseBuilder
 
 import torch
 from specdecodes.models.utils.modeling_utils import DraftParams
 from specdecodes.models import SSM_Eagle, ProfileSDWrapper
 from copy import deepcopy
 
-class MyRunner(BaseRunner):
+class MyBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
         self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
         self.draft_path = "/home/scott306lr_l/checkpoints/eagle/sl1-ce/model_5"
+        
+        # Generator configurations
+        self.generator_class = ProfileSDWrapper
         self.draft_params = DraftParams(
             max_depth=6,
             topk_len=10,
             max_verify_tokens=64,
             min_accept_prob=1e-8,
         )
+        
+        # Offloading
         self.offload_recipe = None
         self.vram_limit = None # in GB
         
@@ -38,9 +43,6 @@ class MyRunner(BaseRunner):
         draft_model.set_modules(embed_tokens=model.get_input_embeddings(), lm_head=model.lm_head)
         return draft_model
     
-    def _load_pipeline_method(self, *args):
-        return ProfileSDWrapper(*args)
-    
     
 if __name__ == "__main__":
-    run_app(MyRunner())
+    run_app(MyBuilder())

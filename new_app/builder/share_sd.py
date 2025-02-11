@@ -1,21 +1,26 @@
 
 from ..app import run_app
-from .base import BaseRunner
+from .base import BaseBuilder
 
 import torch
 from specdecodes.models.utils.modeling_utils import DraftParams
 from specdecodes.models import SSM_ShareSD, ProfileShareSDWrapper
 
-class MyRunner(BaseRunner):
+class MyBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        
+        # Generator configurations
+        self.generator_class = ProfileShareSDWrapper
         self.draft_params = DraftParams(
             max_depth=15,
             topk_len=4,
             max_verify_tokens=64,
             min_accept_prob=1e-8,
         )
+        
+        # Offloading
         self.offload_recipe = None
         self.vram_limit = None # in GB
         
@@ -32,9 +37,6 @@ class MyRunner(BaseRunner):
         )
         return draft_model
     
-    def _load_pipeline(self, **kwargs):
-        return ProfileShareSDWrapper(**kwargs)
-    
     
 if __name__ == "__main__":
-    run_app(MyRunner())
+    run_app(MyBuilder())
