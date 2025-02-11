@@ -206,8 +206,8 @@ class Tree:
         # neg_inf_mask = (~am_tensor).to(self.prob_dtype) * torch.finfo(self.prob_dtype).min
         # return neg_inf_mask.unsqueeze(0).unsqueeze(0)
         return am_tensor.unsqueeze(0).unsqueeze(0)
-
-    def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = True):
+    
+    def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = True, tokenizer=None):
         if not (show_token_id or show_probability):
             raise ValueError("At least one of 'show_token_id' or 'show_probability' must be True.")
 
@@ -215,6 +215,11 @@ class Tree:
         for i, node in enumerate(self.nodes):
             for c in node.children:
                 children_list[i].append(c)
+                
+        def tokenize(c, tokenizer=None):
+            if tokenizer:
+                return repr(tokenizer.decode([c]))
+            return str(c)
 
         def recurse(idx: int, prefix: str = ''):
             for i, c_idx in enumerate(children_list[idx]):
@@ -222,18 +227,18 @@ class Tree:
                 child_node = self.nodes[c_idx]
                 info = []
                 if show_token_id:
-                    info.append(str(child_node.token_id))
+                    info.append(tokenize(child_node.token_id, tokenizer))
                 if show_probability:
-                    info.append(f"{child_node.cumulative_probability:.4f}")
+                    info.append(f"({child_node.cumulative_probability:.4f})")
                 print(prefix + connector + " ".join(info))
                 recurse(c_idx, prefix + ('    ' if i == len(children_list[idx]) - 1 else '│   '))
 
         root = self.nodes[0]
         root_info = []
         if show_token_id:
-            root_info.append(str(root.token_id))
+            root_info.append(tokenize(root.token_id, tokenizer))
         if show_probability:
-            root_info.append(f"{root.cumulative_probability:.4f}")
+            root_info.append(f"({root.cumulative_probability:.4f})")
         print(" ".join(root_info))
         recurse(0)
 
