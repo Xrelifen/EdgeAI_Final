@@ -713,7 +713,7 @@ class SSM_ShareSD(SSMBaseNEFT):
 
         with nvtx.annotate("update parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len+1, device=device, dtype=torch.long)
+            position_ids = torch.full((batch_size, self.draft_params.topk_len), kv_len, device=device, dtype=torch.long)
             cache_position = torch.arange(kv_len, kv_len+self.draft_params.topk_len, dtype=torch.long, device=device)
         
         # 4) Create TreeData & TreeMaskCache to manage tree structure and intermediate data.
