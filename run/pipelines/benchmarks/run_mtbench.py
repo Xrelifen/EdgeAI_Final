@@ -70,6 +70,11 @@ def run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args,
         print(f"\tThroughput: {avg_tput:.2f} tokens/sec")
         print(f"\tAcceptance rate: {avg_accept_rate:.2f} tokens/iter")
         
+        # Write results to file
+        with open(os.path.join(log_dir, "results.json"), 'a+') as f:
+            json.dump({i: {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4)
+        
+        
         avg_tput_list.append(avg_tput)
         avg_accept_rate_list.append(avg_accept_rate)
 
@@ -157,5 +162,5 @@ def main(generator, tokenizer, args):
     avg_tput, avg_accept_rate = run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args, dataset, log_dir, repeat=3)
     
     # Write results to file
-    with open(os.path.join(log_dir, "results.json"), 'w') as f:
-        json.dump({"tput": avg_tput, "accept_rate": avg_accept_rate}, f, indent=4)
+    with open(os.path.join(log_dir, "results.json"), 'a+') as f:
+        json.dump({"average": {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4)
