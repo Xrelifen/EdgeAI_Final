@@ -6,7 +6,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.cache_utils import DynamicCache
 
 import numpy as np
-import matplotlib.pyplot as plt
 import argparse
 import logging
 import os
