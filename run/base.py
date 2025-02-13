@@ -57,6 +57,10 @@ class BaseBuilder:
         self.print_time = True
         self.print_message = True
         
+        # For benchmarking
+        self.out_dir = None
+        self.log_dir = "experiments"
+        
         
     def _load_model_and_tokenizer(self, model_path):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -78,7 +82,7 @@ class BaseBuilder:
             logging.info(f"Compiling the generator with mode: {compile_mode}")
             torch.set_float32_matmul_precision('high')
             generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
-            if generator.draft_model is not None:
+            if getattr(generator, 'draft_model', None) is not None:
                 generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
     def build_generator(self):

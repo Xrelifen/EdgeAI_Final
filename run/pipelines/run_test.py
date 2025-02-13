@@ -24,7 +24,11 @@ def main(generator, tokenizer, args):
     # kv-cache
     if args.cache_implementation == "static":
         if args.max_length is not None:
-            max_cache_len = args.max_length + args.draft_params.max_sample_tokens
+            if getattr(generator, 'draft_model', None) is not None:
+                # Additional sample tokens may cause KV-Cache tp exceed max_length
+                max_cache_len = args.max_length + args.draft_params.max_sample_tokens
+            else:
+                max_cache_len = args.max_length
         else:
             raise ValueError("max_length should be set for static cache.")
         
@@ -64,6 +68,7 @@ def main(generator, tokenizer, args):
     if args.warmup_iter > 0:
         print("Warming up... It will take some time for the first few iterations to run.")
         with nvtx.annotate("Warming up"):
+            is_profiling = generator.profiling
             generator.profiling = False
             for i in trange(args.warmup_iter, desc='Warming up'):
                 # input message
@@ -81,8 +86,7 @@ def main(generator, tokenizer, args):
                 past_key_values.reset()
                 if draft_past_key_values is not None:
                     draft_past_key_values.reset()
-                    
-            generator.profiling = True
+            generator.profiling = is_profiling
             
     gemlite.core.GemLiteLinear.cache_config('/tmp/gemlite_config.json')
 
