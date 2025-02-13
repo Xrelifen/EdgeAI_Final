@@ -14,26 +14,19 @@ from hqq.models.base import _QUANT_LAYERS, _IGNORE_LINEAR
 from hqq.core.quantize import *
 from hqq.core.utils import cleanup
 
-from specdecodes.models.utils.modeling_utils import set_module_tensor_to_device
-from accelerate.utils import named_module_tensors
-import logging
+# [MODIFIED]
+from accelerate.utils import set_module_tensor_to_device, named_module_tensors
 
 # [MODIFIED]
-def name_to_linear_tag_with_layer(name: str) -> str:
-    return ".".join(
-        [
-            n
-            for n in name.split(".")
-            if ((n not in ["model"]))# and (not n.isnumeric()))
-        ]
-    )
+def exclude_base_model_name(name: str) -> str:
+    return ".".join(n for n in name.split(".") if n != "model")
 
 # Get all linear tags available
 def get_linear_tags_from_model(model, ignore: list) -> list:
     linear_tags = set()
     for name, module in model.named_modules():
         if (type(module) in _QUANT_LAYERS) and (name.split(".")[-1] not in ignore):
-            linear_tags.add(name_to_linear_tag_with_layer(name))
+            linear_tags.add(exclude_base_model_name(name)) # [MODIFIED]
     return list(linear_tags)
 
 class AutoHQQHFModel(AutoHQQHFModel):
@@ -53,7 +46,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
                 tmp_mapping[name] = module
 
         for name in tqdm(tmp_mapping, disable=not verbose):
-            linear_tag = name_to_linear_tag_with_layer(name) # [MODIFIED]
+            linear_tag = exclude_base_model_name(name) # [MODIFIED]
             patch_param = (
                 patch_params[linear_tag] if (linear_tag in patch_params) else None
             )
@@ -192,7 +185,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
             current_device = device_map[linear_layer.name]
 
             if quant_config is not None:
-                org_device = linear_layer.weight.device # [MODIFIED] Store original device
+                org_device = linear_layer.weight.device # [MODIFIED]
                 out_module = HQQLinear(
                     linear_layer,
                     quant_config,
@@ -200,22 +193,25 @@ class AutoHQQHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
+                # [MODIFIED] Move layer back to the right device
+                # linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
+                for tensor_name, _ in named_module_tensors(linear_layer):
+                    set_module_tensor_to_device(linear_layer, tensor_name, org_device, dtype=compute_dtype)
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
-            # logging.info(f'Memory Usage: {torch.cuda.memory_allocated(current_device) / 0.9 / (10 ** 9)} GB')
-
+            # out_module.device = current_device # [MODIFIED] We don't need this
             return out_module
 
         def _patch_other(layer):
             current_device = device_map[layer.name]
             layer.device = current_device
 
+            # [MODIFIED] Set all tensors to the right device
             for tensor_name, _ in named_module_tensors(layer):
                 set_module_tensor_to_device(layer, tensor_name, current_device, dtype=compute_dtype)
-
-            return layer
+                
+            return layer # layer.to(device=current_device, dtype=compute_dtype)
 
         cls.patch_model(model, _patch_other, _patch_linear, patch_params)
 

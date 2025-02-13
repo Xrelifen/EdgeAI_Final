@@ -6,7 +6,7 @@ from copy import deepcopy
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import LlamaForCausalLM, AutoConfig, get_cosine_schedule_with_warmup
+from transformers import LlamaForCausalLM, AutoConfig
 from accelerate import Accelerator
 from accelerate.utils import set_seed, release_memory, tqdm
 from accelerate.logging import get_logger
@@ -14,7 +14,8 @@ from safetensors.torch import save_file
 import wandb
 
 from .liger_mokeypatch import apply_liger_kernel_to_llama
-from ..models import SSM_Eagle, LLM_First_Layers, LLM_Last_Layers
+from ..models.draft_models.eagle_sd import EagleSDDraftModel
+from .partial_llm import LLM_First_Layers, LLM_Last_Layers
 from .train_utils import (
     list_files,
     CustomDataset,
@@ -333,33 +334,13 @@ def main(args):
     llm_last.eval().to(accelerator.device)
 
     # Set up the student model
-    logger.info("Setting up model...")
-    draft_config = deepcopy(config)
-    draft_config.num_hidden_layers = 1
-    draft_config.use_cache = False
-    draft_config._attn_implementation = "sdpa"
-    
-    # draft_config.head_dim = 64
-    # draft_config.hidden_size = 2048
-    # draft_config.intermediate_size = 8192
-    # draft_config.num_attention_heads = 32
-    # draft_config.num_key_value_heads = 8
-    
-    # draft_config.num_attention_heads = 32
-    # draft_config.num_key_value_heads = 8
-    # draft_config.intermediate_size = 11008
-    # 4096 
-    
-    if args.neftune:
-        draft_config.neftune_noise_alpha = args.neftune_noise_alpha
-
     if args.pretrained:
         logger.info("Loading pretrained model...")
-        model = SSM_Eagle.from_pretrained(args.pretrained, config=draft_config, keep_embeddings=args.keep_embeddings)
+        model = EagleSDDraftModel.from_pretrained(args.pretrained, target_model=llm)
     else:
         logger.info("Loading draft model...")
-        model = SSM_Eagle(config=draft_config, keep_embeddings=args.keep_embeddings)
-    model.set_modules(embed_tokens=llm_first, lm_head=llm_last)
+        model = EagleSDDraftModel(target_model=llm)
+    model.update_modules(embed_tokens=llm_first, lm_head=llm_last)
 
     # apply liger kernel to draft model
     apply_liger_kernel_to_llama(model=model.model, rms_norm=False)
@@ -449,7 +430,6 @@ if __name__ == '__main__':
     parser.add_argument('--no-validate', action='store_true', help='Skip validation')
 
     # Model parameters
-    parser.add_argument('--keep-embeddings', action='store_true', help='Keep embeddings saved in the model')
     parser.add_argument('--llm-first-layers', type=int, default=0)
     parser.add_argument('--llm-last-layers', type=int, default=0)
 
@@ -460,8 +440,6 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight-decay', type=float, default=1e-2)
     parser.add_argument('--betas', nargs=2, type=float, default=(0.9, 0.95))
-    parser.add_argument('--neftune', action='store_true')
-    parser.add_argument('--neftune-noise-alpha', type=float, default=5.0)
 
     # Logging
     parser.add_argument('--wandb', action='store_true')

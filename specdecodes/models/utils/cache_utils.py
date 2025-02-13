@@ -1,8 +1,27 @@
 from typing import Any, List, Optional, Dict, Tuple, Union
-import nvtx
 import torch
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.configuration_utils import PretrainedConfig
+
+def create_kv_cache(
+    cache_implementation = "dynamic",
+    max_cache_len=None,
+    max_batch_size=None,
+    config=None,
+    device='cpu',
+    dtype='float16',
+):
+    if cache_implementation == "dynamic":
+        return TreeDynamicCache()
+    
+    elif cache_implementation == "static":
+        return TreeStaticCache(
+            max_cache_len=max_cache_len,
+            max_batch_size=max_batch_size,
+            config=config,
+            device=device,
+            dtype=dtype,
+        )
 
 class TreeDynamicCache(DynamicCache):
     def __init__(self) -> None:
