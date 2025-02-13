@@ -47,7 +47,6 @@ def run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args,
                 {"role": "user", "content": input_message}
             ]
             input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-            print("Length of input_ids: ", input_ids.shape[1])
             with sdpa_kernel(backends=[SDPBackend.MATH]):
                 output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, draft_past_key_values=draft_past_key_values)
             
