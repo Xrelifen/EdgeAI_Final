@@ -4,7 +4,7 @@ from .base import BaseBuilder
 import torch
 from specdecodes.models.generators.huggingface import HuggingFaceGenerator
 
-class NaiveBuilder(BaseBuilder):
+class HuggingFaceBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
         # Base configurations
@@ -29,4 +29,4 @@ class NaiveBuilder(BaseBuilder):
         self.nvtx_profiling = False
         
 if __name__ == "__main__":
-    run_app(NaiveBuilder())
+    run_app(HuggingFaceBuilder())
