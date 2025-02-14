@@ -51,13 +51,13 @@ class ShareSDBuilder(BaseBuilder):
         self.dtype = torch.float16
         
         # Load model configurations
-        # self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
+        self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        # self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
         self.generator_class = ShareSDGenerator
         self.draft_params = DraftParams(
             max_depth=15,
-            topk_len=8,
-            max_verify_tokens=128,
+            topk_len=16,
+            max_verify_tokens=256,
             min_accept_prob=1e-8,
         )
         
