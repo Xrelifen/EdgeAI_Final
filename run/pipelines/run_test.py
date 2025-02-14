@@ -71,13 +71,9 @@ def main(generator, tokenizer, args):
             is_profiling = generator.profiling
             generator.profiling = False
             for i in trange(args.warmup_iter, desc='Warming up'):
-                # input message
-                system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                 input_message = "Write an essay about large language models."
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": input_message},
-                ]
+                messages = [{"role": "user", "content": input_message}]
+                tokenizer.use_default_system_prompt = True
                 with nvtx.annotate("Warm up"):
                     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
                     with sdpa_kernel(backends=[SDPBackend.MATH]):
@@ -91,13 +87,9 @@ def main(generator, tokenizer, args):
     gemlite.core.GemLiteLinear.cache_config('/tmp/gemlite_config.json')
 
     # input message
-    system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-    # input_message = "What's the best way to start learning a new language?"
     input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": input_message},
-    ]
+    messages = [{"role": "user", "content": input_message}]
+    tokenizer.use_default_system_prompt = True
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
     prompt = tokenizer.decode(input_ids[0])
     

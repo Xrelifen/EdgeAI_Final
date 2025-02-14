@@ -18,12 +18,9 @@ def run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args,
     is_profiling = generator.profiling
     generator.profiling = False
     for i in trange(args.warmup_iter, desc='Warming up'):
-        system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
         input_message = "Write an essay about large language models."
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": input_message},
-        ]
+        messages = [{"role": "user", "content": input_message}]
+        tokenizer.use_default_system_prompt = True
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
         
         with sdpa_kernel(backends=[SDPBackend.MATH]):
@@ -41,11 +38,8 @@ def run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args,
         tput_list, accept_rate_list = [], []
         for idx, query in tqdm(enumerate(dataset), total=len(dataset), desc="Evaluating", leave=False):
             input_message = query.replace("[INST]", "").replace("[/INST]\n\nASSISTANT:", "")
-            system_message = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": input_message}
-            ]
+            messages = [{"role": "user", "content": input_message}]
+            tokenizer.use_default_system_prompt = True
             input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
             with sdpa_kernel(backends=[SDPBackend.MATH]):
                 output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, draft_past_key_values=draft_past_key_values)
@@ -71,9 +65,9 @@ def run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args,
         print(f"\tAcceptance rate: {avg_accept_rate:.2f} tokens/iter")
         
         # Write results to file
-        with open(os.path.join(log_dir, "results.json"), 'a+') as f:
+        with open(os.path.join(log_dir, "results.jsonl"), 'a+') as f:
             json.dump({i: {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4)
-        
+            f.write("\n")
         
         avg_tput_list.append(avg_tput)
         avg_accept_rate_list.append(avg_accept_rate)
@@ -162,5 +156,6 @@ def main(generator, tokenizer, args):
     avg_tput, avg_accept_rate = run_eval(generator, tokenizer, past_key_values, draft_past_key_values, args, dataset, log_dir, repeat=3)
     
     # Write results to file
-    with open(os.path.join(log_dir, "results.json"), 'a+') as f:
+    with open(os.path.join(log_dir, "results.jsonl"), 'a+') as f:
         json.dump({"average": {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4)
+        f.write("\n")

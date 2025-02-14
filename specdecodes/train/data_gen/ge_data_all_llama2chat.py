@@ -18,9 +18,6 @@ def build_dataset(tokenizer, dataset_dir, start, end, num_proc, seed=42):
         
         # Iterate through each conversation example
         for i in range(len(examples['id'])):
-            # System prompt definition
-            sys_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
-            
             # replace role from gpt/human to user/assistant
             rename_roles = {"human": "user", "gpt": "assistant"}
 
@@ -37,7 +34,8 @@ def build_dataset(tokenizer, dataset_dir, start, end, num_proc, seed=42):
                 chat_history.append({"role": role, "content": message})
             
             # Apply chat template (assuming this method integrates system prompt and formats the conversation), keep the original conversation
-            conversation = tokenizer.apply_chat_template(chat_history, sys_prompt=sys_prompt, tokenize=False, add_generation_prompt=True)
+            tokenizer.use_default_system_prompt = True
+            conversation = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
             
             # Set padding token if not already set
             if not tokenizer.pad_token_id:
