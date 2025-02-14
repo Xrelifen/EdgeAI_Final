@@ -51,7 +51,6 @@ class BaseBuilder:
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
         
         # Pipeline print Results
         self.print_time = True

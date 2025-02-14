@@ -26,7 +26,6 @@ class HuggingFaceBuilder(BaseBuilder):
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
         
 if __name__ == "__main__":
     run_app(HuggingFaceBuilder())

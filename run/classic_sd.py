@@ -40,8 +40,8 @@ class ClassicSDBuilder(BaseBuilder):
         # Generator configurations
         self.generator_class = ClassicSDGenerator
         self.draft_params = DraftParams(
-            max_depth=15,
-            topk_len=8,
+            max_depth=12,
+            topk_len=16,
             max_verify_tokens=128,
             min_accept_prob=1e-8,
         )
@@ -51,13 +51,12 @@ class ClassicSDBuilder(BaseBuilder):
         # self.vram_limit = None # in GB
         
         # Speed up inference using torch.compile
-        # self.cache_implementation = "static"
-        # self.warmup_iter = 10
-        # self.compile_mode = "max-autotune"
+        self.cache_implementation = "static"
+        self.warmup_iter = 10
+        self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
     
     def _load_draft_model(self, target_model=None, tokenizer=None, draft_path=None):
         draft_model = ClassicSDDraftModel.from_pretrained(

@@ -20,13 +20,12 @@ class NaiveBuilder(BaseBuilder):
         self.temperature = 0
         
         # Speed up inference using torch.compile
-        self.cache_implementation = "dynamic"
-        self.warmup_iter = 0
-        self.compile_mode = None
+        self.cache_implementation = "static"
+        self.warmup_iter = 10
+        self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
         
 if __name__ == "__main__":
     run_app(NaiveBuilder())

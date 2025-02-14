@@ -51,7 +51,8 @@ class ShareSDBuilder(BaseBuilder):
         self.dtype = torch.float16
         
         # Load model configurations
-        self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        # self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
         self.generator_class = ShareSDGenerator
         self.draft_params = DraftParams(
             max_depth=15,
@@ -65,16 +66,15 @@ class ShareSDBuilder(BaseBuilder):
         self.temperature = 0
         
         # Quantization and offloading
-        self.recipe = temp_recipe #22.09 -> 24.13
+        self.recipe = temp_recipe
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"
-        # self.warmup_iter = 10
-        # self.compile_mode = "max-autotune"
+        self.warmup_iter = 10
+        self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
     
     def _load_draft_model(self, target_model=None, tokenizer=None, draft_path=None):
         draft_model = ShareSDDraftModel.from_pretrained(

@@ -59,7 +59,6 @@ class EagleSDBuilder(BaseBuilder):
         
         # Profiling
         self.generator_profiling = True
-        self.nvtx_profiling = False
     
     def _load_draft_model(self, target_model=None, tokenizer=None, draft_path=None):
         draft_model = EagleSDDraftModel.from_pretrained(
