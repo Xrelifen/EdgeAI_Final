@@ -41,7 +41,7 @@ class ShareSDDraftModel(DraftModelBase):
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
         if with_softmax:
-            logits = torch.softmax(logits, dim=-1)
+            logits = torch.softmax(logits/0.5, dim=-1)
             
         return logits
     
