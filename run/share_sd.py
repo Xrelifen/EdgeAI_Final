@@ -11,27 +11,25 @@ from hqq.core.quantize import *
 
 def temp_recipe(model, draft_model, vram_limit):  
     # Quantization
-    nbits = 2
+    nbits = 4
     group_size = 32
-    base_quant_config_a = BaseQuantizeConfig(nbits=4, group_size=32, axis=1)
+    # base_quant_config_a = BaseQuantizeConfig(nbits=2, group_size=32, axis=1)
     base_quant_config_b = BaseQuantizeConfig(nbits=nbits, group_size=group_size, axis=1)
     
     quant_config = {}
     layer_cnt = len(model.model.layers)
-    quant_start = 0 + 5 
-    quant_end = layer_cnt - 1 - 5
+    quant_start = 0
+    quant_end = layer_cnt - 1
     for i in range(quant_start, quant_end+1):
-        quant_config[f"layers.{i}.self_attn.q_proj"] = base_quant_config_b
-        quant_config[f"layers.{i}.self_attn.k_proj"] = base_quant_config_b
-        quant_config[f"layers.{i}.self_attn.v_proj"] = base_quant_config_b
-        quant_config[f"layers.{i}.self_attn.o_proj"] = base_quant_config_b
+        # quant_config[f"layers.{i}.self_attn.q_proj"] = base_quant_config_a
+        # quant_config[f"layers.{i}.self_attn.k_proj"] = base_quant_config_a
+        # quant_config[f"layers.{i}.self_attn.v_proj"] = base_quant_config_a
+        # quant_config[f"layers.{i}.self_attn.o_proj"] = base_quant_config_a
         quant_config[f"layers.{i}.mlp.gate_proj"] = base_quant_config_b
-        quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b 
-        quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_a
-        # quant to 2 bits (4 bits for the others):
-        # u 12.50 # g 14.19 # d 11.93
-        # g+u 11.93 # g+d 11.17 # u+d 10.29 
-        # q+k+v+o+g 11.17
+        quant_config[f"layers.{i}.mlp.up_proj"] = base_quant_config_b
+        quant_config[f"layers.{i}.mlp.down_proj"] = base_quant_config_b
+        
+        #
 
     target_config = None
     draft_config = {
@@ -51,13 +49,13 @@ class ShareSDBuilder(BaseBuilder):
         self.dtype = torch.float16
         
         # Load model configurations
+        # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        # self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
         self.generator_class = ShareSDGenerator
         self.draft_params = DraftParams(
-            max_depth=15,
+            max_depth=50,
             topk_len=16,
-            max_verify_tokens=256,
+            max_verify_tokens=1024,
             min_accept_prob=1e-8,
         )
         
@@ -70,8 +68,8 @@ class ShareSDBuilder(BaseBuilder):
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"
-        self.warmup_iter = 10
-        self.compile_mode = "max-autotune"
+        # self.warmup_iter = 10
+        # self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
