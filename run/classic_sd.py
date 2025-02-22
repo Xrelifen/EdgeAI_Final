@@ -64,8 +64,7 @@ class ClassicSDBuilder(BaseBuilder):
             target_model=target_model,
             torch_dtype=self.dtype,
             eos_token_id=tokenizer.eos_token_id
-        ).to(target_model.lm_head.weight.device)
-        draft_model.update_modules(embed_tokens=target_model.get_input_embeddings(), lm_head=target_model.lm_head)
+        )
         return draft_model
     
     
