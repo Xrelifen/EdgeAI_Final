@@ -15,9 +15,6 @@ from hqq.core.quantize import *
 from hqq.core.utils import cleanup
 
 # [MODIFIED]
-from accelerate.utils import set_module_tensor_to_device, named_module_tensors
-
-# [MODIFIED]
 def exclude_base_model_name(name: str) -> str:
     return ".".join(n for n in name.split(".") if n != "model")
 
@@ -193,10 +190,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                # [MODIFIED] Move layer back to the right device
-                # linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
-                for tensor_name, _ in named_module_tensors(linear_layer):
-                    set_module_tensor_to_device(linear_layer, tensor_name, org_device, dtype=compute_dtype)
+                linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
@@ -206,12 +200,8 @@ class AutoHQQHFModel(AutoHQQHFModel):
         def _patch_other(layer):
             current_device = device_map[layer.name]
             layer.device = current_device
-
-            # [MODIFIED] Set all tensors to the right device
-            for tensor_name, _ in named_module_tensors(layer):
-                set_module_tensor_to_device(layer, tensor_name, current_device, dtype=compute_dtype)
-                
-            return layer # layer.to(device=current_device, dtype=compute_dtype)
+            
+            return layer.to(device=current_device, dtype=compute_dtype)
 
         cls.patch_model(model, _patch_other, _patch_linear, patch_params)
 
