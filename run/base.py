@@ -91,7 +91,7 @@ class BaseBuilder:
         
         # 2. Obtain configs either by recipe or manually.
         if self.recipe:
-            target_config, draft_config = self.recipe(model, draft_model, vram_limit=self.vram_limit)
+            target_config, draft_config = self.recipe(model, draft_model, vram_limit=self.vram_limit, dtype=self.dtype, device=self.device)
         else:
             target_config = getattr(self, "target_config", None)
             draft_config = getattr(self, "draft_config", None)
