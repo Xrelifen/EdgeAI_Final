@@ -15,15 +15,15 @@ from hqq.core.quantize import *
 from hqq.core.utils import cleanup
 
 # [MODIFIED]
-def exclude_base_model_name(name: str) -> str:
-    return ".".join(n for n in name.split(".") if n != "model")
+def name_to_linear_tag(name: str) -> str:
+    return name
 
 # Get all linear tags available
 def get_linear_tags_from_model(model, ignore: list) -> list:
     linear_tags = set()
     for name, module in model.named_modules():
         if (type(module) in _QUANT_LAYERS) and (name.split(".")[-1] not in ignore):
-            linear_tags.add(exclude_base_model_name(name)) # [MODIFIED]
+            linear_tags.add(name_to_linear_tag(name))
     return list(linear_tags)
 
 class AutoHQQHFModel(AutoHQQHFModel):
@@ -43,7 +43,7 @@ class AutoHQQHFModel(AutoHQQHFModel):
                 tmp_mapping[name] = module
 
         for name in tqdm(tmp_mapping, disable=not verbose):
-            linear_tag = exclude_base_model_name(name) # [MODIFIED]
+            linear_tag = name_to_linear_tag(name)
             patch_param = (
                 patch_params[linear_tag] if (linear_tag in patch_params) else None
             )
