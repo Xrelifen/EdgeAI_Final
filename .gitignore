@@ -168,6 +168,3 @@ wandb
 output
 experiments
 .ignore/
-
-# llm_judge
-model_*
