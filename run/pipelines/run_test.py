@@ -114,6 +114,7 @@ def main(generator, tokenizer, args):
     total_time_s = start_event.elapsed_time(end_event) / 1000.0
     output = generator.tokenizer.decode(output_ids[0][input_ids.shape[1]:])
     # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+    # torch.cuda.memory._record_memory_history(enabled=None)
 
     if args.print_message:
         print("\nPrompt:")
