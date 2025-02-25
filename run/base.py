@@ -8,7 +8,8 @@ from specdecodes.models.generators.naive import NaiveGenerator
 
 from hqq.core.quantize import *
 from hqq.utils.patching import prepare_for_inference
-from specdecodes.models.utils.hqq.hf.base import AutoHQQHFModel
+from specdecodes.helpers.quantizers.hqq.hf.base import AutoHQQHFModel
+from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
 
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(level=LOGLEVEL)
@@ -44,6 +45,7 @@ class BaseBuilder:
         self.compile_mode = None
 
         # Quantization and offloading
+        self.offloader = PrefetchOffloader
         self.recipe = None
         self.vram_limit = None
         self.target_config = None
@@ -67,7 +69,7 @@ class BaseBuilder:
             model_path,
             torch_dtype=self.dtype,
             low_cpu_mem_usage=True,
-            device_map=self.device,
+            device_map='cpu',
             _attn_implementation="sdpa",
         )
         return model, tokenizer
@@ -91,20 +93,20 @@ class BaseBuilder:
         
         # 2. Obtain configs either by recipe or manually.
         if self.recipe:
-            target_config, draft_config = self.recipe(model, draft_model, vram_limit=self.vram_limit, dtype=self.dtype, device=self.device)
+            target_config, draft_config = self.recipe(model, draft_model, max_length=self.max_length, vram_limit=self.vram_limit, dtype=self.dtype, device=self.device)
         else:
             target_config = getattr(self, "target_config", None)
             draft_config = getattr(self, "draft_config", None)
         
-        # # 3. Quantize if needed before offloading
+        # 3. Quantize if needed before offloading
         if draft_config is not None and draft_config.get("quant_config"):
             quantize_model(draft_model.model, draft_config["quant_config"], self.dtype, self.device)
         if target_config is not None and target_config.get("quant_config"):
             quantize_model(model, target_config["quant_config"], self.dtype, self.device)
         
-        #  # 4. Apply hook and offload llm
-        # if target_config is not None and target_config.get("device_map"):
-        #     Offloader.dispatch_model(model, target_config["device_map"], compute_device=self.device)
+        # 4. Apply hook and offload llm
+        if self.offloader is not None and target_config is not None and target_config.get("device_map"):
+            self.offloader(model, device_map=target_config["device_map"])
 
         # 5. Build up the pipeline
         generator = self.generator_class(
