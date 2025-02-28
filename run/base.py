@@ -9,7 +9,6 @@ from specdecodes.models.generators.naive import NaiveGenerator
 from hqq.core.quantize import *
 from hqq.utils.patching import prepare_for_inference
 from specdecodes.helpers.quantizers.hqq.hf.base import AutoHQQHFModel
-from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
 
 LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
 logging.basicConfig(level=LOGLEVEL)
@@ -45,8 +44,8 @@ class BaseBuilder:
         self.compile_mode = None
 
         # Quantization and offloading
-        self.offloader = PrefetchOffloader
         self.recipe = None
+        self.offloader = None
         self.vram_limit = None
         self.target_config = None
         self.draft_config = None
@@ -69,7 +68,7 @@ class BaseBuilder:
             model_path,
             torch_dtype=self.dtype,
             low_cpu_mem_usage=True,
-            device_map='cpu',
+            device_map='cpu' if self.offloader is not None else self.device,
             _attn_implementation="sdpa",
         )
         return model, tokenizer
@@ -79,12 +78,11 @@ class BaseBuilder:
         return None
     
     def _compile_generator(self, generator, compile_mode):
-        if compile_mode is not None:
-            logging.info(f"Compiling the generator with mode: {compile_mode}")
-            torch.set_float32_matmul_precision('high')
-            generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
-            if getattr(generator, 'draft_model', None) is not None:
-                generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+        logging.info(f"Compiling the generator with mode: {compile_mode}")
+        torch.set_float32_matmul_precision('high')
+        generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+        if getattr(generator, 'draft_model', None) is not None:
+            generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
     def build_generator(self):
         # 1. Load model and tokenizer
@@ -120,7 +118,8 @@ class BaseBuilder:
         generator.eval()
         
         # 6. Compile pipeline if needed
-        self._compile_generator(generator, self.compile_mode)
+        if self.compile_mode is not None:
+            self._compile_generator(generator, self.compile_mode)
         
         return generator, tokenizer
             

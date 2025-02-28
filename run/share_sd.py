@@ -1,3 +1,4 @@
+import logging
 from .app_router import run_app
 from .base import BaseBuilder
 
@@ -5,6 +6,7 @@ import torch
 from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.share_sd import ShareSDDraftModel
 from specdecodes.models.generators.share_sd import ShareSDGenerator
+from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
 from specdecodes.helpers.recipes.recipe_4bit_mlp import recipe
 
 class ShareSDBuilder(BaseBuilder):
@@ -31,11 +33,14 @@ class ShareSDBuilder(BaseBuilder):
         
         # Quantization and offloading
         self.recipe = recipe
+        self.offloader = PrefetchOffloader
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"
-        # self.warmup_iter = 10
-        # self.compile_mode = "max-autotune"
+        self.warmup_iter = 0
+        self.compile_mode = "max-autotune"
+        
+        # self.offloader = None
         
         # Profiling
         self.generator_profiling = True
@@ -48,6 +53,13 @@ class ShareSDBuilder(BaseBuilder):
             eos_token_id=tokenizer.eos_token_id
         )
         return draft_model
+    
+    def _compile_generator(self, generator, compile_mode):
+        logging.info(f"Compiling the generator with mode: {compile_mode}")
+        torch.set_float32_matmul_precision('high')
+        # generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
+        if getattr(generator, 'draft_model', None) is not None:
+            generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
 if __name__ == "__main__":
     run_app(ShareSDBuilder())
