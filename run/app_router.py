@@ -1,6 +1,7 @@
 import typer
 from .pipelines.run_test import main as main_run_test
 from .pipelines.run_benchmark import main as main_run_benchmark
+import torch
 
 def run_app(builder):
     app = typer.Typer()
@@ -12,8 +13,13 @@ def run_app(builder):
         Usage:
             python custom.py run-test
         """
+        # torch.cuda.memory._record_memory_history()
+        
         generator, tokenizer = builder.build_generator()
         main_run_test(generator, tokenizer, args=builder)
+        
+        # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+        # torch.cuda.memory._record_memory_history(enabled=None)
         
         
     @app.command()
