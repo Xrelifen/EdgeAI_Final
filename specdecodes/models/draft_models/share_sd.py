@@ -70,7 +70,7 @@ class ShareSDDraftModel(DraftModelBase):
                 with_softmax=True,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
-                num_logits_to_keep=1,
+                logits_to_keep=1,
             )
             kv_len += input_len
 

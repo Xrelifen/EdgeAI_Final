@@ -129,7 +129,7 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                 past_key_values=past_key_values, 
                 output_hidden_states=True, 
                 cache_position=cache_position,
-                num_logits_to_keep=1,
+                logits_to_keep=1,
             )
             next_token_logits = outputs.logits
             hidden_states = outputs.hidden_states[-1]

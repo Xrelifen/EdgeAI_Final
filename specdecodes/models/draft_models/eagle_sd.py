@@ -45,10 +45,10 @@ class EagleSDDraftModel(DraftModelBase):
         if lm_head is not None:
             self.lm_head = lm_head
     
-    def forward(self, input_ids, hidden_states, num_logits_to_keep=0, with_softmax=False, *model_args, **kwargs):
+    def forward(self, input_ids, hidden_states, logits_to_keep=0, with_softmax=False, *model_args, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.fusion(hidden_states, inputs_embeds)
-        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0][:, -num_logits_to_keep:]
+        hidden_states = self.model(inputs_embeds=hidden_states, *model_args, **kwargs)[0][:, -logits_to_keep:]
         logits = self.lm_head(hidden_states)
         
         if with_softmax:
@@ -106,7 +106,7 @@ class EagleSDDraftModel(DraftModelBase):
                 hidden_states=hidden_states,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
-                num_logits_to_keep=1,
+                logits_to_keep=1,
             )
             kv_len = org_input_len
         

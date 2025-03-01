@@ -74,7 +74,7 @@ class ShareSDGeneratorBase(ClassicSDGeneratorBase):
                 input_ids,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
-                num_logits_to_keep=1,
+                logits_to_keep=1,
             )
             next_token_logits = outputs.logits
             del outputs
