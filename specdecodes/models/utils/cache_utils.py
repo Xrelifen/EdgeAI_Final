@@ -85,7 +85,6 @@ class TreeStaticCache(StaticCache):
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
         max_batch_size: Optional[int] = None,
-        layer_device_map: Optional[Dict[int, Union[str, torch.device, int]]] = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -93,7 +92,6 @@ class TreeStaticCache(StaticCache):
             device=device,
             dtype=dtype,
             max_batch_size=max_batch_size,
-            layer_device_map=layer_device_map,
         )
 
     def crop(self, start: int, end: Optional[int] = None, dim: int = 2) -> None:
