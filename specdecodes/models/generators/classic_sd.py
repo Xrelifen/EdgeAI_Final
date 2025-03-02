@@ -82,7 +82,7 @@ class ClassicSDGeneratorBase(GeneratorBase):
             return self._sample_token(logits, logits_processor, do_sample=do_sample, return_probs=return_probs)
         
         # Obtain LLM sample logits
-        global_p = sample_token_method(logits, return_probs=True).squeeze(0).to(device='cpu', non_blocking=True) # remove batch dim
+        global_p = sample_token_method(logits, return_probs=True).squeeze(0).to(device='cpu') # remove batch dim
         
         # Initialize variables
         sampled_tokens = torch.tensor([], dtype=torch.long, device='cpu')

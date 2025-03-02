@@ -75,7 +75,7 @@ def main(generator, tokenizer, args):
                 messages = [{"role": "user", "content": input_message}]
                 tokenizer.use_default_system_prompt = True
                 with nvtx.annotate("Warm up"):
-                    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+                    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(args.device)
                     with sdpa_kernel(backends=[SDPBackend.MATH]):
                         generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, draft_past_key_values=draft_past_key_values)
                 
@@ -90,7 +90,7 @@ def main(generator, tokenizer, args):
     input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
     messages = [{"role": "user", "content": input_message}]
     tokenizer.use_default_system_prompt = True
-    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
+    input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(args.device)
     prompt = tokenizer.decode(input_ids[0])
     
     start_event = torch.cuda.Event(enable_timing=True)
