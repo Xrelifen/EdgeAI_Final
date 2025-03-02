@@ -7,7 +7,7 @@ import nvtx
 
 import gemlite
 from specdecodes.models.utils.cache_utils import create_kv_cache
-
+from specdecodes.models.utils.flashinfer.cache_manager import FlashInferCache
 
 def main(generator, tokenizer, args):
     # set logging level by environment variable
@@ -53,7 +53,25 @@ def main(generator, tokenizer, args):
             )
         else:
             draft_past_key_values = None
-            
+    elif args.cache_implementation == "flashinfer":
+        PAGE_LEN = 16
+        if args.max_length is not None:
+            if getattr(generator, 'draft_model', None) is not None:
+                # Additional sample tokens may cause KV-Cache tp exceed max_length
+                max_cache_len = args.max_length + args.draft_params.max_sample_tokens + PAGE_LEN * 2
+            else:
+                max_cache_len = args.max_length
+        else:
+            raise ValueError("max_length should be set for static cache.")
+        
+        # Create paged kv-cache
+        past_key_values = FlashInferCache(generator.target_model.config, max_tokens=max_cache_len, PAGE_LEN=PAGE_LEN).kvCachePool
+        
+        if getattr(generator, 'draft_model', None) is not None:
+            draft_past_key_values = create_kv_cache("dynamic")
+        else:
+            draft_past_key_values = None
+
     else:
         # Create dynamic kv-cache
         past_key_values = create_kv_cache("dynamic")
@@ -84,7 +102,7 @@ def main(generator, tokenizer, args):
                     draft_past_key_values.reset()
             generator.profiling = is_profiling
             
-    gemlite.core.GemLiteLinear.cache_config('/tmp/gemlite_config.json')
+    # gemlite.core.GemLiteLinear.cache_config('/tmp/gemlite_config.json')
 
     # input message
     input_message = "Do you know what is Beyblade? What is the best strategy to build the strongest Beyblade?"
