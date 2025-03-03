@@ -5,7 +5,7 @@ from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.eagle_sd import EagleSDDraftModel
 from specdecodes.models.generators.eagle_sd import EagleSDGenerator
 from specdecodes.models.generators.eagle_sd_fi import EagleSDFIGenerator
-
+from specdecodes.models.utils.flashinfer.monkey_patch import apply_flashinfer_kernel_to_llama
 from hqq.core.quantize import *
 
 def temp_recipe(model, draft_model, vram_limit):  
@@ -69,6 +69,7 @@ class EagleSDBuilder(BaseBuilder):
             eos_token_id=tokenizer.eos_token_id
         ).to(target_model.lm_head.weight.device)
         draft_model.update_modules(embed_tokens=target_model.get_input_embeddings(), lm_head=target_model.lm_head)
+        apply_flashinfer_kernel_to_llama(attention=True, rms_norm=True, swiglu=False, model=target_model)
         return draft_model
     
     

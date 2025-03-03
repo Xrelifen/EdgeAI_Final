@@ -9,7 +9,6 @@ from enum import Enum
 from .classic_sd import ClassicSDGeneratorBase
 from ..utils.mixin import SDProfilingMixin
 from ..utils.utils import DraftParams, invert_mask
-from ..utils.flashinfer.monkey_patch import apply_flashinfer_kernel_to_llama
 from ..utils.flashinfer.cache_manager import (
     KvCachePool,
     KvCacheBatchPosition,
@@ -167,7 +166,6 @@ class EagleSDFIGeneratorBase(ClassicSDGeneratorBase):
             draft_past_key_values = model_kwargs["draft_past_key_values"]
         else:
             raise ValueError("past_key_values and draft_past_key_values should both be provided")
-        apply_flashinfer_kernel_to_llama(attention=True, rms_norm=True, swiglu=False, model=self.target_model)
 
         kvCachePool = past_key_values
         PAGE_LEN = kvCachePool.page_len

@@ -68,7 +68,14 @@ def main(generator, tokenizer, args):
         past_key_values = FlashInferCache(generator.target_model.config, max_tokens=max_cache_len, PAGE_LEN=PAGE_LEN).kvCachePool
         
         if getattr(generator, 'draft_model', None) is not None:
-            draft_past_key_values = create_kv_cache("dynamic")
+            draft_past_key_values = create_kv_cache(
+                "static",
+                max_cache_len=max_cache_len,
+                max_batch_size=1,
+                config=generator.draft_model.model.config,
+                device=generator.draft_model.model.device,
+                dtype=generator.draft_model.model.dtype,
+            )
         else:
             draft_past_key_values = None
 
