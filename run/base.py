@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 from .app_router import run_app
 
 import torch
@@ -61,7 +62,6 @@ class BaseBuilder:
         self.out_dir = None
         self.log_dir = "experiments"
         
-        
     def _load_model_and_tokenizer(self, model_path):
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForCausalLM.from_pretrained(
@@ -79,12 +79,23 @@ class BaseBuilder:
     
     def _compile_generator(self, generator, compile_mode):
         logging.info(f"Compiling the generator with mode: {compile_mode}")
-        torch.set_float32_matmul_precision('high')
         generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
         if getattr(generator, 'draft_model', None) is not None:
             generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
+    def _torch_configs(self):
+        # Enable efficient fp32 matmul
+        torch.set_float32_matmul_precision('high')
+        
+        # Fix random seed to 0 for reproducibility
+        torch.manual_seed(0)
+        random.seed(0)
+        
+    
     def build_generator(self):
+        # 0. Set up torch configurations
+        self._torch_configs()
+        
         # 1. Load model and tokenizer
         model, tokenizer = self._load_model_and_tokenizer(self.llm_path)
         draft_model = self._load_draft_model(model, tokenizer, self.draft_model_path)
