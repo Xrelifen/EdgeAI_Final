@@ -18,7 +18,7 @@ def get_named_tensors(module: nn.Module):
     yield from module.named_parameters()
     yield from module.named_buffers()
         
-def estimate_quantized_size(model, quant_config):
+def estimate_quantized_size(model, quant_config, max_input_len=0):
     weight_bytes = 0
     for name, param in get_named_tensors(model):
         layer_name = ".".join(name.split(".")[:-1])
@@ -29,8 +29,14 @@ def estimate_quantized_size(model, quant_config):
             weight_bytes += param.numel() * param.element_size() / group_size * 2 # scale and zero
         else:
             weight_bytes += param.numel() * param.element_size()
-        
-    return weight_bytes
+    
+    # key and value cache
+    if max_input_len > 0:
+        element_size = next(iter(model.parameters())).element_size() # assume activation has same element size as first param
+        head_size = model.config.hidden_size // model.config.num_attention_heads
+        kv_bytes = 2 * max_input_len * model.config.num_hidden_layers * model.config.num_key_value_heads * head_size * element_size # key and value cache
+    
+    return weight_bytes + kv_bytes
 
 def check_device_map(model: nn.Module, device_map: dict):
     """
