@@ -2,7 +2,7 @@ from hqq.core.quantize import *
 from ..utils import estimate_quantized_size
 
 
-def recipe(model, draft_model, max_length, vram_limit, dtype, device):
+def recipe(model, draft_model, max_length, cpu_offload_gb, dtype, device):
     # Quantization
     quant_config = {}
     base_quant_config = BaseQuantizeConfig(nbits=4, group_size=32, axis=1)

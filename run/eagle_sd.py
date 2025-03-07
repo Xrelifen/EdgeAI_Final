@@ -1,11 +1,12 @@
 from .app_router import run_app
 from .base import BaseBuilder
 
+import torch
 from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.eagle_sd import EagleSDDraftModel
 from specdecodes.models.generators.eagle_sd import EagleSDGenerator
 
-from specdecodes.helpers.recipes.recipe_4bit_mlp import recipe
+from specdecodes.helpers.recipes.recipe_naive_quant_4bit import recipe
 
 class EagleSDBuilder(BaseBuilder):
     def __init__(self):
@@ -26,7 +27,6 @@ class EagleSDBuilder(BaseBuilder):
         
         # Offloading
         # self.recipe = temp_recipe
-        # self.vram_limit = None # in GB
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"

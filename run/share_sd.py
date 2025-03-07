@@ -6,8 +6,9 @@ import torch
 from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.share_sd import ShareSDDraftModel
 from specdecodes.models.generators.share_sd import ShareSDGenerator
+
+from specdecodes.helpers.recipes.recipe_subspec_4bit_mlp import recipe
 from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
-from specdecodes.helpers.recipes.recipe_4bit_mlp import recipe
 
 class ShareSDBuilder(BaseBuilder):
     def __init__(self):

@@ -47,7 +47,7 @@ class BaseBuilder:
         # Quantization and offloading
         self.recipe = None
         self.offloader = None
-        self.vram_limit = None
+        self.cpu_offload_gb = None
         self.target_config = None
         self.draft_config = None
         
@@ -102,7 +102,7 @@ class BaseBuilder:
         
         # 2. Obtain configs either by recipe or manually.
         if self.recipe:
-            target_config, draft_config = self.recipe(model, draft_model, max_length=self.max_length, vram_limit=self.vram_limit, dtype=self.dtype, device=self.device)
+            target_config, draft_config = self.recipe(model, draft_model, max_length=self.max_length, cpu_offload_gb=self.cpu_offload_gb, dtype=self.dtype, device=self.device)
         else:
             target_config = getattr(self, "target_config", None)
             draft_config = getattr(self, "draft_config", None)

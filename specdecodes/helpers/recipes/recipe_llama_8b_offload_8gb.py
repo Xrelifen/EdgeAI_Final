@@ -1,6 +1,6 @@
 from hqq.core.quantize import *
 
-def recipe(model, draft_model, max_length, vram_limit, dtype, device):
+def recipe(model, draft_model, max_length, cpu_offload_gb, dtype, device):
     layer_cnt = len(model.model.layers)
     
     # Quantization

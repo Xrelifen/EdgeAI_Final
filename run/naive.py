@@ -1,8 +1,12 @@
+import logging
 from .app_router import run_app
 from .base import BaseBuilder
 
 import torch
 from specdecodes.models.generators.naive import NaiveGenerator
+
+from specdecodes.helpers.recipes.recipe_naive_quant_4bit import recipe
+from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
 
 class NaiveBuilder(BaseBuilder):
     def __init__(self):
@@ -19,6 +23,10 @@ class NaiveBuilder(BaseBuilder):
         self.do_sample = False
         self.temperature = 0
         
+        # Quantization and offloading
+        # self.recipe = recipe
+        # self.offloader = PrefetchOffloader
+        
         # Speed up inference using torch.compile
         self.cache_implementation = "static"
         self.warmup_iter = 10
@@ -26,6 +34,10 @@ class NaiveBuilder(BaseBuilder):
         
         # Profiling
         self.generator_profiling = True
+        
+    def _compile_generator(self, generator, compile_mode):
+        logging.info(f"Compiling the generator with mode: {compile_mode}")
+        generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
         
 if __name__ == "__main__":
     run_app(NaiveBuilder())
