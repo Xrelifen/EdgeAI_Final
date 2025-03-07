@@ -1,43 +1,8 @@
 import torch
 from torch import nn
 from ..model_orders import MODEL_TYPE_GET_LAYER_ORDER
+from ..utils import find_child, get_tensors, check_device_map
 
-
-def find_child(model: nn.Module, name: str) -> nn.Module:
-    """Recursively access submodules by dotted path (e.g. 'model.layer.0')."""
-    for part in name.split("."):
-        model = getattr(model, part)
-    return model
-
-def get_tensors(module: nn.Module):
-    """Yields module parameters and buffers."""
-    yield from module.parameters()
-    yield from module.buffers()
-
-def check_device_map(model: nn.Module, device_map: dict):
-    """
-    Checks a device map covers everything in a given model.
-
-    Args:
-        model (`torch.nn.Module`): The model to check the device map against.
-        device_map (`Dict[str, Union[int, str, torch.device]]`): The device map to check.
-    """
-    all_model_tensors = [name for name, _ in model.state_dict().items()]
-    for module_name in device_map.keys():
-        if module_name == "":
-            all_model_tensors.clear()
-            break
-        else:
-            all_model_tensors = [
-                name
-                for name in all_model_tensors
-                if not name == module_name and not name.startswith(module_name + ".")
-            ]
-    if len(all_model_tensors) > 0:
-        non_covered_params = ", ".join(all_model_tensors)
-        raise ValueError(
-            f"The device_map provided does not give any device for the following parameters: {non_covered_params}"
-        )
 
 class PrefetchOffloader:
     def __init__(self, model, device_map, record_stream=True):
