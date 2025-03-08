@@ -31,6 +31,7 @@ def estimate_quantized_size(model, quant_config, max_input_len=0):
             weight_bytes += param.numel() * param.element_size()
     
     # key and value cache
+    kv_bytes = 0
     if max_input_len > 0:
         element_size = next(iter(model.parameters())).element_size() # assume activation has same element size as first param
         head_size = model.config.hidden_size // model.config.num_attention_heads
