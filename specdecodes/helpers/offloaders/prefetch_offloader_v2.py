@@ -20,15 +20,20 @@ class PrefetchOffloader:
         assert model.model.embed_tokens.weight.device.type == "cuda"
 
         # Walk through layers in order, registering:
-        #    (a) If next layer is CPU-based, attach a forward_hook that enqueues copy -> self.gpu_device.
-        #    (b) If the layer itself is CPU-based, attach:
+        #    (a) If the layer itself is CPU-based, attach:
         #       - A forward_pre_hook that waits for the copy to finish.
+        #    (b) If next layer is CPU-based, attach a forward_hook that enqueues copy -> self.gpu_device.
         layer_order = MODEL_TYPE_GET_LAYER_ORDER[model.config.model_type](model.config)
         for i, layer_name in enumerate(layer_order):
             current_layer = find_child(model, layer_name)
             current_dev_str = device_map.get(layer_name, "cpu")
+            
+            # (a) If current layer is CPU-based, wait for async copy before forward
+            if current_dev_str == "cpu":
+                # Wait for the async copy right before forward
+                current_dev_str.register_forward_pre_hook(self._create_wait_hook())
 
-            # (a) Hook to prefetch next CPU-based layer at the end of current layer's forward pass
+            # (b) Hook to prefetch next CPU-based layer at the end of current layer's forward pass
             if i + 1 < len(layer_order):
                 next_name = layer_order[i + 1]
                 if device_map.get(next_name, "cpu") == "cpu":
@@ -37,10 +42,6 @@ class PrefetchOffloader:
                         self._create_prefetch_hook(next_layer, self.cpu_tensors[next_name])
                     )
 
-            # (b) If current layer is CPU-based, wait for async copy before forward
-            if current_dev_str == "cpu":
-                # Wait for the async copy right before forward
-                current_dev_str.register_forward_pre_hook(self._create_wait_hook())
 
     def _cache_cpu_layers(self, model, device_map):
         """Moves CPU layers to pinned memory and creates GPU-shaped placeholders."""
