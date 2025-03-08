@@ -9,7 +9,7 @@ def trim_layer_number(name: str) -> str:
     return ".".join(x for x in name.split(".") if not x.isdigit())
 
 class PrefetchOffloader:
-    def __init__(self, model: nn.Module, device_map: dict, record_stream=True):
+    def __init__(self, model: nn.Module, device_map: dict, record_stream=False):
         check_device_map(model, device_map)
         self.gpu_device = device_map["model.embed_tokens"]
         self.cpu_tensors = {}

@@ -5,7 +5,7 @@ from ..utils import find_child, get_tensors, check_device_map
 
 
 class PrefetchOffloader:
-    def __init__(self, model, device_map, record_stream=True):
+    def __init__(self, model, device_map, record_stream=False):
         check_device_map(model, device_map)
         self.gpu_device = device_map["model.embed_tokens"]
         self.cpu_tensors = {}
