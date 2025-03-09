@@ -18,29 +18,23 @@ class PrefetchOffloader:
         layer_order = MODEL_TYPE_GET_LAYER_ORDER[model.config.model_type](model.config)
         
         # V3 Prefetch Strategy:
-        # 1. Load the first CPU layer to GPU, and set up hooks. This layer will prefetch the next CPU layer
+        # 1. Load the first CPU layer to GPU, This layer will prefetch the next CPU layer
         # 2. The next CPU layer will prefetch the next CPU layer, and so on
         # 3. The last CPU layer will prefetch the first CPU layer
         
         # Find first 'cpu' layer
-        idx = next((i for i, name in enumerate(layer_order) if device_map.get(name) == "cpu"), -1)
-        if idx == -1:
+        first_idx = next((i for i, name in enumerate(layer_order) if device_map.get(name) == "cpu"), -1)
+        if first_idx == -1:
             raise ValueError("No CPU layer found in the model.")
-        first_cpu_layer = find_child(model, layer_order[idx])
+        first_cpu_layer = find_child(model, layer_order[first_idx])
         
         # Load the first CPU layer to GPU
         for p in get_tensors(first_cpu_layer):
             p.data = p.data.to(self.gpu_device)
-            
-        # Set up pre-hook (wait for copy) and post-hook (offload) for the first CPU layer
-        first_cpu_layer.register_forward_pre_hook(self._create_wait_hook())
-        first_cpu_layer.register_forward_hook(
-            self._create_offload_hook(first_cpu_layer, self.cpu_tensors[layer_order[idx]])
-        )
         
         # Connect subsequent CPU layers in a chain
         current_layer = first_cpu_layer
-        for name in layer_order[idx + 1 :]:
+        for name in layer_order[first_idx+1:]:
             if device_map.get(name) == "cpu":
                 next_layer = find_child(model, name)
                 current_layer.register_forward_pre_hook(self._create_prefetch_hook(next_layer))
@@ -51,8 +45,14 @@ class PrefetchOffloader:
                     self._create_offload_hook(current_layer, self.cpu_tensors[name])
                 )
 
-        # The last CPU layer prefetches the first CPU layer (forming a loop)
+        # Connect the last CPU layer to the first CPU layer
         if current_layer != first_cpu_layer: # If there is only one CPU layer, no need to prefetch
+            # Set up pre-hook (wait for copy) and post-hook (offload) for the first CPU layer
+            first_cpu_layer.register_forward_pre_hook(self._create_wait_hook())
+            first_cpu_layer.register_forward_hook(
+                self._create_offload_hook(first_cpu_layer, self.cpu_tensors[layer_order[first_idx]])
+            )
+            # The last CPU layer prefetches the first CPU layer (forming a loop)
             current_layer.register_forward_pre_hook(self._create_prefetch_hook(first_cpu_layer))
                 
     def _cache_cpu_layers(self, model, device_map):
