@@ -1,7 +1,7 @@
 # Modified from https://gist.github.com/gau-nernst/9408e13c32d3c6e7025d92cce6cba140
 import torch
 from torch import nn
-from ..model_orders import MODEL_TYPE_GET_LAYER_ORDER
+from ..model_layer_orders import MODEL_TYPE_GET_LAYER_ORDER
 
 def find_child(model, name: str) -> nn.Module:
     module_tree = name.split(".")

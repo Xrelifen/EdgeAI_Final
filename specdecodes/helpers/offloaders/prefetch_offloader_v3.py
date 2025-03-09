@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from ..model_orders import MODEL_TYPE_GET_LAYER_ORDER
+from ..model_layer_orders import MODEL_TYPE_GET_LAYER_ORDER
 from ..utils import find_child, get_tensors, check_device_map
 
 
