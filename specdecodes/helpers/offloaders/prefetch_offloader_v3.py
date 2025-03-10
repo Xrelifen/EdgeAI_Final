@@ -48,7 +48,7 @@ class PrefetchOffloader:
         # Connect the last CPU layer to the first CPU layer
         if current_layer != first_cpu_layer: # If there is only one CPU layer, no need to prefetch
             # Set up pre-hook (wait for copy) and post-hook (offload) for the first CPU layer
-            first_cpu_layer.register_forward_pre_hook(self._create_wait_hook())
+            first_cpu_layer.register_forward_pre_hook(self._create_wait_hook(), prepend=True) # Prepend to ensure wait runs before prefetch
             first_cpu_layer.register_forward_hook(
                 self._create_offload_hook(first_cpu_layer, self.cpu_tensors[layer_order[first_idx]])
             )
