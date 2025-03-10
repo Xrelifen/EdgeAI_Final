@@ -9,9 +9,9 @@ from .base import DraftModelBase, TreeData, TreeMaskCache
 
 
 class MergeLinear(nn.Module):
-    def __init__(self, in_shape, out_shape):
+    def __init__(self, in_shape, out_shape, bias=True):
         super().__init__()
-        self.fc = nn.Linear(in_shape, out_shape, bias=True)
+        self.fc = nn.Linear(in_shape, out_shape, bias=bias)
 
     def forward(self, x, emb):
         # swapped (x, emb) to (emb, x) to match official implementation of Eagle
@@ -21,6 +21,7 @@ class EagleSDDraftModel(DraftModelBase):
     def init_base_model(self, target_model):
         draft_config = deepcopy(target_model.config)
         draft_config.num_hidden_layers = 1
+        self.bias = draft_config.bias if hasattr(draft_config, "bias") else False # Eagle has bias=True on Llama2 config
         model = AutoModel.from_config(draft_config)
         
         # replace model.norm and first input_layernorm with nn.Identity
@@ -37,7 +38,7 @@ class EagleSDDraftModel(DraftModelBase):
         return model
 
     def init_additional_modules(self):
-        self.fusion = MergeLinear(self.config.hidden_size*2, self.config.hidden_size)
+        self.fusion = MergeLinear(self.config.hidden_size*2, self.config.hidden_size, bias=self.bias)
         
     def update_modules(self, embed_tokens=None, lm_head=None, **kwargs):
         if embed_tokens is not None:
