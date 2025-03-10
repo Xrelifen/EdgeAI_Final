@@ -6,8 +6,6 @@ from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.classic_sd import ClassicSDDraftModel
 from specdecodes.models.generators.classic_sd import ClassicSDGenerator
 
-from specdecodes.helpers.recipes.recipe_subspec_4bit_mlp import recipe
-
 class ClassicSDBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
@@ -27,8 +25,8 @@ class ClassicSDBuilder(BaseBuilder):
         )
         
         # Offloading
-        # self.recipe = recipe
-        # self.cpu_offload_gb = None # in GB
+        # self.recipe = None
+        # self.cpu_offload_gb = None
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"

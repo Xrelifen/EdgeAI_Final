@@ -1,0 +1,44 @@
+from hqq.core.quantize import *
+from ...utils import estimate_quantized_size
+
+
+def recipe(model, draft_model, max_length, cpu_offload_gb, dtype, device):
+    # Quantization
+    quant_config = {}
+    mlp_quant_config = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
+    
+    layer_cnt = len(model.model.layers)
+    quant_start = 0
+    quant_end = layer_cnt - 1
+    for i in range(quant_start, quant_end+1):
+        quant_config[f"model.layers.{i}.mlp.gate_proj"] = mlp_quant_config
+        quant_config[f"model.layers.{i}.mlp.up_proj"] = mlp_quant_config
+        quant_config[f"model.layers.{i}.mlp.down_proj"] = mlp_quant_config
+        
+    estimate_qmodel_size = estimate_quantized_size(model, quant_config)
+    print(f"Model required VRAM: {estimate_qmodel_size / 1024**3:.2f} GiB")
+        
+    # Device map
+    device_map = {}
+    for name, _ in model.named_parameters():
+        layer_name = ".".join(name.split(".")[:-1])
+        if layer_name in quant_config:
+            device_map[layer_name] = 'cpu'
+        else:
+            device_map[layer_name] = device
+    for name, _ in model.named_buffers():
+        layer_name = ".".join(name.split(".")[:-1])
+        device_map[layer_name] = device
+
+    # Configs
+    target_config = {
+        "device_map": device_map,
+    }
+    draft_config = {
+        "quant_config": {
+            "config": quant_config,
+            "backend": "gemlite", #"torchao_int4",
+        },
+    }
+    
+    return target_config, draft_config

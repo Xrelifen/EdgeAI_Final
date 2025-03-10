@@ -7,8 +7,8 @@ from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.share_sd import ShareSDDraftModel
 from specdecodes.models.generators.share_sd import ShareSDGenerator
 
-from specdecodes.helpers.recipes.recipe_subspec_4bit_mlp import recipe
-from specdecodes.helpers.offloaders.prefetch_offloader import PrefetchOffloader
+from specdecodes.helpers.recipes.subspec.recipe_4bit_mlp import recipe
+from specdecodes.helpers.offloaders.prefetch_offloader_v3 import PrefetchOffloader
 
 class ShareSDBuilder(BaseBuilder):
     def __init__(self):
@@ -38,10 +38,8 @@ class ShareSDBuilder(BaseBuilder):
         
         # Speed up inference using torch.compile
         self.cache_implementation = "static"
-        self.warmup_iter = 0
-        self.compile_mode = "max-autotune"
-        
-        # self.offloader = None
+        # self.warmup_iter = 5
+        # self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
@@ -57,7 +55,6 @@ class ShareSDBuilder(BaseBuilder):
     
     def _compile_generator(self, generator, compile_mode):
         logging.info(f"Compiling the generator with mode: {compile_mode}")
-        torch.set_float32_matmul_precision('high')
         # generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
         if getattr(generator, 'draft_model', None) is not None:
             generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)

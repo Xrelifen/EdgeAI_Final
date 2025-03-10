@@ -6,14 +6,14 @@ from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.eagle_sd import EagleSDDraftModel
 from specdecodes.models.generators.eagle_sd import EagleSDGenerator
 
-from specdecodes.helpers.recipes.recipe_naive_quant_4bit import recipe
-
 class EagleSDBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
-        self.llm_path = "meta-llama/Llama-2-7b-chat-hf"
-        self.draft_model_path = "/home/scott306lr_l/checkpoints/eagle/sl1-ce/model_5"
+        self.llm_path = "meta-llama/Meta-Llama-3-8B-Instruct"
+        self.draft_model_path = "/home/scott306lr_l/checkpoints/eagle/official/EAGLE-LLaMA3-Instruct-8B/"
         
+        # Base configurations
+        self.device = "cuda:0"
         self.dtype = torch.float16
         
         # Generator configurations
