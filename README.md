@@ -5,7 +5,7 @@
 ## 1. Fast Run & Test:
 Simple run the following bash script to test the code:
 ```bash
-bash run.sh run.share_sd run-test
+bash run.sh run.subspec_sd run-test
 ```
 
 ## 2. Run mt_bench Benchmark:
@@ -25,9 +25,9 @@ c. Eagle-based Speculative Decoding:
 bash run.sh run.eagle_sd run-benchmark --bench-name=mt_bench
 ```
 
-4. ShareSD-based Speculative Decoding:
+4. SupSpec-based Speculative Decoding:
 ```bash
-bash run.sh run.share_sd run-benchmark --bench-name=mt_bench
+bash run.sh run.subspec_sd run-benchmark --bench-name=mt_bench
 ```
 
 ## 3. To Train Eagle-Based SSM:

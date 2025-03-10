@@ -7,7 +7,7 @@ import nvtx
 from .classic_sd import ClassicSDGeneratorBase
 from ..utils.mixin import SDProfilingMixin
 
-class ShareSDGeneratorBase(ClassicSDGeneratorBase):
+class SubSpecSDGeneratorBase(ClassicSDGeneratorBase):
     def _generate(
         self,
         input_ids: torch.LongTensor,
@@ -127,5 +127,5 @@ class ShareSDGeneratorBase(ClassicSDGeneratorBase):
                 
         return input_ids
     
-class ShareSDGenerator(SDProfilingMixin, ShareSDGeneratorBase):
+class SubSpecSDGenerator(SDProfilingMixin, SubSpecSDGeneratorBase):
     pass

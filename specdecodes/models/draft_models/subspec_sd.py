@@ -18,7 +18,7 @@ def share_param_deepcopy(model):
     share_model = deepcopy(model, memo=model_memo)
     return share_model
 
-class ShareSDDraftModel(DraftModelBase):
+class SubSpecSDDraftModel(DraftModelBase):
     @classmethod
     def from_pretrained(
         cls, 

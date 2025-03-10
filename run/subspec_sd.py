@@ -4,13 +4,13 @@ from .base import BaseBuilder
 
 import torch
 from specdecodes.models.utils.utils import DraftParams
-from specdecodes.models.draft_models.share_sd import ShareSDDraftModel
-from specdecodes.models.generators.share_sd import ShareSDGenerator
+from specdecodes.models.draft_models.subspec_sd import SubSpecSDDraftModel
+from specdecodes.models.generators.subspec_sd import SubSpecSDGenerator
 
 from specdecodes.helpers.recipes.subspec.recipe_4bit_mlp import recipe
 from specdecodes.helpers.offloaders.prefetch_offloader_v3 import PrefetchOffloader
 
-class ShareSDBuilder(BaseBuilder):
+class SubSpecSDBuilder(BaseBuilder):
     def __init__(self):
         super().__init__()
         # Base configurations
@@ -20,7 +20,7 @@ class ShareSDBuilder(BaseBuilder):
         # Load model configurations
         # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        self.generator_class = ShareSDGenerator
+        self.generator_class = SubSpecSDGenerator
         self.draft_params = DraftParams(
             max_depth=50,
             topk_len=16,
@@ -45,7 +45,7 @@ class ShareSDBuilder(BaseBuilder):
         self.generator_profiling = True
     
     def _load_draft_model(self, target_model=None, tokenizer=None, draft_path=None):
-        draft_model = ShareSDDraftModel.from_pretrained(
+        draft_model = SubSpecSDDraftModel.from_pretrained(
             draft_path,
             target_model=target_model,
             torch_dtype=self.dtype,
@@ -60,4 +60,4 @@ class ShareSDBuilder(BaseBuilder):
             generator.draft_model.forward = torch.compile(generator.draft_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
     
 if __name__ == "__main__":
-    run_app(ShareSDBuilder())
+    run_app(SubSpecSDBuilder())
