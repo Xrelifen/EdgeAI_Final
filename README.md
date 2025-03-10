@@ -25,7 +25,7 @@ c. Eagle-based Speculative Decoding:
 bash run.sh run.eagle_sd run-benchmark --bench-name=mt_bench
 ```
 
-4. SupSpec-based Speculative Decoding:
+4. SubSpec-based Speculative Decoding:
 ```bash
 bash run.sh run.subspec_sd run-benchmark --bench-name=mt_bench
 ```
