@@ -31,7 +31,7 @@ class PrefetchOffloader:
             # (a) If current layer is CPU-based, wait for async copy before forward
             if current_dev_str == "cpu":
                 # Wait for the async copy right before forward
-                current_dev_str.register_forward_pre_hook(self._create_wait_hook())
+                current_layer.register_forward_pre_hook(self._create_wait_hook())
 
             # (b) Hook to prefetch next CPU-based layer at the end of current layer's forward pass
             if i + 1 < len(layer_order):
