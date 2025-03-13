@@ -10,7 +10,7 @@ class ClassicSDDraftModel(DraftModelBase):
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
         if with_softmax:
-            logits = torch.softmax(logits, dim=-1)
+            logits = torch.softmax(logits/self.draft_params.temperature, dim=-1)
             
         return logits
     

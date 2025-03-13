@@ -25,6 +25,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         # Generator-specific configurations.
         self.generator_class = EagleSDGenerator
         self.draft_params = DraftParams(
+            temperature=1,
             max_depth=6,
             topk_len=10,
             max_verify_tokens=1024,

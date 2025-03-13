@@ -7,6 +7,7 @@ def invert_mask(mask, dtype):
 
 @dataclass
 class DraftParams:
+    temperature: float = 1
     max_depth: int = 6
     topk_len: int = 10
     max_verify_tokens: int = 1024

@@ -25,6 +25,7 @@ class ClassicSDBuilder(GeneratorPipelineBuilder):
         # Generator-specific configurations.
         self.generator_class = ClassicSDGenerator
         self.draft_params = DraftParams(
+            temperature=1,
             max_depth=12,
             topk_len=16,
             max_verify_tokens=1024,

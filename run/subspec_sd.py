@@ -28,6 +28,7 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         # Generator-specific configurations.
         self.generator_class = SubSpecSDGenerator
         self.draft_params = DraftParams(
+            temperature=0.3,
             max_depth=32,
             topk_len=8,
             max_verify_tokens=1024
@@ -39,8 +40,8 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        self.warmup_iter = 5
-        self.compile_mode = "max-autotune"
+        # self.warmup_iter = 5
+        # self.compile_mode = "max-autotune"
         
         # Profiling.
         self.generator_profiling = True

@@ -53,7 +53,7 @@ class EagleSDDraftModel(DraftModelBase):
         logits = self.lm_head(hidden_states)
         
         if with_softmax:
-            logits = torch.softmax(logits, dim=-1)
+            logits = torch.softmax(logits/self.draft_params.temperature, dim=-1)
             
         return logits, hidden_states
     
