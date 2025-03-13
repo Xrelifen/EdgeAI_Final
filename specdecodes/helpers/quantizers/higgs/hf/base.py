@@ -230,7 +230,7 @@ class AutoHiggsHFModel(AutoHQQHFModel):
                     forward_device_hooked, core_model.layers[i]
                 )
                 
-        cls._process_model_after_weight_loading(model, quant_config, tune_metadata)
+        cls._process_model_after_weight_loading(model, quant_config, tune_metadata) # [MODIFIED]
 
         # Set base class
         model.base_class = cls
@@ -239,6 +239,7 @@ class AutoHiggsHFModel(AutoHQQHFModel):
         
         return model
     
+     # [MODIFIED]
     @classmethod
     def _process_model_after_weight_loading(cls, model, quant_config, tune_metadata):
         from flute.tune import TuneMetaData, maybe_tune_and_repack

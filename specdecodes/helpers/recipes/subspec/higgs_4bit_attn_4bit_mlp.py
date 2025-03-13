@@ -18,14 +18,12 @@ class Recipe(QuantOffloadRecipe):
             "p": 2,
             "group_size": 64,
             "hadamard_size": 512,
-            "tune_metadata": {},
         }
         mlp_quant_config = {
             "bits": 4,
             "p": 2,
             "group_size": 64,
             "hadamard_size": 512,
-            "tune_metadata": {},
         }
         
         layer_cnt = len(target_model.model.layers)
