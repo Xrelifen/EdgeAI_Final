@@ -44,7 +44,7 @@ class GeneratorPipelineBuilder:
 
         # Additional configurations.
         self.cache_implementation = "dynamic"
-        self.warmup_itert = 0
+        self.warmup_iter = 0
         self.compile_mode = None
 
         # Recipe for quantization and offloading.
