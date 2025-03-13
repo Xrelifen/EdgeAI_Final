@@ -1,10 +1,12 @@
-from .app_router import run_app
-from .base_builder import GeneratorPipelineBuilder
+import logging
+from ..app_router import run_app
+from ..base_builder import GeneratorPipelineBuilder
 
 import torch
-from specdecodes.models.generators.huggingface import HuggingFaceGenerator
+from specdecodes.models.generators.naive import NaiveGenerator
+from specdecodes.helpers.recipes.offload.llama3_8b_offload_8gb import Recipe
 
-class HuggingFaceBuilder(GeneratorPipelineBuilder):
+class NaiveBuilder(GeneratorPipelineBuilder):
     def __init__(self):
         super().__init__()
         # Base configurations
@@ -13,11 +15,15 @@ class HuggingFaceBuilder(GeneratorPipelineBuilder):
         
         # Model paths.
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        self.generator_class = HuggingFaceGenerator
+        self.generator_class = NaiveGenerator
         
         # Generation parameters.
         self.do_sample = False
         self.temperature = 0
+        
+        # Recipe for quantization and offloading.
+        self.recipe = Recipe()
+        self.cpu_offload_gb = None
         
         # Additional configurations.
         self.cache_implementation = "dynamic"
@@ -28,4 +34,4 @@ class HuggingFaceBuilder(GeneratorPipelineBuilder):
         self.generator_profiling = True
         
 if __name__ == "__main__":
-    run_app(HuggingFaceBuilder())
+    run_app(NaiveBuilder())

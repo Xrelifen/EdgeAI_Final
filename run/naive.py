@@ -1,40 +1,35 @@
-import logging
 from .app_router import run_app
-from .base import BaseBuilder
+from .base_builder import GeneratorPipelineBuilder
 
 import torch
 from specdecodes.models.generators.naive import NaiveGenerator
 
-class NaiveBuilder(BaseBuilder):
+class NaiveBuilder(GeneratorPipelineBuilder):
     def __init__(self):
         super().__init__()
         # Base configurations
         self.device = "cuda:0"
         self.dtype = torch.float16
         
-        # Load model configurations
+        # Model paths.
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
         self.generator_class = NaiveGenerator
         
-        # Sample configurations
+        # Generation parameters.
         self.do_sample = False
         self.temperature = 0
         
-        # Quantization and offloading
+        # Recipe for quantization and offloading.
         self.recipe = None
-        self.offloader = None
+        self.cpu_offload_gb = None
         
-        # Speed up inference using torch.compile
-        self.cache_implementation = "static"
-        # self.warmup_iter = 5
-        # self.compile_mode = "max-autotune"
+        # Additional configurations.
+        self.cache_implementation = "dynamic"
+        self.warmup_iter = 0
+        self.compile_mode = None
         
         # Profiling
         self.generator_profiling = True
-        
-    def _compile_generator(self, generator, compile_mode):
-        logging.info(f"Compiling the generator with mode: {compile_mode}")
-        generator.target_model.forward = torch.compile(generator.target_model.forward, mode=compile_mode, dynamic=False, fullgraph=True)
         
 if __name__ == "__main__":
     run_app(NaiveBuilder())

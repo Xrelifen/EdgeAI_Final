@@ -1,22 +1,28 @@
 from .app_router import run_app
-from .base import BaseBuilder
+from .base_builder import GeneratorPipelineBuilder
 
 import torch
 from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.eagle_sd import EagleSDDraftModel
 from specdecodes.models.generators.eagle_sd import EagleSDGenerator
 
-class EagleSDBuilder(BaseBuilder):
+class EagleSDBuilder(GeneratorPipelineBuilder):
     def __init__(self):
         super().__init__()
-        self.llm_path = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.draft_model_path = "/home/scott306lr_l/checkpoints/eagle/official/EAGLE-LLaMA3-Instruct-8B/"
-        
-        # Base configurations
+        # Device and precision settings.
+        self.seed = 0
         self.device = "cuda:0"
         self.dtype = torch.float16
         
-        # Generator configurations
+        # Model paths.
+        self.llm_path = "meta-llama/Meta-Llama-3-8B-Instruct"
+        self.draft_model_path = "/home/scott306lr_l/checkpoints/eagle/official/EAGLE-LLaMA3-Instruct-8B/"
+        
+        # Generation parameters.
+        self.do_sample = False
+        self.temperature = 0
+        
+        # Generator-specific configurations.
         self.generator_class = EagleSDGenerator
         self.draft_params = DraftParams(
             max_depth=6,
@@ -25,27 +31,27 @@ class EagleSDBuilder(BaseBuilder):
             min_accept_prob=1e-8,
         )
         
-        # Offloading
-        # self.recipe = temp_recipe
+        # Recipe for quantization and offloading.
+        self.recipe = None
+        self.cpu_offload_gb = None
         
-        # Speed up inference using torch.compile
+        # Additional configurations.
         self.cache_implementation = "static"
         self.warmup_iter = 10
         self.compile_mode = "max-autotune"
         
-        # Profiling
+        # Profiling.
         self.generator_profiling = True
     
-    def _load_draft_model(self, target_model=None, tokenizer=None, draft_path=None):
+    def load_draft_model(self, target_model, tokenizer, draft_model_path):
         draft_model = EagleSDDraftModel.from_pretrained(
-            draft_path,
+            draft_model_path,
             target_model=target_model,
             torch_dtype=self.dtype,
             eos_token_id=tokenizer.eos_token_id
         ).to(target_model.lm_head.weight.device)
         draft_model.update_modules(embed_tokens=target_model.get_input_embeddings(), lm_head=target_model.lm_head)
         return draft_model
-    
-    
+
 if __name__ == "__main__":
     run_app(EagleSDBuilder())

@@ -1,7 +1,6 @@
 import typer
 from .pipelines.run_test import main as main_run_test
 from .pipelines.run_benchmark import main as main_run_benchmark
-import torch
 
 def run_app(builder):
     app = typer.Typer()
