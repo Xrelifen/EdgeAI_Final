@@ -4,7 +4,7 @@ from ..base_builder import GeneratorPipelineBuilder
 
 import torch
 from specdecodes.models.generators.naive import NaiveGenerator
-from specdecodes.helpers.recipes.quant.higgs_4bit import Recipe
+from specdecodes.helpers.recipes.quant.hqq_4bit import Recipe
 
 class NaiveBuilder(GeneratorPipelineBuilder):
     def __init__(self):
@@ -26,9 +26,9 @@ class NaiveBuilder(GeneratorPipelineBuilder):
         self.cpu_offload_gb = None
         
         # Additional configurations.
-        self.cache_implementation = "dynamic"
-        self.warmup_iter = 0
-        self.compile_mode = None
+        self.cache_implementation = "static"
+        self.warmup_iter = 5
+        self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True

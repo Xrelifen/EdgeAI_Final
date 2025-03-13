@@ -7,7 +7,7 @@ from specdecodes.models.utils.utils import DraftParams
 from specdecodes.models.draft_models.subspec_sd import SubSpecSDDraftModel
 from specdecodes.models.generators.subspec_sd import SubSpecSDGenerator
 
-from specdecodes.helpers.recipes.subspec.higgs_4bit_attn_4bit_mlp import Recipe
+from specdecodes.helpers.recipes.subspec.hqq_4bit_attn_4bit_mlp import Recipe
 
 class SubSpecSDBuilder(GeneratorPipelineBuilder):
     def __init__(self):
@@ -40,8 +40,8 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        # self.warmup_iter = 5
-        # self.compile_mode = "max-autotune"
+        self.warmup_iter = 5
+        self.compile_mode = "max-autotune"
         
         # Profiling.
         self.generator_profiling = True
