@@ -1,6 +1,6 @@
 from ..base_recipe import QuantOffloadRecipe
 
-from ...offloaders.prefetch_offloader_v3 import PrefetchOffloader
+from ...offloaders.prefetch_offloader_v4 import PrefetchOffloader
 
 class Recipe(QuantOffloadRecipe):
     def __init__(self):

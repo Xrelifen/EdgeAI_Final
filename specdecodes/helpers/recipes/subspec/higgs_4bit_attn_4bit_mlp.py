@@ -1,7 +1,7 @@
 from ..base_recipe import QuantOffloadRecipe
 
 from ...quantizers.higgs import HiggsQuantizer
-from ...offloaders.prefetch_offloader_v3 import PrefetchOffloader
+from ...offloaders.prefetch_offloader_v4 import PrefetchOffloader
 
 class Recipe(QuantOffloadRecipe):
     def __init__(self):
@@ -36,7 +36,8 @@ class Recipe(QuantOffloadRecipe):
             quant_config[f"model.layers.{i}.self_attn.o_proj"] = attn_quant_config
             quant_config[f"model.layers.{i}.mlp.gate_proj"] = mlp_quant_config
             quant_config[f"model.layers.{i}.mlp.up_proj"] = mlp_quant_config
-            quant_config[f"model.layers.{i}.mlp.down_proj"] = mlp_quant_config
+            if i != 0:
+                quant_config[f"model.layers.{i}.mlp.down_proj"] = mlp_quant_config
             
         # Device map
         device_map = {}
