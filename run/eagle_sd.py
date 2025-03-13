@@ -27,8 +27,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         self.draft_params = DraftParams(
             max_depth=6,
             topk_len=10,
-            max_verify_tokens=64,
-            min_accept_prob=1e-8,
+            max_verify_tokens=1024,
         )
         
         # Recipe for quantization and offloading.

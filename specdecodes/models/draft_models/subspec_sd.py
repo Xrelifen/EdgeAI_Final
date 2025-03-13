@@ -41,7 +41,7 @@ class SubSpecSDDraftModel(DraftModelBase):
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
         if with_softmax:
-            logits = torch.softmax(logits/0.5, dim=-1)
+            logits = torch.softmax(logits/0.3, dim=-1)
             
         return logits
     
@@ -105,23 +105,12 @@ class SubSpecSDDraftModel(DraftModelBase):
                 token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
                     sampled_probs,
                     parent_probs,
-                    self.draft_params.topk_len, 
-                    self.draft_params.min_accept_prob
+                    self.draft_params.topk_len
                 )
                 parent_probs = child_probs
             
             # --------------------------------------
-            # B. Early stop if all probs are below min_accept_prob (currently not used, introduces syncing stalls)
-            # --------------------------------------
-            # with nvtx.annotate("early stop"):
-            #     if (depth_i % 3 == 0) and (depth_i > 0):
-            #         valid_flag = sampled_probs.max() > self.draft_params.min_accept_prob
-            #         if not valid_flag:
-            #             print(f"Early stop at depth {depth_i}/{self.draft_params.max_depth}")
-            #             break
-            
-            # --------------------------------------
-            # C. Add new nodes to the CPU tree
+            # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)

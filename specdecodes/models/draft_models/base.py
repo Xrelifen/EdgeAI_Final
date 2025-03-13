@@ -265,8 +265,7 @@ class DraftModelBase(nn.Module):
         self,
         sampled_probs: torch.Tensor, 
         parent_probs: torch.Tensor, 
-        sample_k: int,
-        sample_min_prob: float
+        sample_k: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
         # batch_size, N_available_leaves = parent_probs.shape
@@ -296,18 +295,13 @@ class DraftModelBase(nn.Module):
             topk_probs, topk_indices = torch.topk(
                 flattened_probs, sample_k, dim=1, sorted=True
             )  # Both shape: [sample_k]
-        
-        with nvtx.annotate("sampling_4"):
-            # Check if there is any probs above min_prob threshold. If not, valid_flag will be False
-            # valid_flag = topk_probs.max() > sample_min_prob
-            valid_flag = True
 
-        with nvtx.annotate("sampling_5"):
+        with nvtx.annotate("sampling_3"):
             # Compute parent indices
             parent_indices = (topk_indices // vocab_size).long()  # Shape: [sample_k]
         
-        with nvtx.annotate("sampling_6"):
+        with nvtx.annotate("sampling_4"):
             # Compute token ids
             token_ids = (topk_indices % vocab_size).long()  # Shape: [sample_k]
 
-        return token_ids, topk_probs, parent_indices, valid_flag
+        return token_ids, topk_probs, parent_indices

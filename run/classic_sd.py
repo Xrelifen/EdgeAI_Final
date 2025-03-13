@@ -27,8 +27,7 @@ class ClassicSDBuilder(GeneratorPipelineBuilder):
         self.draft_params = DraftParams(
             max_depth=12,
             topk_len=16,
-            max_verify_tokens=256,
-            min_accept_prob=1e-8,
+            max_verify_tokens=1024,
         )
         
         # Recipe for quantization and offloading.

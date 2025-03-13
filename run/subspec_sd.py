@@ -30,8 +30,7 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         self.draft_params = DraftParams(
             max_depth=32,
             topk_len=8,
-            max_verify_tokens=1024,
-            min_accept_prob=1e-8,
+            max_verify_tokens=1024
         )
         
         # Recipe for quantization and offloading.
