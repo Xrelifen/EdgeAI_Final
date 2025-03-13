@@ -102,7 +102,7 @@ class SubSpecSDDraftModel(DraftModelBase):
             # A. Compute token distribution & Sample
             # --------------------------------------
             with nvtx.annotate("sample nodes", color="green"):
-                token_ids, child_probs, parent_indices, valid_flag = self.topk_sampling(
+                token_ids, child_probs, parent_indices = self.topk_sampling(
                     sampled_probs,
                     parent_probs,
                     self.draft_params.topk_len
