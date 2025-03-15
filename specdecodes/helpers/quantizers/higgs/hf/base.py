@@ -187,7 +187,6 @@ class AutoHiggsHFModel(AutoHQQHFModel):
             current_device = device_map[linear_layer.name]
 
             if quant_config is not None:
-                org_device = linear_layer.weight.device # [MODIFIED]
                 out_module = higgs_linear_adapter( # [MODIFIED]
                     linear_layer,
                     quant_config,
@@ -195,7 +194,6 @@ class AutoHiggsHFModel(AutoHQQHFModel):
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 

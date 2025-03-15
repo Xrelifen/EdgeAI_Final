@@ -182,15 +182,12 @@ class AutoHQQHFModel(AutoHQQHFModel):
             current_device = device_map[linear_layer.name]
 
             if quant_config is not None:
-                org_device = linear_layer.weight.device # [MODIFIED]
                 out_module = HQQLinear(
                     linear_layer,
                     quant_config,
-                    # del_orig=False, # [MODIFIED] We keep the original layer
                     compute_dtype=compute_dtype,
                     device=current_device,
                 )
-                linear_layer.to(org_device) # [MODIFIED] Move layer back to original device
             else:
                 out_module = linear_layer.to(device=current_device, dtype=compute_dtype)
 
