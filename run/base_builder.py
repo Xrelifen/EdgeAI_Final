@@ -5,6 +5,7 @@ from typing import Any, Dict, Tuple, Optional
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from specdecodes.models.utils.cache_utils import create_kv_cache
 from specdecodes.models.generators.naive import NaiveGenerator
 from .app_router import run_app
 
@@ -86,6 +87,66 @@ class GeneratorPipelineBuilder:
             # Implement draft model loading logic if needed.
             return None
         return None
+    
+    def load_kv_cache(self, target_model, draft_model):
+        past_key_values = create_kv_cache(
+            "static",
+            max_cache_len=self.max_length,
+            max_batch_size=1,
+            config=target_model.model.config,
+            device=target_model.model.device,
+            dtype=target_model.model.dtype,
+        )
+        if draft_model is not None:
+            draft_past_key_values = create_kv_cache(
+                "static",
+                max_cache_len=self.max_length + self.draft_params.max_sample_tokens,
+                max_batch_size=1,
+                config=draft_model.model.config,
+                device=draft_model.model.device,
+                dtype=draft_model.model.dtype,
+            )
+            
+        if self.cache_implementation == "static":
+            if self.max_length is not None:
+                if draft_model is not None:
+                    # Additional sample tokens may cause KV-Cache tp exceed max_length
+                    max_cache_len = self.max_length + self.draft_params.max_verify_tokens
+                else:
+                    max_cache_len = self.max_length
+            else:
+                raise ValueError("max_length should be set for static cache.")
+            
+            # Create static kv-cache
+            past_key_values = create_kv_cache(
+                "static",
+                max_cache_len=max_cache_len,
+                max_batch_size=1,
+                config=target_model.model.config,
+                device=target_model.model.device,
+                dtype=target_model.model.dtype,
+            )
+            # if generator.draft_model is not None:
+            if draft_model is not None:
+                draft_past_key_values = create_kv_cache(
+                    "static",
+                    max_cache_len=max_cache_len,
+                    max_batch_size=1,
+                    config=draft_model.model.config,
+                    device=draft_model.model.device,
+                    dtype=draft_model.model.dtype,
+                )
+            else:
+                draft_past_key_values = None
+        else:
+            # Create dynamic kv-cache
+            past_key_values = create_kv_cache("dynamic")
+            if draft_model is not None:
+                draft_past_key_values = create_kv_cache("dynamic")
+            else:
+                draft_past_key_values = None
+        
+        return past_key_values, draft_past_key_values
 
     def compile_generator(self, generator):
         """
@@ -140,7 +201,10 @@ class GeneratorPipelineBuilder:
             if draft_model is not None and draft_config and draft_config.get("device_map"):
                 self.recipe.apply_offloading(draft_model.model, draft_config["device_map"])
 
-        # 4. Construct the generator pipeline.
+        # 4. Load the models' KV caches.
+        past_kv, draft_past_kv = self.load_kv_cache(model, draft_model)
+
+        # 5. Construct the generator pipeline.
         generator = self.generator_class(
             target_model=model,
             tokenizer=tokenizer,
@@ -155,7 +219,7 @@ class GeneratorPipelineBuilder:
         if self.compile_mode is not None:
             self.compile_generator(generator)
 
-        return generator, tokenizer
+        return generator, tokenizer, past_kv, draft_past_kv
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from .base_builder import GeneratorPipelineBuilder
 
 import torch
 from specdecodes.models.utils.utils import DraftParams
+from specdecodes.models.utils.cache_utils import create_kv_cache
 from specdecodes.models.draft_models.subspec_sd import SubSpecSDDraftModel
 from specdecodes.models.generators.subspec_sd import SubSpecSDGenerator
 
@@ -40,8 +41,8 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        self.warmup_iter = 5
-        self.compile_mode = "max-autotune"
+        # self.warmup_iter = 3
+        # self.compile_mode = "max-autotune"
         
         # Profiling.
         self.generator_profiling = True
@@ -54,6 +55,42 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
             eos_token_id=tokenizer.eos_token_id
         )
         return draft_model
+    
+    def load_kv_cache(self, target_model, draft_model):
+        past_key_values = create_kv_cache(
+            "static",
+            max_cache_len=self.max_length + self.draft_params.max_sample_tokens,
+            max_batch_size=1,
+            config=target_model.model.config,
+            device=target_model.model.device,
+            dtype=target_model.model.dtype,
+        )
+            
+        if self.cache_implementation == "static":
+            if self.max_length is not None:
+                # Additional sample tokens may cause KV-Cache tp exceed max_length, share with draft model.
+                max_cache_len = self.max_length + self.draft_params.max_sample_tokens
+            else:
+                raise ValueError("max_length should be set for static cache.")
+            
+            # Create static kv-cache
+            past_key_values = create_kv_cache(
+                "static",
+                max_cache_len=max_cache_len,
+                max_batch_size=1,
+                config=target_model.model.config,
+                device=target_model.model.device,
+                dtype=target_model.model.dtype,
+            )
+            # Target model shares cache with draft model.
+            draft_past_key_values = past_key_values
+        else:
+            # Create dynamic kv-cache
+            past_key_values = create_kv_cache("dynamic")
+            # Target model shares cache with draft model.
+            draft_past_key_values = past_key_values
+        
+        return past_key_values, draft_past_key_values
     
     def compile_generator(self, generator):
         logging.info(f"Compiling generator with mode: {self.compile_mode}")

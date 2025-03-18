@@ -1,3 +1,4 @@
+import torch
 import typer
 from .pipelines.run_test import main as main_run_test
 from .pipelines.run_benchmark import main as main_run_benchmark
@@ -14,8 +15,8 @@ def run_app(builder):
         """
         # torch.cuda.memory._record_memory_history()
         
-        generator, tokenizer = builder.build_generator()
-        main_run_test(generator, tokenizer, args=builder)
+        generator, tokenizer, past_kv, draft_past_kv = builder.build_generator()
+        main_run_test(generator, tokenizer, past_kv, draft_past_kv, args=builder)
         
         # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
         # torch.cuda.memory._record_memory_history(enabled=None)
@@ -29,8 +30,8 @@ def run_app(builder):
             python custom.py run-benchmark --bench-name=mt_bench
         """
         print(f"Running benchmark '{bench_name}'")
-        generator, tokenizer = builder.build_generator()
-        main_run_benchmark(generator, tokenizer, args=builder, bench_name=bench_name)
+        generator, tokenizer, past_kv, draft_past_kv = builder.build_generator()
+        main_run_benchmark(generator, tokenizer, past_kv, draft_past_kv, args=builder, bench_name=bench_name)
 
     @app.command()
     def run_gradio():
