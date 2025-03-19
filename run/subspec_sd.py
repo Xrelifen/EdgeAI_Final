@@ -8,7 +8,9 @@ from specdecodes.models.utils.cache_utils import create_kv_cache
 from specdecodes.models.draft_models.subspec_sd import SubSpecSDDraftModel
 from specdecodes.models.generators.subspec_sd import SubSpecSDGenerator
 
-from specdecodes.helpers.recipes.subspec.hqq_4bit_attn_4bit_mlp import Recipe
+from specdecodes.helpers.recipes.subspec.higgs_4bit_attn_4bit_mlp import Recipe
+# from specdecodes.helpers.recipes.subspec.higgs_no_offload import Recipe
+
 
 class SubSpecSDBuilder(GeneratorPipelineBuilder):
     def __init__(self):
@@ -17,10 +19,12 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         self.seed = 0
         self.device = "cuda:0"
         self.dtype = torch.float16
+        self.max_length = 1024
         
         # Model paths.
         # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        # self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        self.llm_path = "meta-llama/Llama-3.2-1B-Instruct"
         
         # Generation parameters.
         self.do_sample = False
@@ -41,11 +45,11 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        # self.warmup_iter = 3
+        self.warmup_iter = 3
         # self.compile_mode = "max-autotune"
         
         # Profiling.
-        self.generator_profiling = True
+        self.generator_profiling = False
     
     def load_draft_model(self, target_model, tokenizer, draft_model_path):
         draft_model = SubSpecSDDraftModel.from_pretrained(
@@ -57,15 +61,6 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         return draft_model
     
     def load_kv_cache(self, target_model, draft_model):
-        past_key_values = create_kv_cache(
-            "static",
-            max_cache_len=self.max_length + self.draft_params.max_sample_tokens,
-            max_batch_size=1,
-            config=target_model.model.config,
-            device=target_model.model.device,
-            dtype=target_model.model.dtype,
-        )
-            
         if self.cache_implementation == "static":
             if self.max_length is not None:
                 # Additional sample tokens may cause KV-Cache tp exceed max_length, share with draft model.
@@ -79,7 +74,7 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
                 max_cache_len=max_cache_len,
                 max_batch_size=1,
                 config=target_model.model.config,
-                device=target_model.model.device,
+                device=self.device,
                 dtype=target_model.model.dtype,
             )
             # Target model shares cache with draft model.

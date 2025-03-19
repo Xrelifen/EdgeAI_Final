@@ -89,24 +89,6 @@ class GeneratorPipelineBuilder:
         return None
     
     def load_kv_cache(self, target_model, draft_model):
-        past_key_values = create_kv_cache(
-            "static",
-            max_cache_len=self.max_length,
-            max_batch_size=1,
-            config=target_model.model.config,
-            device=target_model.model.device,
-            dtype=target_model.model.dtype,
-        )
-        if draft_model is not None:
-            draft_past_key_values = create_kv_cache(
-                "static",
-                max_cache_len=self.max_length + self.draft_params.max_sample_tokens,
-                max_batch_size=1,
-                config=draft_model.model.config,
-                device=draft_model.model.device,
-                dtype=draft_model.model.dtype,
-            )
-            
         if self.cache_implementation == "static":
             if self.max_length is not None:
                 if draft_model is not None:
@@ -123,7 +105,7 @@ class GeneratorPipelineBuilder:
                 max_cache_len=max_cache_len,
                 max_batch_size=1,
                 config=target_model.model.config,
-                device=target_model.model.device,
+                device=self.device,
                 dtype=target_model.model.dtype,
             )
             # if generator.draft_model is not None:
@@ -133,7 +115,7 @@ class GeneratorPipelineBuilder:
                     max_cache_len=max_cache_len,
                     max_batch_size=1,
                     config=draft_model.model.config,
-                    device=draft_model.model.device,
+                    device=self.device,
                     dtype=draft_model.model.dtype,
                 )
             else:
