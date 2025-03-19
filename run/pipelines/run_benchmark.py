@@ -16,7 +16,7 @@ from .benchmarks.alpaca import load_alpaca_dataset
 from .benchmarks.cnndm import load_cnndm_dataset
 from .benchmarks.aime import load_aime_dataset
 from .benchmarks.gpqa import load_gpqa_dataset
-from .benchmarks.math import load_math500_dataset
+from .benchmarks.math500 import load_math500_dataset
 from .benchmarks.livecodebench import load_livecodebench_dataset
 
 DATASET_LOADER = {
