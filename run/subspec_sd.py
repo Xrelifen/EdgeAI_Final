@@ -77,13 +77,12 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
                 device=self.device,
                 dtype=target_model.model.dtype,
             )
-            # Target model shares cache with draft model.
-            draft_past_key_values = past_key_values
         else:
             # Create dynamic kv-cache
             past_key_values = create_kv_cache("dynamic")
-            # Target model shares cache with draft model.
-            draft_past_key_values = past_key_values
+            
+        # Target model shares cache with draft model.
+        draft_past_key_values = None
         
         return past_key_values, draft_past_key_values
     
