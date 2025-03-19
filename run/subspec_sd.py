@@ -19,7 +19,7 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         self.seed = 0
         self.device = "cuda:0"
         self.dtype = torch.float16
-        self.max_length = 1024
+        self.max_length = 2048
         
         # Model paths.
         # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -46,7 +46,7 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         # Additional configurations.
         self.cache_implementation = "static"
         self.warmup_iter = 3
-        # self.compile_mode = "max-autotune"
+        self.compile_mode = "max-autotune"
         
         # Profiling.
         self.generator_profiling = False

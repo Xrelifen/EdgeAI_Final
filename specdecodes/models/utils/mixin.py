@@ -266,7 +266,9 @@ class SDProfilingMixin:
         self.exp_log['avg_verify_time'] = avg_verify_s
         
         self.exp_log['avg_sampled'] = avg_sampled
+        self.exp_log['n_iter'] = total_iterations
         self.exp_log['n_tokens'] = len(input_ids[0][org_input_len:])
+        self.exp_log['elapsed_time'] = elapsed_time_s
         self.exp_log['tput'] = len(input_ids[0][org_input_len:]) / elapsed_time_s
         logging.info(
             f"Average draft time: {self.exp_log['avg_draft_time']:.4f},"\

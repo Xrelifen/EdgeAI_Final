@@ -35,7 +35,7 @@ class GeneratorPipelineBuilder:
         self.draft_model_path = None
 
         # Generation parameters.
-        self.max_length = 1024
+        self.max_length = 2048
         self.do_sample = False
         self.temperature = 0.0
 
