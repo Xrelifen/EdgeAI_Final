@@ -21,7 +21,10 @@ class EagleSDDraftModel(DraftModelBase):
     def init_base_model(self, target_model):
         draft_config = deepcopy(target_model.config)
         draft_config.num_hidden_layers = 1
-        self.bias = draft_config.bias if hasattr(draft_config, "bias") else False # Eagle has bias=True on Llama2 config
+        if draft_config._name_or_path.startswith("meta-llama/Llama-2-7b"):
+            self.bias = True # Eagle has bias=True on Llama2 config
+        else:
+            self.bias = draft_config.bias if hasattr(draft_config, "bias") else False
         model = AutoModel.from_config(draft_config)
         
         # replace model.norm and first input_layernorm with nn.Identity
