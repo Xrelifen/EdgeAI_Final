@@ -166,7 +166,8 @@ class DraftModelBase(nn.Module):
         # Initialize additional modules if needed
         self.init_additional_modules()
         
-        # Set prefill function same as forward so torch.compile() forward will not execute on prefill phase)
+        # Set prefill function same as forward. 
+        # prefill_forward() is used for prefill phase that cannot torch.compile()
         self.prefill_forward = self.forward
         
     @property
