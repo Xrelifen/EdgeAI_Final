@@ -19,18 +19,18 @@ class PrefetchOffloader:
         self._cache_cpu_layers(model, device_map)
         assert model.model.embed_tokens.weight.device.type == "cuda"
 
-        layer_order = MODEL_TYPE_GET_LAYER_ORDER[model.config.model_type](model.config)
-        
         # V3 Prefetch Strategy: (V4: inline copy version)
         # 1. Load the first CPU layer to GPU, This layer will prefetch the next CPU layer
         # 2. The next CPU layer will prefetch the next CPU layer, and so on
         # 3. The last CPU layer will prefetch the first CPU layer
 
+        layer_order = MODEL_TYPE_GET_LAYER_ORDER[model.config.model_type](model.config)
+        cpu_layer_order = [name for name in layer_order if device_map.get(name) == "cpu"]
+
         # Find first 'cpu' layer
-        first_idx = next((i for i, name in enumerate(layer_order) if device_map.get(name) == "cpu"), -1)
-        if first_idx == -1:
+        if cpu_layer_order == []:
             raise ValueError("No CPU layer found in the model.")
-        first_name = layer_order[first_idx]
+        first_name = cpu_layer_order[0]
         first_cpu_layer = find_child(model, first_name)
 
         # Copy the first CPU layer to GPU
@@ -39,7 +39,7 @@ class PrefetchOffloader:
 
         # Connect subsequent CPU layers in a chain
         current_layer = first_cpu_layer
-        for name in layer_order[first_idx+1:]:
+        for name in cpu_layer_order[1:]:
             if device_map.get(name) == "cpu":
                 next_layer = find_child(model, name)
                 current_layer.register_forward_pre_hook(self._create_prefetch_hook(next_layer, self.cpu_tensors[name]))
