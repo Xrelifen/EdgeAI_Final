@@ -9,7 +9,6 @@ from specdecodes.models.draft_models.subspec_sd import SubSpecSDDraftModel
 from specdecodes.models.generators.subspec_sd import SubSpecSDGenerator
 
 from specdecodes.helpers.recipes.subspec.higgs_4bit_attn_4bit_mlp import Recipe
-# from specdecodes.helpers.recipes.subspec.higgs_no_offload import Recipe
 
 
 class SubSpecSDBuilder(GeneratorPipelineBuilder):
@@ -22,9 +21,8 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         self.max_length = 2048
         
         # Model paths.
-        self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        # self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        # self.llm_path = "meta-llama/Llama-3.2-1B-Instruct"
+        # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
         
         # Generation parameters.
         self.do_sample = False

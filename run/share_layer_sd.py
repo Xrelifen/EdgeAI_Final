@@ -22,7 +22,6 @@ class ShareLayerSDBuilder(GeneratorPipelineBuilder):
         # Model paths.
         # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        # self.llm_path = "meta-llama/Llama-3.2-1B-Instruct"
         
         # Generation parameters.
         self.do_sample = False
