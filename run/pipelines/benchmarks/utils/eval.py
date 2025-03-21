@@ -16,7 +16,7 @@ def run_common_eval(generator, tokenizer, past_key_values, draft_past_key_values
         messages = [{"role": "user", "content": input_message}]
         tokenizer.use_default_system_prompt = True
         input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
-        
+        torch.cuda.empty_cache()
         with sdpa_kernel(backends=[SDPBackend.MATH]):
             generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, draft_past_key_values=draft_past_key_values)
 
@@ -36,6 +36,7 @@ def run_common_eval(generator, tokenizer, past_key_values, draft_past_key_values
             tokenizer.use_default_system_prompt = True
             input_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").cuda()
             # logging.info(f"Check shape {input_ids.shape[1]}")
+            torch.cuda.empty_cache()
             with sdpa_kernel(backends=[SDPBackend.MATH]):
                 output_ids = generator.generate(input_ids, temperature=args.temperature, max_length=args.max_length, do_sample=args.do_sample, past_key_values=past_key_values, draft_past_key_values=draft_past_key_values)
             

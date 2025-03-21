@@ -22,9 +22,9 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         self.max_length = 2048
         
         # Model paths.
-        # self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        self.llm_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         # self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
-        self.llm_path = "meta-llama/Llama-3.2-1B-Instruct"
+        # self.llm_path = "meta-llama/Llama-3.2-1B-Instruct"
         
         # Generation parameters.
         self.do_sample = False
@@ -45,11 +45,11 @@ class SubSpecSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        self.warmup_iter = 3
+        self.warmup_iter = 5
         self.compile_mode = "max-autotune"
         
         # Profiling.
-        self.generator_profiling = False
+        self.generator_profiling = True
     
     def load_draft_model(self, target_model, tokenizer, draft_model_path):
         draft_model = SubSpecSDDraftModel.from_pretrained(
