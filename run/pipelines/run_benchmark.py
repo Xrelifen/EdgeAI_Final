@@ -58,8 +58,13 @@ def main(generator, tokenizer, past_kv, draft_past_kv, args, bench_name):
     torch.manual_seed(0)
     random.seed(0)
     
-
-    dataset = DATASET_LOADER[bench_name]()
+    if bench_name in DATASET_LOADER:
+        dataset = DATASET_LOADER[bench_name]()
+    else:
+        print(f"Unknown benchmark: {bench_name}")
+        print(f"Available benchmarks: {list(DATASET_LOADER.keys())}")
+        return
+    
     random.shuffle(dataset)
     num_samples = min(len(dataset), MAX_SAMPLES)
     dataset = dataset[:num_samples]
