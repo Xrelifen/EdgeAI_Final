@@ -1,6 +1,6 @@
 from ..base_recipe import QuantOffloadRecipe
-
 from ...quantizers.hqq import HqqQuantizer
+from hqq.core.quantize import *
 
 class Recipe(QuantOffloadRecipe):
     def __init__(self):
@@ -12,20 +12,8 @@ class Recipe(QuantOffloadRecipe):
     def generate_configurations(self, target_model, draft_model, max_length, cpu_offload_gb, dtype, device):
         # Quantization
         quant_config = {}
-        attn_quant_config = {
-            "bits": 4,
-            "p": 2,
-            "group_size": 128,
-            "hadamard_size": 512,
-            "tune_metadata": {},
-        }
-        mlp_quant_config = {
-            "bits": 4,
-            "p": 2,
-            "group_size": 128,
-            "hadamard_size": 512,
-            "tune_metadata": {},
-        }
+        attn_quant_config = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
+        mlp_quant_config = BaseQuantizeConfig(nbits=4, group_size=64, axis=1)
         
         layer_cnt = len(target_model.model.layers)
         quant_start = 0
