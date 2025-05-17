@@ -92,7 +92,7 @@ def main():
     torch.manual_seed(0)
     random.seed(0)
     
-    max_new_tokens = 1024    # Number of new tokens to generate
+    max_new_tokens = 256    # Number of new tokens to generate
     device = 'cuda:0'
 
     ### === TODO: Load your model (you may change this part) ===
