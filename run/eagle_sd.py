@@ -15,8 +15,8 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         self.dtype = torch.float16
         
         # Model paths.
-        self.llm_path = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.draft_model_path = "/home/scott306lr_l/checkpoints/eagle/official/EAGLE-LLaMA3-Instruct-8B/"
+        self.llm_path = "meta-llama/Llama-3.2-3B-Instruct"
+        self.draft_model_path = "/home/JaaaaaA_l/checkpoints/llama3.2-3b-eagle"
         
         # Generation parameters.
         self.do_sample = False
@@ -37,11 +37,11 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         
         # Additional configurations.
         self.cache_implementation = "static"
-        self.warmup_iter = 10
-        self.compile_mode = "max-autotune"
+        self.warmup_iter = 5
+        #self.compile_mode = "max-autotune"
         
         # Profiling.
-        self.generator_profiling = True
+        #self.generator_profiling = True
     
     def load_draft_model(self, target_model, tokenizer, draft_model_path):
         draft_model = EagleSDDraftModel.from_pretrained(
@@ -49,7 +49,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
             target_model=target_model,
             torch_dtype=self.dtype,
             eos_token_id=tokenizer.eos_token_id
-        ).to(target_model.lm_head.weight.device)
+        ).to(self.device)
         draft_model.update_modules(embed_tokens=target_model.get_input_embeddings(), lm_head=target_model.lm_head)
         return draft_model
 

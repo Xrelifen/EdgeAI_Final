@@ -54,7 +54,7 @@ class GeneratorPipelineBuilder:
         self.cpu_offload_gb: Optional[int] = None
 
         # Profiling and printing settings.
-        self.generator_profiling: bool = True
+        self.generator_profiling: bool = False
         self.print_time: bool = True
         self.print_message: bool = True
 

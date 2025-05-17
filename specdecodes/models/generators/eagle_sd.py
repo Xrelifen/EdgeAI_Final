@@ -185,4 +185,6 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
 
     
 class EagleSDGenerator(SDProfilingMixin, EagleSDGeneratorBase):
+    def forward(self, *args, **kwargs):
+        return self.target_model(*args, **kwargs)
     pass

@@ -12,13 +12,13 @@ class NaiveBuilder(GeneratorPipelineBuilder):
         self.dtype = torch.float16
         
         # Model paths.
-        self.llm_path = "meta-llama/Llama-3.1-8B-Instruct"
+        self.llm_path = "meta-llama/Llama-3.2-3B-Instruct"
         self.generator_class = NaiveGenerator
         
         # Generation parameters.
         self.do_sample = False
         self.temperature = 0
-        
+
         # Recipe for quantization and offloading.
         self.recipe = None
         self.cpu_offload_gb = None
@@ -26,7 +26,7 @@ class NaiveBuilder(GeneratorPipelineBuilder):
         # Additional configurations.
         self.cache_implementation = "static"
         self.warmup_iter = 5
-        self.compile_mode = "max-autotune"
+        #self.compile_mode = "max-autotune"
         
         # Profiling
         self.generator_profiling = True
