@@ -16,7 +16,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         
         # Model paths.
         self.llm_path = "meta-llama/Llama-3.2-3B-Instruct"
-        self.draft_model_path = "/home/JaaaaaA_l/checkpoints/llama3.2-3b-eagle"
+        self.draft_model_path = "JKroller/llama3.2-3b-eagle"
         
         # Generation parameters.
         self.do_sample = False
@@ -48,6 +48,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
             draft_model_path,
             target_model=target_model,
             torch_dtype=self.dtype,
+            use_hf_eagle=True,
             eos_token_id=tokenizer.eos_token_id
         ).to(self.device)
         draft_model.update_modules(embed_tokens=target_model.get_input_embeddings(), lm_head=target_model.lm_head)

@@ -1,3 +1,4 @@
+from huggingface_hub import hf_hub_download
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
@@ -181,40 +182,48 @@ class DraftModelBase(nn.Module):
     @property
     def config(self):
         return self.model.config
-    
-        
+            
     @classmethod
     def from_pretrained(
-        cls, 
+        cls,
         pretrained_model_name_or_path,
         *model_args,
-        target_model = None,
+        target_model=None,
         torch_dtype=torch.float32,
-        remove_embeddings = False, #! Deprecated
+        use_hf_eagle:bool=False,
+        remove_embeddings=False,
         **model_kwargs
     ):
-        # Remove the following arguments from model_kwargs, cause AutoModelForCausalLM does not accept them
         eos_token_id = model_kwargs.pop("eos_token_id", None)
-        
-        # Load HuggingFace model if config is not provided
-        # if target_model is not None: 
-        #if pretrained_model_name_or_path path exists on the local disk, load the model from the path
+
+        # load local safetensors
         if os.path.exists(pretrained_model_name_or_path):
-            logging.info(f"Loading model from {pretrained_model_name_or_path}")
+            logging.info(f"Loading local Eagle model from {pretrained_model_name_or_path}")
             draft_model_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
             model = cls(target_model=target_model, eos_token_id=eos_token_id, *model_args, **model_kwargs)
             load_custom_model(model, draft_model_path, remove_embeddings=remove_embeddings)
 
+        # HF Eagle safetensors
+        elif use_hf_eagle:
+            logging.info(f"Downloading Eagle safetensors from HF repo {pretrained_model_name_or_path}")
+            draft_model_path = hf_hub_download(
+                repo_id=pretrained_model_name_or_path,
+                filename="model.safetensors",
+                repo_type="model",
+            )
+            model = cls(target_model=target_model, eos_token_id=eos_token_id, *model_args, **model_kwargs)
+            load_custom_model(model, draft_model_path, remove_embeddings=remove_embeddings)
+
         else:
+            # AutoModelForCausalLM branch ex.llama3.2-1b
             base_model = AutoModelForCausalLM.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
-                *model_args, 
+                *model_args,
                 **model_kwargs
             )
             model = cls(base_model, eos_token_id=eos_token_id, *model_args, **model_kwargs).to(dtype=torch_dtype)
-        
-        # Convert the model to the desired dtype and return
+
         model.to(dtype=torch_dtype)
         return model
         
