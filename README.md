@@ -15,7 +15,7 @@ CUDA_VISIBLE_DEVICES=0 python result.py
 ### Kernel Optimization
 
 ### Speculative Decoding
-- EAGLE2
+- [EAGLE2](https://huggingface.co/JKroller/llama3.2-3b-eagle)
   - max-new-tokens: 256
     - speedup: 1.5x
   - max-new-tokens: 1024
