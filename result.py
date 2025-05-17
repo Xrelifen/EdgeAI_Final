@@ -117,6 +117,8 @@ def main():
     for _ in tqdm(range(5), desc="Warm Up..."):
         _ = model.generate(
             input_ids=input_ids,
+            temperature=0,
+            do_sample=False,
             max_length=max_new_tokens,
             past_key_values=past_kv, 
             draft_past_key_values=draft_past_kv,
@@ -145,7 +147,9 @@ def main():
         # === Default: Use model.generate() for end-to-end timing === 
         generated = model.generate( 
             input_ids=input_ids,
+            temperature=0,
             max_length=max_new_tokens,
+            do_sample=False,
             past_key_values=past_kv,
             draft_past_key_values=draft_past_kv,
         )
