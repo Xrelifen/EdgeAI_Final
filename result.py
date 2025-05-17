@@ -93,11 +93,6 @@ def main():
 
     ### === TODO: Load your model (you may change this part) ===
     builder = EagleSDBuilder()
-    if not hasattr(builder, "parse_args"):
-        builder.parse_args = lambda: builder
-
-    args = builder.parse_args()
-    print(args)
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
     tokenizer.use_default_system_prompt = True
     ################################################################
@@ -122,8 +117,6 @@ def main():
     for _ in tqdm(range(5), desc="Warm Up..."):
         _ = model.generate(
             input_ids=input_ids,
-            temperature=0,
-            do_sample=False,
             max_length=max_new_tokens,
             past_key_values=past_kv, 
             draft_past_key_values=draft_past_kv,
@@ -152,9 +145,7 @@ def main():
         # === Default: Use model.generate() for end-to-end timing === 
         generated = model.generate( 
             input_ids=input_ids,
-            temperature=args.temperature,
             max_length=max_new_tokens,
-            do_sample=args.do_sample,
             past_key_values=past_kv,
             draft_past_key_values=draft_past_kv,
         )
