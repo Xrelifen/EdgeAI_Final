@@ -4,12 +4,37 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 import logging
 import nvtx
 
+from dataclasses import dataclass
+from enum import Enum
 from .classic_sd import ClassicSDGeneratorBase
 from ..utils.mixin import SDProfilingMixin
 from ..utils.utils import DraftParams, invert_mask
+from ..utils.flashinfer.cache_manager import (
+    KvCachePool,
+    KvCacheBatchPosition,
+    RequestKvCache,
+    getKvCacheBatchPosition,
+    FlashInferCache,
+)
+from ..utils.flashinfer.attention_wrapper import FlashinferAttentionWrapper
 
 
-class EagleSDGeneratorBase(ClassicSDGeneratorBase):
+class POS_ENCODING_MODE(Enum):
+    ROPE_LLAMA = "ROPE_LLAMA"
+    ALIBI = "ALIBI"
+    NONE = "NONE"
+
+
+@dataclass(frozen=True)
+class AttentionRotaryParams:
+    causal: bool = True
+    pos_encoding_mode: POS_ENCODING_MODE = POS_ENCODING_MODE.ROPE_LLAMA
+    rope_scale: float = 1.0
+    rope_theta: float = 1.0e4
+
+
+class EagleSDFIGeneratorBase(ClassicSDGeneratorBase):
+
     def _speculate(self, input_ids, hidden_states, past_key_values):
         return self.draft_model.speculate(
             input_ids,
@@ -18,7 +43,7 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
         )
 
     def _tree_decoding(
-        self, tree, past_key_values, position_offset, cache_position, device
+        self, tree, request_kv_cache, position_offset, cache_position, device
     ):
         # Preparing target_model's tree decoding data, also updates each node's index (node.ind).
         with nvtx.annotate("create attn mask"):
@@ -37,19 +62,45 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
         # Assing to tree mask
         with nvtx.annotate("update mask"):
             tree_mask = self._update_tree_mask(tree_mask_partial)
-            tree_mask = invert_mask(tree_mask, dtype=self.target_model.model.dtype)
+            # tree_mask = invert_mask(tree_mask, dtype=self.target_model.model.dtype)
 
         # llm forward
         # TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
         with nvtx.annotate("llm forward", color="red"):
-            outputs = self.target_model(
-                tree_input_ids.unsqueeze(0),
-                past_key_values=past_key_values,
+            num_tokens = self.draft_params.max_verify_tokens
+            kvCachePool = request_kv_cache.kvCachePool
+
+            for i in range(num_tokens):
+                request_kv_cache.increment()
+
+            batch_position = getKvCacheBatchPosition(
+                request_kv_caches=[request_kv_cache],
+                mode="tree",  # Set to False if you're doing incremental decoding
+                device=device,
+                treeTokens=num_tokens,
+            )
+            self.flashinferWrapper.prepareAttention(
+                "tree",
+                batch_position,
+                kvCachePool.page_len,
+                POS_ENCODING_MODE.NONE,
+                kvCachePool.cache_data[0].dtype,
                 attention_mask=tree_mask,
+            )
+
+            outputs = self.target_model(
+                input_ids=tree_input_ids.unsqueeze(0),
+                past_key_values=None,
+                # attention_mask=tree_mask,
                 position_ids=tree_position_ids.unsqueeze(0),
                 output_hidden_states=True,
-                cache_position=cache_position,
+                use_cache=False,
+                kvCachePool=kvCachePool,
+                batch_position=batch_position,
+                mode="tree",
+                flashinferWrapper=self.flashinferWrapper,
             )
+            self.flashinferWrapper.endBatchAttention("tree")
         return outputs
 
     def _verify_step(self, p, q, token_ids, do_sample):
@@ -125,23 +176,59 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                 "past_key_values and draft_past_key_values should both be provided"
             )
 
+        kvCachePool = past_key_values
+        PAGE_LEN = kvCachePool.page_len
+        seq_init_len = input_ids.shape[1]
+        currentDevice = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+        # Create a RequestKvCache instance
+        request_kv_cache = RequestKvCache(
+            kvCachePool=kvCachePool, page_len=PAGE_LEN, seq_init_len=seq_init_len
+        )
+
+        # Generate the KvCacheBatchPosition
+        batch_position = getKvCacheBatchPosition(
+            request_kv_caches=[request_kv_cache],
+            mode="prefill",  # Set to False if you're doing incremental decoding
+            device=currentDevice,
+        )
+
         self._init_tree_mask(
             self.draft_params.max_verify_tokens, max_cache_len, device=input_ids.device
         )
-        cache_position = torch.arange(
-            org_input_len, dtype=torch.long, device=input_ids.device
+        self.flashinferWrapper = FlashinferAttentionWrapper(
+            self.target_model.config.num_attention_heads,
+            self.target_model.config.num_key_value_heads,
+            self.target_model.config.hidden_size,
+            PAGE_LEN,
         )
 
         # * prefill stage
         with nvtx.annotate("prefill", color="orange"):
-            outputs = self.target_model.prefill_forward(
-                input_ids,
-                past_key_values=past_key_values,
-                output_hidden_states=True,
-                cache_position=cache_position,
-                logits_to_keep=1,
+            self.flashinferWrapper.prepareAttention(
+                "prefill",
+                batch_position,
+                kvCachePool.page_len,
+                POS_ENCODING_MODE.NONE,
+                kvCachePool.cache_data[0].dtype,
             )
+
+            outputs = self.target_model.prefill_forward(
+                input_ids=input_ids,
+                output_hidden_states=True,
+                past_key_values=None,
+                use_cache=False,
+                num_logits_to_keep=1,
+                kvCachePool=kvCachePool,
+                batch_position=batch_position,
+                mode="prefill",
+                flashinferWrapper=self.flashinferWrapper,
+            )
+
+            self.flashinferWrapper.endBatchAttention("prefill")
+
             next_token_logits = outputs.logits
+            # next_token_logits = outputs.logits[:, -1:, :]
             hidden_states = outputs.hidden_states[-1]
             del outputs
 
@@ -170,10 +257,11 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
-                    prev_kv_len = past_key_values.get_seq_length()
+                    prev_kv_len = input_ids.shape[1]
+                    # outputs = self._tree_decoding(tree, past_key_values, position_offset=input_ids.shape[1]-1, cache_position=cache_position, device=hidden_states.device)
                     outputs = self._tree_decoding(
                         tree,
-                        past_key_values,
+                        request_kv_cache,
                         position_offset=input_ids.shape[1] - 1,
                         cache_position=cache_position,
                         device=hidden_states.device,
@@ -198,12 +286,13 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                     )
 
                 with nvtx.annotate("reorder kv"):
-                    past_key_values.reorder_cache_with_offset(
+                    num_new_tokens = self.draft_params.max_verify_tokens
+                    request_kv_cache.reorder_cache_with_offset(
                         hidden_indices,
                         offset=prev_kv_len,
-                        new_chunk_len=self.draft_params.max_verify_tokens,
-                        dim=2,
+                        num_new_tokens=num_new_tokens,
                     )
+                    # past_key_values.reorder_cache_with_offset(hidden_indices, offset=prev_kv_len, new_chunk_len=self.draft_params.max_verify_tokens, dim=2)
 
                 # * update input_ids, hidden_states, and cache_position
                 with nvtx.annotate("update data"):
@@ -215,11 +304,9 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                 with nvtx.annotate("stopping criteria"):
                     finished = stopping_criteria(input_ids, None).item()
 
+        request_kv_cache.release()
         return input_ids
 
 
-class EagleSDGenerator(SDProfilingMixin, EagleSDGeneratorBase):
-    def forward(self, *args, **kwargs):
-        return self.target_model(*args, **kwargs)
-
+class EagleSDFIGenerator(SDProfilingMixin, EagleSDFIGeneratorBase):
     pass
