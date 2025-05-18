@@ -97,11 +97,11 @@ def main():
     torch.manual_seed(0)
     random.seed(0)
 
-    max_new_tokens = 1024  # Number of new tokens to generate
+    max_new_tokens = 256  # Number of new tokens to generate
     device = "cuda:0"
 
     ### === TODO: Load your model (you may change this part) ===
-    builder = EagleSDBuilder()
+    builder = FlashinferBuilder()
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
     tokenizer.use_default_system_prompt = True
     
