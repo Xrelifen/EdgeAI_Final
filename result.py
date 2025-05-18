@@ -12,6 +12,7 @@ import numpy as np
 from run.eagle_sd import EagleSDBuilder
 from run.flashinfer import FlashinferBuilder
 from run.naive import NaiveBuilder
+from hqq_lora.utils import get_quantized_model, apply_lora, prepare_model
 
 #####################################################################
 # === SPEC NOTICE ===
@@ -103,6 +104,11 @@ def main():
     builder = EagleSDBuilder()
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
     tokenizer.use_default_system_prompt = True
+    
+    # apply HQQ and LoRA
+    # get_quantized_model(model=model.target_model, device=device)
+    # prepare_model(model.target_model, device=device)
+    # apply_lora(model.target_model, lora_model_path="./hqq_lora/results_lora/", device=device)
     ################################################################
 
     model.eval()

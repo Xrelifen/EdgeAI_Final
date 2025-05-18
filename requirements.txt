@@ -7,3 +7,4 @@ datasets==3.2.0
 accelerate==1.2.1
 liger_kernel==0.5.2
 fastchat==0.1.0
+hqq==0.2.6
