@@ -1,14 +1,15 @@
 import torch
 from typing import Tuple, Dict, List, Optional
 
+
 class TreeNode:
     __slots__ = (
-        'parent',
-        'children',
-        'depth',
-        'token_id',
-        'cumulative_probability',
-        'has_been_sampled'
+        "parent",
+        "children",
+        "depth",
+        "token_id",
+        "cumulative_probability",
+        "has_been_sampled",
     )
 
     def __init__(
@@ -16,7 +17,7 @@ class TreeNode:
         parent: Optional[int],
         token_id: int,
         cumulative_probability: float,
-        depth: int
+        depth: int,
     ):
         self.parent = parent
         self.children: List[int] = []
@@ -33,16 +34,16 @@ class Tree:
     Provides methods to add new nodes, prune the tree, retrieve data,
     and create an attention mask based on ancestor relationships.
     """
-    
+
     __slots__ = (
-        'prob_dtype',
-        'nodes',
-        'current_size',
-        'available_leaves',
+        "prob_dtype",
+        "nodes",
+        "current_size",
+        "available_leaves",
     )
 
     def __init__(
-        self, 
+        self,
         root_token_id: torch.Tensor,
         prob_dtype: torch.dtype = torch.float32,
     ):
@@ -58,14 +59,14 @@ class Tree:
             depth=0,
         )
         self.nodes.append(root)
-        
+
         self.current_size = 1
         self.available_leaves: List[int] = [0]
 
     # Add nodes to the tree once, in a batched manner
     def add_nodes(
-        self, 
-        token_ids: torch.Tensor,    # shape: [1, total_depth, num_samples]
+        self,
+        token_ids: torch.Tensor,  # shape: [1, total_depth, num_samples]
         token_probs: torch.Tensor,  # shape: [1, total_depth, num_samples]
         local_parent_indices: torch.Tensor,  # shape: [1, total_depth, num_samples]
     ):
@@ -73,10 +74,10 @@ class Tree:
         assert batch_size == 1, "Currently only batch_size=1 is supported."
 
         # Convert data to cpu and list
-        local_parent_indices = local_parent_indices.to('cpu', non_blocking=True)
-        token_ids = token_ids.to('cpu', non_blocking=True)
-        token_probs = token_probs.to('cpu', non_blocking=True)
-        
+        local_parent_indices = local_parent_indices.to("cpu", non_blocking=True)
+        token_ids = token_ids.to("cpu", non_blocking=True)
+        token_probs = token_probs.to("cpu", non_blocking=True)
+
         torch.cuda.synchronize()
         local_parent_indices = local_parent_indices.tolist()
         token_ids = token_ids.tolist()
@@ -86,7 +87,7 @@ class Tree:
             # Mark current leaves as sampled
             for leaf_idx in self.available_leaves:
                 self.nodes[leaf_idx].has_been_sampled = True
-                
+
             p_inds = local_parent_indices[0][d]
             t_ids = token_ids[0][d]
             probs = token_probs[0][d]
@@ -116,11 +117,10 @@ class Tree:
 
     def prune_to_top_n(self, n: int) -> torch.Tensor:
         if n == -1 or self.current_size <= n:
-            return torch.arange(self.current_size, device='cpu')
+            return torch.arange(self.current_size, device="cpu")
 
         probs = torch.tensor(
-            [node.cumulative_probability for node in self.nodes],
-            dtype=self.prob_dtype
+            [node.cumulative_probability for node in self.nodes], dtype=self.prob_dtype
         )
         _, keep_idx = torch.topk(probs, k=n, sorted=True)
         keep_list = keep_idx.tolist()
@@ -136,7 +136,7 @@ class Tree:
                 parent=new_parent,
                 token_id=o_node.token_id,
                 cumulative_probability=o_node.cumulative_probability,
-                depth=o_node.depth
+                depth=o_node.depth,
             )
             n_node.has_been_sampled = o_node.has_been_sampled
             new_nodes.append(n_node)
@@ -151,13 +151,16 @@ class Tree:
         self.current_size = len(new_nodes)
         is_parent = [bool(n.children) for n in self.nodes]
         self.available_leaves = [
-            i for i, node in enumerate(self.nodes)
+            i
+            for i, node in enumerate(self.nodes)
             if (not is_parent[i]) and (not node.has_been_sampled)
         ]
         return torch.tensor(keep_list, dtype=torch.long)
 
     def get_children_indices(self, node_index: int) -> torch.Tensor:
-        return torch.tensor(self.nodes[node_index].children, dtype=torch.long, device='cpu')
+        return torch.tensor(
+            self.nodes[node_index].children, dtype=torch.long, device="cpu"
+        )
 
     def get_node_data(self) -> Dict[str, torch.Tensor]:
         t_ids, probs, depths, parents = [], [], [], []
@@ -167,29 +170,35 @@ class Tree:
             depths.append(node.depth)
             parents.append(node.parent if node.parent is not None else -1)
         return {
-            'token_ids': torch.tensor(t_ids, dtype=torch.long, device='cpu'),
-            'cumulative_probabilities': torch.tensor(probs, dtype=self.prob_dtype, device='cpu'),
-            'depths': torch.tensor(depths, dtype=torch.long, device='cpu'),
-            'parent_indices': torch.tensor(parents, dtype=torch.long, device='cpu'),
+            "token_ids": torch.tensor(t_ids, dtype=torch.long, device="cpu"),
+            "cumulative_probabilities": torch.tensor(
+                probs, dtype=self.prob_dtype, device="cpu"
+            ),
+            "depths": torch.tensor(depths, dtype=torch.long, device="cpu"),
+            "parent_indices": torch.tensor(parents, dtype=torch.long, device="cpu"),
         }
-        
+
     def get_max_depth(self) -> torch.Tensor:
         return torch.tensor(
             max((node.depth for node in self.nodes), default=0),
             dtype=torch.long,
-            device='cpu'
+            device="cpu",
         )
-    
+
     def size(self) -> int:
         return self.current_size
 
-    def create_attention_mask(self, prefix_length: int = 0, device: str = 'cpu') -> torch.Tensor:
+    def create_attention_mask(
+        self, prefix_length: int = 0, device: str = "cpu"
+    ) -> torch.Tensor:
         n = self.current_size
         if n == 0:
-            return torch.empty((1, 1, 0, prefix_length), dtype=self.prob_dtype, device=device)
+            return torch.empty(
+                (1, 1, 0, prefix_length), dtype=self.prob_dtype, device=device
+            )
 
         # Mark ancestors (True = can attend)
-        ancestor_matrix = [[False]*n for _ in range(n)]
+        ancestor_matrix = [[False] * n for _ in range(n)]
         for i in range(n):
             ancestor_matrix[i][i] = True
             p = self.nodes[i].parent
@@ -206,24 +215,28 @@ class Tree:
         # neg_inf_mask = (~am_tensor).to(self.prob_dtype) * torch.finfo(self.prob_dtype).min
         # return neg_inf_mask.unsqueeze(0).unsqueeze(0)
         return am_tensor.unsqueeze(0).unsqueeze(0)
-    
-    def print_tree_structure(self, show_token_id: bool = True, show_probability: bool = True, tokenizer=None):
+
+    def print_tree_structure(
+        self, show_token_id: bool = True, show_probability: bool = True, tokenizer=None
+    ):
         if not (show_token_id or show_probability):
-            raise ValueError("At least one of 'show_token_id' or 'show_probability' must be True.")
+            raise ValueError(
+                "At least one of 'show_token_id' or 'show_probability' must be True."
+            )
 
         children_list = [[] for _ in range(self.current_size)]
         for i, node in enumerate(self.nodes):
             for c in node.children:
                 children_list[i].append(c)
-                
+
         def tokenize(c, tokenizer=None):
             if tokenizer:
                 return repr(tokenizer.decode([c]))
             return str(c)
 
-        def recurse(idx: int, prefix: str = ''):
+        def recurse(idx: int, prefix: str = ""):
             for i, c_idx in enumerate(children_list[idx]):
-                connector = '└── ' if i == len(children_list[idx]) - 1 else '├── '
+                connector = "└── " if i == len(children_list[idx]) - 1 else "├── "
                 child_node = self.nodes[c_idx]
                 info = []
                 if show_token_id:
@@ -231,7 +244,10 @@ class Tree:
                 if show_probability:
                     info.append(f"({child_node.cumulative_probability:.4f})")
                 print(prefix + connector + " ".join(info))
-                recurse(c_idx, prefix + ('    ' if i == len(children_list[idx]) - 1 else '│   '))
+                recurse(
+                    c_idx,
+                    prefix + ("    " if i == len(children_list[idx]) - 1 else "│   "),
+                )
 
         root = self.nodes[0]
         root_info = []

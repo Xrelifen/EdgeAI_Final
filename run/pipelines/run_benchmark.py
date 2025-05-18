@@ -45,9 +45,10 @@ BENCHMARK_EVALUATORS = {
 
 MAX_SAMPLES = 200
 
+
 def main(generator, tokenizer, past_kv, draft_past_kv, args, bench_name):
     args.log_dir = os.path.join(args.log_dir, bench_name)
-    
+
     # set logging level by environment variable
     LOGLEVEL = os.environ.get("LOGLEVEL", "INFO").upper()
     logging.basicConfig(level=LOGLEVEL)
@@ -57,36 +58,42 @@ def main(generator, tokenizer, past_kv, draft_past_kv, args, bench_name):
     # Fix random seed to 0 for reproducibility
     torch.manual_seed(0)
     random.seed(0)
-    
+
     if bench_name in DATASET_LOADER:
         dataset = DATASET_LOADER[bench_name]()
     else:
         print(f"Unknown benchmark: {bench_name}")
         print(f"Available benchmarks: {list(DATASET_LOADER.keys())}")
         return
-    
+
     random.shuffle(dataset)
     num_samples = min(len(dataset), MAX_SAMPLES)
     dataset = dataset[:num_samples]
     gc.collect()
-    
+
     # Handle output directories
     if args.out_dir is not None:
         os.system(f"rm -rf {args.out_dir}")
         print(f"Deleted old {args.out_dir}")
         os.makedirs(args.out_dir, exist_ok=True)
-        
+
     log_dir = os.path.join(args.log_dir, time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(log_dir, exist_ok=True)
     print(f"Output directory: {args.out_dir}")
     print(f"Log directory: {log_dir}")
-            
+
     # Evaluate
-    avg_tput, avg_accept_rate = BENCHMARK_EVALUATORS[bench_name](generator, tokenizer, past_kv, draft_past_kv, args, dataset, log_dir, repeat=3)
-    
+    avg_tput, avg_accept_rate = BENCHMARK_EVALUATORS[bench_name](
+        generator, tokenizer, past_kv, draft_past_kv, args, dataset, log_dir, repeat=3
+    )
+
     # Write results to file
-    with open(os.path.join(log_dir, "results.jsonl"), 'a+') as f:
-        json.dump({"average": {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4)
+    with open(os.path.join(log_dir, "results.jsonl"), "a+") as f:
+        json.dump(
+            {"average": {"tput": avg_tput, "accept_rate": avg_accept_rate}}, f, indent=4
+        )
         f.write("\n")
-    
-    logging.info(f'Peak Memory: {torch.cuda.max_memory_reserved("cuda:0")/(1024 ** 3)} GiB')
+
+    logging.info(
+        f'Peak Memory: {torch.cuda.max_memory_reserved("cuda:0")/(1024 ** 3)} GiB'
+    )

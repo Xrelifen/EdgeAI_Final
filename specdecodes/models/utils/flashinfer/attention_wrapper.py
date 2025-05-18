@@ -32,7 +32,11 @@ def find_padded_head_dim(head_dim):
 
 class FlashinferAttentionWrapper:
     def __init__(
-        self, num_attention_heads: int, num_key_value_heads: int, hidden_size: int, page_len:int,
+        self,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        hidden_size: int,
+        page_len: int,
     ):
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
@@ -46,74 +50,70 @@ class FlashinferAttentionWrapper:
             128 * 1024 * 1024, dtype=torch.int8, device=torch.cuda.current_device()
         )
         self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            float_workspace_buffer=_workspace_buffer, kv_layout="NHD",
+            float_workspace_buffer=_workspace_buffer,
+            kv_layout="NHD",
         )
         _use_tensor_cores = self.group_size in [7, 16]
         self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             float_workspace_buffer=_workspace_buffer,
             kv_layout="NHD",
             use_tensor_cores=_use_tensor_cores,
-            
         )
 
         self.tree_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             float_workspace_buffer=_workspace_buffer, kv_layout="NHD"
         )
-        
+
         # for cuda grapth
         batch_size = 1
-        
+
         self.qo_indptr_buf = torch.zeros(
             (batch_size + 1,),  # Typically 2 for batch=1
             dtype=torch.int32,
-            device=torch.cuda.current_device()
+            device=torch.cuda.current_device(),
         )
 
         self.paged_kv_indptr_buf = torch.zeros(
             (batch_size + 1,),  # Also 2
             dtype=torch.int32,
-            device=torch.cuda.current_device()
+            device=torch.cuda.current_device(),
         )
 
         self.paged_kv_indices_buf = torch.zeros(
-            1024,              # Example size; tune to your max seq length / heads
+            1024,  # Example size; tune to your max seq length / heads
             dtype=torch.int32,
-            device=torch.cuda.current_device()
+            device=torch.cuda.current_device(),
         )
 
         self.paged_kv_last_page_len_buf = torch.zeros(
-            (batch_size,),     # 1
-            dtype=torch.int32,
-            device=torch.cuda.current_device()
+            (batch_size,), dtype=torch.int32, device=torch.cuda.current_device()  # 1
         )
 
         # If you do not use custom masks, you can omit these;
         # otherwise, set them as large as the max needed for your custom mask.
         self.custom_mask_buf = torch.zeros(
-            5000,  # Must be >= packed_mask.numel() to avoid OOB.
+            10000,  # Must be >= packed_mask.numel() to avoid OOB.
             dtype=torch.uint8,
-            device=torch.cuda.current_device()
+            device=torch.cuda.current_device(),
         )
 
-        self.qk_indptr_buf = torch.zeros(
+        self.mask_indptr_buf = torch.zeros(
             (batch_size + 1,),  # Also 2
             dtype=torch.int32,
-            device=torch.cuda.current_device()
+            device=torch.cuda.current_device(),
         )
-        
-        
-        # self.tree_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        #     float_workspace_buffer=_workspace_buffer,
-        #     kv_layout="NHD",
-        #     use_cuda_graph=True,  # <-- The critical toggle
-        #     qo_indptr_buf=self.qo_indptr_buf,
-        #     paged_kv_indptr_buf=self.paged_kv_indptr_buf,
-        #     paged_kv_indices_buf=self.paged_kv_indices_buf,
-        #     paged_kv_last_page_len_buf=self.paged_kv_last_page_len_buf,
-        #     custom_mask_buf=self.custom_mask_buf,
-        #     qk_indptr_buf=self.qk_indptr_buf,
-        # )
-        # print(self.tree_wrapper)
+
+        self.tree_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            float_workspace_buffer=_workspace_buffer,
+            kv_layout="NHD",
+            use_cuda_graph=True,  # <-- The critical toggle
+            qo_indptr_buf=self.qo_indptr_buf,
+            paged_kv_indptr_buf=self.paged_kv_indptr_buf,
+            paged_kv_indices_buf=self.paged_kv_indices_buf,
+            paged_kv_last_page_len_buf=self.paged_kv_last_page_len_buf,
+            custom_mask_buf=self.custom_mask_buf,
+            mask_indptr_buf=self.mask_indptr_buf,
+        )
 
     def prepareAttention(
         self,
@@ -135,7 +135,8 @@ class FlashinferAttentionWrapper:
                 self.num_key_value_heads,
                 self._head_padded_dim,
                 page_len,
-                custom_mask = attention_mask,
+                custom_mask=attention_mask,
+                non_blocking=True,
                 # causal = False,
             )
 
@@ -162,34 +163,33 @@ class FlashinferAttentionWrapper:
                 pos_encoding_mode=pos_encoding_mode.value,
                 data_type=dtype,
             )
-        else :
+        else:
             raise ValueError("the mode for attention must be prefill, decode or tree")
 
-
     def endBatchAttention(self, mode: str):
-        
-        if mode == 'prefill':
+
+        if mode == "prefill":
             self.prefill_wrapper.end_forward()
-        elif mode == 'decode':
+        elif mode == "decode":
             self.decode_wrapper.end_forward()
-        elif mode == 'tree':
+        elif mode == "tree":
             self.tree_wrapper.end_forward()
         # print("end attention")
 
     def reshape_qkv_for_attention(self, q, k, v, batchPosition: KvCacheBatchPosition):
         return (
             q.view(
-                batchPosition.total_seq_len,
+                -1,
                 self.num_attention_heads,
                 self.head_dim,
             ),
             k.view(
-                batchPosition.total_seq_len,
+                -1,
                 self.num_key_value_heads,
                 self.head_dim,
             ),
             v.view(
-                batchPosition.total_seq_len,
+                -1,
                 self.num_key_value_heads,
                 self.head_dim,
             ),
@@ -204,24 +204,30 @@ class FlashinferAttentionWrapper:
         mode: str,
         batchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
-        layer_idx : int,
+        layer_idx: int,
     ):
 
         q, k, v = self._pad_qkv(q, k, v)
-        if mode == 'prefill':
-            attn_output =  self._batchPrefill(q, k, v, cacheData, batchPosition, rotaryParams)
-        elif mode == 'decode':
-            attn_output = self._batchDecode(q, k, v, cacheData, batchPosition, rotaryParams)
-        elif mode == 'tree':
-            attn_output = self._treeDecode(q, k, v, cacheData, batchPosition, rotaryParams)
+        if mode == "prefill":
+            attn_output = self._batchPrefill(
+                q, k, v, cacheData, batchPosition, rotaryParams
+            )
+        elif mode == "decode":
+            attn_output = self._batchDecode(
+                q, k, v, cacheData, batchPosition, rotaryParams
+            )
+        elif mode == "tree":
+            attn_output = self._treeDecode(
+                q, k, v, cacheData, batchPosition, rotaryParams
+            )
 
-        return self._unpad_attention(attn_output, batchPosition.total_seq_len)
+        return self._unpad_attention(attn_output)
 
-    def _unpad_attention(self, attn_output, seqLen):
+    def _unpad_attention(self, attn_output):
         if self._head_padded_dim > self.head_dim:
-            return attn_output[:, :, : self.head_dim].reshape(seqLen, self.hidden_size)
+            return attn_output[:, :, : self.head_dim].reshape(-1, self.hidden_size)
         else:
-            return attn_output.view(seqLen, self.hidden_size)
+            return attn_output.view(-1, self.hidden_size)
 
     def _pad_qkv(self, q, k, v):
         if self._head_padded_dim > self.head_dim:
@@ -229,6 +235,28 @@ class FlashinferAttentionWrapper:
             k = torch.nn.functional.pad(k, (0, self._head_padded_dim - self.head_dim))
             v = torch.nn.functional.pad(v, (0, self._head_padded_dim - self.head_dim))
         return q, k, v
+
+    # @torch._dynamo.disable
+    def append_kv_cache(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        batch_position,
+        paged_kv_cache: torch.Tensor,
+        page_len: int,
+    ):
+
+        flashinfer.append_paged_kv_cache(
+            append_key=k,
+            append_value=v,
+            batch_indices=batch_position.batch_indices,
+            paged_kv_cache=paged_kv_cache,
+            kv_indices=batch_position.kv_page_indices,
+            positions=batch_position.positions,
+            kv_indptr=batch_position.kv_page_indptr,
+            kv_last_page_len=batch_position.kv_last_page_len,
+        )
 
     def _batchPrefill(
         self,
@@ -240,42 +268,8 @@ class FlashinferAttentionWrapper:
         rotaryParams: AttentionRotaryParams,
     ):
 
-       
-        # seq_lens = prefillBatchPosition.seq_lens
-        # seq_lens2 = flashinfer.get_seq_lens(prefillBatchPosition.kv_page_indptr, prefillBatchPosition.kv_last_page_len, self.page_len)
-        # assert(seq_lens==seq_lens2)
-        # nnz_kv = prefillBatchPosition.total_seq_len
-        # nnz_kv2 = q.shape[0]
-        # assert(nnz_kv==nnz_kv2)
-        # kv_append_length = torch.tensor([nnz_kv], dtype=torch.int32, device="cuda:0")
-        # kv_append_indptr = torch.cat([torch.zeros(1).int().to(0), torch.cumsum(kv_append_length, dim=0)])
-        # batch_indices, positions = flashinfer.get_batch_indices_positions(
-        #     kv_append_indptr, seq_lens, nnz_kv
-        # )
-       
+        self.append_kv_cache(q, k, v, prefillBatchPosition, cacheData, self.page_len)
 
-        # flashinfer.append_paged_kv_cache(
-        #     append_key  = k,
-        #     append_value  = v,
-        #     # batch_indices  = prefillBatchPosition.seq_indptr,
-        #     batch_indices = batch_indices,
-        #     paged_kv_cache  = cacheData,
-        #     kv_indices  = prefillBatchPosition.kv_page_indices,
-        #     positions = positions,
-        #     kv_indptr = prefillBatchPosition.kv_page_indptr,
-        #     kv_last_page_len  = prefillBatchPosition.kv_last_page_len,
-        # )
-
-        flashinfer.append_paged_kv_cache(
-            k,
-            v,
-            prefillBatchPosition.seq_indptr,
-            cacheData,
-            prefillBatchPosition.kv_page_indices,
-            prefillBatchPosition.kv_page_indptr,
-            prefillBatchPosition.kv_last_page_len,
-        )
-        
         attn_output_prefill = self.prefill_wrapper.forward(
             q,
             cacheData,
@@ -287,9 +281,8 @@ class FlashinferAttentionWrapper:
             rope_theta=rotaryParams.rope_theta,
         )
 
-
         return attn_output_prefill
-    
+
     def _treeDecode(
         self,
         q: torch.Tensor,
@@ -299,17 +292,8 @@ class FlashinferAttentionWrapper:
         treeBatchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
     ):
+        self.append_kv_cache(q, k, v, treeBatchPosition, cacheData, self.page_len)
 
-        flashinfer.append_paged_kv_cache(
-            k,
-            v,
-            treeBatchPosition.seq_indptr,
-            cacheData,
-            treeBatchPosition.kv_page_indices,
-            treeBatchPosition.kv_page_indptr,
-            treeBatchPosition.kv_last_page_len,
-        )
-        
         #  prefill
         attn_output = self.tree_wrapper.forward(
             q,
@@ -331,38 +315,7 @@ class FlashinferAttentionWrapper:
         decodeBatchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
     ):
-        # seq_lens = decodeBatchPosition.seq_lens
-        # seq_lens2 = flashinfer.get_seq_lens(decodeBatchPosition.kv_page_indptr, decodeBatchPosition.kv_last_page_len, self.page_len)
-        # assert(seq_lens==seq_lens2)
-        # nnz_kv = decodeBatchPosition.total_seq_len
-        # nnz_kv2 = q.shape[0]
-        # assert(nnz_kv==nnz_kv2)
-        # kv_append_length = torch.tensor([nnz_kv], dtype=torch.int32, device="cuda:0")
-        # kv_append_indptr = torch.cat([torch.zeros(1).int().to(0), torch.cumsum(kv_append_length, dim=0)])
-        # batch_indices, positions = flashinfer.get_batch_indices_positions(
-        #     kv_append_indptr, seq_lens, nnz_kv
-        # )
-
-        # flashinfer.append_paged_kv_cache(
-        #     append_key  = k,
-        #     append_value  = v,
-        #     # batch_indices  = prefillBatchPosition.seq_indptr,
-        #     batch_indices = batch_indices,
-        #     paged_kv_cache  = cacheData,
-        #     kv_indices  = decodeBatchPosition.kv_page_indices,
-        #     positions = positions,
-        #     kv_indptr = decodeBatchPosition.kv_page_indptr,
-        #     kv_last_page_len  = decodeBatchPosition.kv_last_page_len,
-        # )
-        flashinfer.append_paged_kv_cache(
-            k,
-            v,
-            decodeBatchPosition.seq_indptr,
-            cacheData,
-            decodeBatchPosition.kv_page_indices,
-            decodeBatchPosition.kv_page_indptr,
-            decodeBatchPosition.kv_last_page_len,
-        )
+        self.append_kv_cache(q, k, v, decodeBatchPosition, cacheData, self.page_len)
 
         attn_output_decode = self.decode_wrapper.forward(
             q,

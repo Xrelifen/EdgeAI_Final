@@ -5,15 +5,15 @@ import nvtx
 from ..utils.cpu_tree import Tree
 from .base import DraftModelBase, TreeData, TreeMaskCache
 
-    
+
 class ClassicSDDraftModel(DraftModelBase):
     def forward(self, input_ids, with_softmax=False, *model_args, **kwargs):
         logits = self.model(input_ids, *model_args, **kwargs).logits
         if with_softmax:
-            logits = torch.softmax(logits/self.draft_params.temperature, dim=-1)
-            
+            logits = torch.softmax(logits / self.draft_params.temperature, dim=-1)
+
         return logits
-    
+
     @torch.no_grad()
     def speculate(self, input_ids, past_key_values, **kwargs):
         # 1) Obtain necessary parameters
@@ -23,7 +23,7 @@ class ClassicSDDraftModel(DraftModelBase):
         max_cache_len = getattr(past_key_values, "max_cache_len", None)
         kv_len = past_key_values.get_seq_length()
         assert batch_size == 1, "Only support batch_size=1 for now."
-        
+
         # 2) Create Tree used for target model inference later
         root_id = input_ids[0, -1]
         tree_data = TreeData(
@@ -33,7 +33,7 @@ class ClassicSDDraftModel(DraftModelBase):
             dtype=dtype,
             device=device,
         )
-        
+
         # 3) Initialize tree mask cache for draft model inference
         with nvtx.annotate("init tree mask cache"):
             tree_mask_cache = TreeMaskCache(
@@ -47,10 +47,17 @@ class ClassicSDDraftModel(DraftModelBase):
         # 4) Initialize parent probabilities & position ids & cache_position
         with nvtx.annotate("init parent_probs & position_ids & cache_position"):
             parent_probs = torch.ones((1, 1), device=device, dtype=dtype)
-            position_ids = torch.full((batch_size, self.draft_params.topk_len), org_input_len, device=device, dtype=torch.long)
-            cache_position = torch.arange(kv_len, org_input_len, dtype=torch.long, device=device)
+            position_ids = torch.full(
+                (batch_size, self.draft_params.topk_len),
+                org_input_len,
+                device=device,
+                dtype=torch.long,
+            )
+            cache_position = torch.arange(
+                kv_len, org_input_len, dtype=torch.long, device=device
+            )
 
-        # 5) First forward pass 
+        # 5) First forward pass
         with nvtx.annotate("ssm first forward", color="red"):
             sampled_probs = self.prefill_forward(
                 input_ids[:, kv_len:],
@@ -60,10 +67,15 @@ class ClassicSDDraftModel(DraftModelBase):
                 logits_to_keep=1,
             )
             kv_len = org_input_len
-            
+
         with nvtx.annotate("update cache"):
-            cache_position = torch.arange(org_input_len, org_input_len+self.draft_params.topk_len, dtype=torch.long, device=device)
-        
+            cache_position = torch.arange(
+                org_input_len,
+                org_input_len + self.draft_params.topk_len,
+                dtype=torch.long,
+                device=device,
+            )
+
         # 6) Main loop
         for depth_i in range(self.draft_params.max_depth):
             # --------------------------------------
@@ -71,24 +83,22 @@ class ClassicSDDraftModel(DraftModelBase):
             # --------------------------------------
             with nvtx.annotate("sample nodes", color="green"):
                 token_ids, child_probs, parent_indices = self.topk_sampling(
-                    sampled_probs,
-                    parent_probs,
-                    self.draft_params.topk_len
+                    sampled_probs, parent_probs, self.draft_params.topk_len
                 )
                 parent_probs = child_probs
-                
+
             # --------------------------------------
             # B. Add new nodes to the CPU tree
             # --------------------------------------
             with nvtx.annotate("add nodes", color="green"):
                 tree_data.update(token_ids, child_probs, parent_indices)
-                
+
             with nvtx.annotate("position"):
                 position_ids += 1
-                
+
             with nvtx.annotate("tree mask"):
                 tree_attention_mask = tree_mask_cache.update_tree_mask(parent_indices)
-            
+
             with nvtx.annotate("ssm forward", color="red"):
                 sampled_probs = self(
                     token_ids,
@@ -99,10 +109,10 @@ class ClassicSDDraftModel(DraftModelBase):
                     cache_position=cache_position,
                 )
                 kv_len += self.draft_params.topk_len
-                
+
             with nvtx.annotate("update cache"):
                 cache_position += self.draft_params.topk_len
-        
+
         # Discard new calcs in KV cache after original input length
         with nvtx.annotate("crop kv"):
             past_key_values.crop(org_input_len, kv_len, dim=2)
@@ -116,5 +126,5 @@ class ClassicSDDraftModel(DraftModelBase):
                 tree.add_nodes(*data)
             with nvtx.annotate("prune tree"):
                 tree.prune_to_top_n(self.draft_params.max_verify_tokens)
-        
+
         return tree

@@ -2,80 +2,8 @@ from typing import Set, List
 import math
 import torch
 import nvtx, os
+import flashinfer
 
-
-# PAGE_LEN: int = 64
-
-@torch.compile(mode="reduce-overhead")  # PyTorch 2.x: capture and optimize this function
-def reorder_and_copy_back(
-    cache_data: torch.Tensor,
-    beam_idx: torch.Tensor,
-    offset: int,
-    num_new_tokens: int,
-    page_len: int,
-):
-    """
-    This function:
-      1) Stacks all layers from `cache_data` into a single Tensor.
-      2) Computes old/new flat indices based on `beam_idx + offset`.
-      3) Reorders (K,V) in-place using `index_select` + `index_copy_`.
-      4) Un-stacks and copies back to the original Tensors in `cache_data`.
-         (Thus preserving their underlying storage addresses.)
-
-    cache_data: list of Tensors each of shape (max_pages, 2, page_len, num_heads, head_dim)
-    beam_idx: indices specifying the reordering.
-    offset, num_new_tokens: standard offset logic.
-    page_len: token capacity per page.
-    """
-
-    device = beam_idx.device
-    beam_idx = beam_idx.to(device)
-    beam_size = beam_idx.shape[0]
-
-    # -- Flatten offset-based indices --
-    old_indices = beam_idx + offset
-    new_indices = torch.arange(offset, offset + beam_size, device=device)
-
-    def to_flat_idx(idx: torch.Tensor):
-        page_idx = idx // page_len
-        token_idx = idx % page_len
-        return page_idx * page_len + token_idx
-
-    old_flat = to_flat_idx(old_indices)
-    new_flat = to_flat_idx(new_indices)
-
-    
-    cache_stacked = cache_data
-    L, max_pages, _, pl, num_heads, head_dim = cache_stacked.shape
-    
-    total_tokens = offset + num_new_tokens
-    total_pages = (total_tokens + page_len - 1) // page_len
-    if total_pages > max_pages:
-        raise ValueError(
-            f"Cache has only {max_pages} pages but needs {total_pages} for {total_tokens} tokens."
-        )
-
-    # -- Separate K / V and flatten along "page_len" dimension --
-    # k_cat, v_cat => (L, max_pages*page_len, num_heads, head_dim)
-    k_cat = cache_stacked[:, :, 0, :, :, :].reshape(L, max_pages * page_len, num_heads, head_dim)
-    v_cat = cache_stacked[:, :, 1, :, :, :].reshape(L, max_pages * page_len, num_heads, head_dim)
-
-    # -- Gather-then-scatter reorder --
-    k_gathered = k_cat.index_select(1, old_flat)
-    v_gathered = v_cat.index_select(1, old_flat)
-    k_cat.index_copy_(1, new_flat, k_gathered)
-    v_cat.index_copy_(1, new_flat, v_gathered)
-
-    # -- Un-flatten => (L, max_pages, page_len, num_heads, head_dim) --
-    k_cat = k_cat.view(L, max_pages, page_len, num_heads, head_dim)
-    v_cat = v_cat.view(L, max_pages, page_len, num_heads, head_dim)
-
-    # -- Copy back to preserve memory addresses --
-    # We'll do a simple Python loop. As of PyTorch 2.x, this can still be captured
-    # if L is consistent across calls. The loop is unrolled/flattened in the graph.
-    for i in range(L):
-        cache_data[i][:, 0, :, :, :].copy_(k_cat[i], non_blocking=True)
-        cache_data[i][:, 1, :, :, :].copy_(v_cat[i], non_blocking=True)
 
 class KvCacheBatchPosition:
     def __init__(
@@ -84,22 +12,25 @@ class KvCacheBatchPosition:
         kv_page_indptr: torch.Tensor,
         kv_page_indices: torch.Tensor,
         kv_last_page_len: torch.Tensor,
-        seq_lens: torch.Tensor,
-        total_seq_len: int,
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
     ):
-        self.total_seq_len = total_seq_len
-        self.seq_indptr = seq_indptr
-        self.kv_page_indptr = kv_page_indptr
+        # for append kv cache
+        self.batch_indices = batch_indices
         self.kv_page_indices = kv_page_indices
-        self.seq_lens = seq_lens
+        self.positions = positions
+        self.kv_page_indptr = kv_page_indptr
         self.kv_last_page_len = kv_last_page_len
-        
+        self.seq_indptr = seq_indptr  # for begin forward
+
     def print_info(self):
         print(f"  q_indptr:       {self.seq_indptr}")
         print(f"  kv_page_indptr:   {self.kv_page_indptr}")
         print(f"  kv_page_indices:  {self.kv_page_indices}")
         print(f"  kv_last_page_len: {self.kv_last_page_len}")
-        print(f"  seq_lens:         {self.seq_lens}")
+        print(f"  batch_indices:    {self.batch_indices}")
+        print(f"  positions:         {self.positions}")
+
 
 class KvCachePool:
     def __init__(
@@ -112,12 +43,18 @@ class KvCachePool:
         dtype: torch.dtype,
         device: torch.device,
     ):
-        # max_pages = 100
-        
-        self.cache_data =  torch.zeros(
-                num_layers, max_pages, 2, page_len, num_heads, head_dim, dtype=dtype, device=device
-            )
-            # for _ in range(num_layers)
+
+        self.cache_data = torch.zeros(
+            num_layers,
+            max_pages,
+            2,
+            page_len,
+            num_heads,
+            head_dim,
+            dtype=dtype,
+            device=device,
+        )
+
         self.num_layers = num_layers
         self.device = device
         self.max_pages = max_pages
@@ -126,20 +63,26 @@ class KvCachePool:
         self.num_heads = num_heads
         self.head_dims = head_dim
         self.dtype = dtype
-        
+
     def reset(self):
-        self.cache_data =  torch.zeros(
-                self.num_layers, self.max_pages, 2, self.page_len, self.num_heads, self.head_dims, dtype=self.dtype, device=self.device
-            )
+        self.cache_data.zero_()
 
     def count(self):
         total_nonzero = sum(tensor.count_nonzero().item() for tensor in self.cache_data)
-        print(f"Total number of changed values: {total_nonzero/2/self.num_heads/self.head_dims/32}")
+        print(
+            f"Total number of changed values: {total_nonzero/2/self.num_heads/self.head_dims/32}"
+        )
 
     def print_cache_sums(self):
-        key_cache_sum = sum([torch.sum(layer[:, 0, :, :, :]) for layer in self.cache_data])
-        value_cache_sum = sum([torch.sum(layer[:, 1, :, :, :]) for layer in self.cache_data])
-        print(f"Sum of key_cache: {key_cache_sum}, Sum of value_cache: {value_cache_sum}")
+        key_cache_sum = sum(
+            [torch.sum(layer[:, 0, :, :, :]) for layer in self.cache_data]
+        )
+        value_cache_sum = sum(
+            [torch.sum(layer[:, 1, :, :, :]) for layer in self.cache_data]
+        )
+        print(
+            f"Sum of key_cache: {key_cache_sum}, Sum of value_cache: {value_cache_sum}"
+        )
 
     def num_free_pages(self):
         return self.free_page_mask.sum()
@@ -156,9 +99,11 @@ class KvCachePool:
 
     def deallocate(self, kv_page_indices: List[int]):
         self.free_page_mask[kv_page_indices] = True
-    
-    
-    def reorder_cache_with_offset(self, beam_idx: torch.LongTensor, offset=0, num_new_tokens=0):
+
+    # @torch.compile(mode="reduce-overhead")
+    def reorder_cache_with_offset(
+        self, beam_idx: torch.LongTensor, offset=0, num_new_tokens=0
+    ):
         """
         Reorders the cache for speculative decoding, given the selected beam indices,
         while [:offset] remain unchanged. After reordering, sets the rest of the new tokens to zero.
@@ -172,11 +117,13 @@ class KvCachePool:
 
         # Convert old positions (beam_idx) to new positions:
         old_indices = beam_idx + offset  # [beam_size]
-        new_indices = torch.arange(offset, offset + beam_size, device=device, dtype=torch.long)  # [beam_size]
+        new_indices = torch.arange(
+            offset, offset + beam_size, device=device, dtype=torch.long
+        )  # [beam_size]
 
         # Flatten the "page + token" dimension into a single index
         page_len = self.page_len
-        
+
         def to_flat_idx(idx: torch.Tensor):
             """
             Given a tensor of positions in [0, total_tokens),
@@ -226,19 +173,15 @@ class KvCachePool:
         with nvtx.annotate("reorder", color="yellow"):
             # Reorder keys (K)
             k_cat.index_copy_(
-                1,                 # dimension = 1
-                new_flat,          # where to copy
-                k_cat.index_select(1, old_flat)  # what to copy
+                1,  # dimension = 1
+                new_flat,  # where to copy
+                k_cat.index_select(1, old_flat),  # what to copy
             )
             # Reorder values (V)
-            v_cat.index_copy_(
-                1,
-                new_flat,
-                v_cat.index_select(1, old_flat)
-            )
+            v_cat.index_copy_(1, new_flat, v_cat.index_select(1, old_flat))
 
         with nvtx.annotate("unflatten", color="green"):
-        # (L, max_pages * page_len, num_heads, head_dim) => (L, max_pages, page_len, num_heads, head_dim)
+            # (L, max_pages * page_len, num_heads, head_dim) => (L, max_pages, page_len, num_heads, head_dim)
             k_cat = k_cat.view(L, max_pages, page_len, num_heads, head_dim)
             v_cat = v_cat.view(L, max_pages, page_len, num_heads, head_dim)
 
@@ -248,9 +191,9 @@ class KvCachePool:
             # for layer_idx in range(L):
             #     self.cache_data[layer_idx][:, 0, :, :, :].copy_(k_cat[layer_idx], non_blocking=True)
             #     self.cache_data[layer_idx][:, 1, :, :, :].copy_(v_cat[layer_idx], non_blocking=True)
-            self.cache_data[:, :, 0, :, :, :].copy_(k_cat,non_blocking=True)
-            self.cache_data[:, :, 1, :, :, :].copy_(v_cat,non_blocking=True)
-            
+            self.cache_data[:, :, 0, :, :, :].copy_(k_cat, non_blocking=True)
+            self.cache_data[:, :, 1, :, :, :].copy_(v_cat, non_blocking=True)
+
     # def reorder_cache_with_offset(self, beam_idx: torch.LongTensor, offset=0, num_new_tokens=0):
     #     """
     #     Public method that just delegates to the compiled reorder function.
@@ -263,6 +206,7 @@ class KvCachePool:
     #             num_new_tokens=num_new_tokens,
     #             page_len=self.page_len,
     #         )
+
 
 class RequestKvCache:
     def __init__(self, kvCachePool: KvCachePool, page_len: int, seq_init_len: int):
@@ -281,33 +225,34 @@ class RequestKvCache:
             self.kv_last_page_len -= self.page_len
             new_indices = self.kvCachePool.allocate(1)
             self.kv_page_indices.extend(new_indices)
-            
-
 
     def release(self):
         self.kvCachePool.deallocate(self.kv_page_indices)
         self.is_released = True
-    
-    def reorder_cache_with_offset(self, beam_idx: torch.LongTensor, offset=0, num_new_tokens=0):
+
+    def reorder_cache_with_offset(
+        self, beam_idx: torch.LongTensor, offset=0, num_new_tokens=0
+    ):
         """
         Reorders the cache for beam search, given the selected beam indices, while [:offset] remain unchanged.
         beam_idx: LongTensor of shape (batch_size * num_beams,)
         """
         if offset != 0:
-            offset -=1
-            
-        self.kvCachePool.reorder_cache_with_offset(beam_idx,offset,num_new_tokens)
-       
-       
+            offset -= 1
+
+        self.kvCachePool.reorder_cache_with_offset(beam_idx, offset, num_new_tokens)
+
         # update  self.kv_last_page_len self.kv_page_indices self.kv_len
-        self.kv_len = offset + beam_idx.size(0) 
+        self.kv_len = offset + beam_idx.size(0)
 
         if self.kv_len == 0:
             self.kv_last_page_len = 0
         else:
             self.kv_last_page_len = (self.kv_len - 1) % self.page_len + 1
 
-        num_pages_needed = (self.kv_len + self.page_len - 1) // self.page_len  # Ceiling division
+        num_pages_needed = (
+            self.kv_len + self.page_len - 1
+        ) // self.page_len  # Ceiling division
         # Deallocate any extra pages that are no longer needed
         current_num_pages = len(self.kv_page_indices)
         if current_num_pages > num_pages_needed:
@@ -317,17 +262,23 @@ class RequestKvCache:
             self.kvCachePool.deallocate(extra_pages)
             # Update kv_page_indices to keep only the needed pages
             self.kv_page_indices = self.kv_page_indices[:num_pages_needed]
-            
+
         elif current_num_pages < num_pages_needed:
             # Should not happen in speculative decoding, but handle just in case
             # Allocate additional pages
             additional_pages_needed = num_pages_needed - current_num_pages
             new_indices = self.kvCachePool.allocate(additional_pages_needed)
             self.kv_page_indices.extend(new_indices)
-            raise ValueError("need to allocate new pages in reorder cache, should not happen")
-   
+            raise ValueError(
+                "need to allocate new pages in reorder cache, should not happen"
+            )
+
+
 def getKvCacheBatchPosition(
-    request_kv_caches: List[RequestKvCache], mode: str, device: torch.device, treeTokens :int = 0,
+    request_kv_caches: List[RequestKvCache],
+    mode: str,
+    device: torch.device,
+    treeTokens: int = 0,
 ) -> KvCacheBatchPosition:
     kv_page_indices_list = []
     kv_page_indptr_list = []
@@ -344,15 +295,15 @@ def getKvCacheBatchPosition(
         seq_lens_list.append(request_kv_cache.kv_len)
         cum_pages += len(request_kv_cache.kv_page_indices)
 
-        if mode == 'prefill':
+        if mode == "prefill":
             cum_seq_len += request_kv_cache.kv_len
-        elif mode == 'decode' :
+        elif mode == "decode":
             cum_seq_len += 1
-        elif mode == 'tree':
+        elif mode == "tree":
             cum_seq_len += treeTokens
-        else :
-            raise ValueError('invalid mode')
-        
+        else:
+            raise ValueError("invalid mode")
+
     kv_page_indptr_list.append(cum_pages)
     seq_indptr_list.append(cum_seq_len)
     kv_page_indices = torch.tensor(
@@ -368,28 +319,34 @@ def getKvCacheBatchPosition(
         dtype=torch.int32,
         device=device,
     )
+    kv_append_length = torch.tensor([cum_seq_len], dtype=torch.int32, device=device)
+    kv_append_indptr = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.cumsum(kv_append_length, dim=0),
+        ]
+    )
+
+    # 2) Compute batch_indices and positions for insertion into the KV cache.
+    batch_indices, positions = flashinfer.get_batch_indices_positions(
+        kv_append_indptr, seq_lens, cum_seq_len
+    )
+
     return KvCacheBatchPosition(
         seq_indptr=seq_indptr,
         kv_page_indptr=kv_page_indptr,
         kv_page_indices=kv_page_indices,
         kv_last_page_len=kv_last_page_len,
-        seq_lens=seq_lens,
-        total_seq_len=cum_seq_len,
+        batch_indices=batch_indices,
+        positions=positions,
     )
 
-# total_seq_len : numbers of canditate tokens 
+
+# total_seq_len : numbers of canditate tokens
 # seq_lens : kv lens
 
-# KvCacheBatchPosition(
-#             seq_indptr=seq_indptr,
-#             kv_page_indptr=kv_page_indptr,
-#             kv_page_indices=kv_page_indices,
-#             kv_last_page_len=kv_last_page_len,
-#             seq_lens=seq_lens,
-#             total_seq_len=cum_seq_len,
-#         )
 
-class FlashInferCache():
+class FlashInferCache:
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
 
@@ -397,40 +354,46 @@ class FlashInferCache():
     `[batch_size, num_heads, seq_len, head_dim]`.
     """
 
-    def __init__(self,config ,max_tokens:int = None,PAGE_LEN = 16) -> None:
-        
-        currentDevice = torch.device(f'cuda:{torch.cuda.current_device()}')
+    def __init__(self, config, max_tokens: int = None, PAGE_LEN=16) -> None:
+
+        currentDevice = torch.device(f"cuda:{torch.cuda.current_device()}")
         # PAGE_LEN: int = 64
         dtype_size = torch.tensor([], dtype=torch.float16).element_size()
         self.config = config
-        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
         MEMORY_FRACTION = float(os.getenv("CUDA_MEMORY_FRACTION", "1.0"))
-        
+
         cache_page_size = (
-                    2   * PAGE_LEN
-                        * config.num_hidden_layers
-                        * config.num_attention_heads
-                        * head_dim
-                        * dtype_size
+            2
+            * PAGE_LEN
+            * config.num_hidden_layers
+            * config.num_key_value_heads
+            * head_dim
+            * dtype_size
         )
 
         total_free_memory, _ = torch.cuda.mem_get_info(currentDevice)
         total_gpu_memory = torch.cuda.get_device_properties(currentDevice).total_memory
-        free_memory = max(0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory)    
+        free_memory = max(
+            0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
+        )
         num_pages_to_allocate = int(free_memory * 0.50 / cache_page_size)
-        
+
         if max_tokens is not None and num_pages_to_allocate * PAGE_LEN > max_tokens:
             num_pages_to_allocate = max_tokens // PAGE_LEN + 1
             print(f"Reducing cache size to {num_pages_to_allocate * PAGE_LEN} tokens")
-        
+
         self.kvCachePool = KvCachePool(
-                max_pages = num_pages_to_allocate,
-                num_layers = config.num_hidden_layers,
-                num_heads = config.num_attention_heads,
-                head_dim = head_dim,
-                page_len=PAGE_LEN,
-                dtype=torch.float16,
-                device=currentDevice,
+            max_pages=num_pages_to_allocate,
+            num_layers=config.num_hidden_layers,
+            num_heads=config.num_key_value_heads,
+            head_dim=head_dim,
+            page_len=PAGE_LEN,
+            dtype=torch.float16,
+            device=currentDevice,
         )
+
     def reset(self):
         self.kvCachePool.reset()

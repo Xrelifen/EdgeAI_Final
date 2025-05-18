@@ -40,7 +40,9 @@ class NaiveGeneratorBase(GeneratorBase):
         else:
             raise ValueError("past_key_values should be provided")
 
-        cache_position = torch.arange(org_input_len, dtype=torch.long, device=input_ids.device)
+        cache_position = torch.arange(
+            org_input_len, dtype=torch.long, device=input_ids.device
+        )
 
         # Prefill stage
         with nvtx.annotate("prefill", color="orange"):
@@ -54,7 +56,9 @@ class NaiveGeneratorBase(GeneratorBase):
             next_token_logits = outputs.logits
 
         with nvtx.annotate("sample tokens"):
-            next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
+            next_tokens = self._sample_token(
+                next_token_logits, logits_processor, do_sample
+            )
 
         with nvtx.annotate("update data"):
             input_ids = torch.cat([input_ids, next_tokens], dim=-1)
@@ -74,7 +78,9 @@ class NaiveGeneratorBase(GeneratorBase):
                     next_token_logits = outputs.logits
 
                 with nvtx.annotate("sample tokens"):
-                    next_tokens = self._sample_token(next_token_logits, logits_processor, do_sample)
+                    next_tokens = self._sample_token(
+                        next_token_logits, logits_processor, do_sample
+                    )
 
                 with nvtx.annotate("update data"):
                     input_ids = torch.cat([input_ids, next_tokens], dim=-1)
@@ -84,6 +90,7 @@ class NaiveGeneratorBase(GeneratorBase):
                     finished = stopping_criteria(input_ids, None)
 
         return input_ids
+
 
 class NaiveGenerator(ProfilingMixin, NaiveGeneratorBase):
     pass
