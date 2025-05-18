@@ -4,18 +4,46 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 import logging
 import nvtx
 
-from .classic_sd import ClassicSDGeneratorBase
+from .base import GeneratorBase
 from ..utils.mixin import SDProfilingMixin
 from ..utils.utils import DraftParams, invert_mask
 
 
-class EagleSDGeneratorBase(ClassicSDGeneratorBase):
-    def _speculate(self, input_ids, hidden_states, past_key_values):
+class ClassicSDGeneratorBase(GeneratorBase):
+    def _speculate(self, input_ids, past_key_values):
         return self.draft_model.speculate(
             input_ids,
-            hidden_states=hidden_states,
             past_key_values=past_key_values,
         )
+
+    def _init_tree_mask(self, max_verify_tokens, max_cache_len=None, device="cpu"):
+        if not hasattr(self, "tree_mask_update_method"):
+            self.tree_mask_update_method = (
+                "static" if max_cache_len is not None else "dynamic"
+            )
+            logging.debug(
+                f"'max_cache_len' is {'set, uses static' if max_cache_len else 'not set, uses dynamic'} tree_mask."
+            )
+
+        self.tree_mask = (
+            torch.zeros(
+                (1, 1, max_verify_tokens, max_cache_len),
+                device=device,
+                dtype=torch.bool,
+            )
+            if max_cache_len is not None
+            else None
+        )
+
+        return self.tree_mask
+
+    def _update_tree_mask(self, tree_mask_partial):
+        if self.tree_mask_update_method == "static":
+            self.tree_mask[:, :, :, : tree_mask_partial.shape[3]] = tree_mask_partial
+        else:
+            self.tree_mask = tree_mask_partial
+
+        return self.tree_mask
 
     def _tree_decoding(
         self, tree, past_key_values, position_offset, cache_position, device
@@ -47,7 +75,6 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                 past_key_values=past_key_values,
                 attention_mask=tree_mask,
                 position_ids=tree_position_ids.unsqueeze(0),
-                output_hidden_states=True,
                 cache_position=cache_position,
             )
         return outputs
@@ -61,6 +88,76 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
         p.div_(denom) if denom >= 1e-9 else p.zero_()  # numerical stability
         p[token_ids].zero_()
         return None, p
+
+    def _verify(self, tree, logits, logits_processor, do_sample):
+        def sample_token_method(logits, return_probs=False):
+            return self._sample_token(
+                logits, logits_processor, do_sample=do_sample, return_probs=return_probs
+            )
+
+        # Obtain LLM sample logits
+        global_p = (
+            sample_token_method(logits, return_probs=True).squeeze(0).to(device="cpu")
+        )  # remove batch dim
+
+        # Initialize variables
+        sampled_tokens = torch.tensor([], dtype=torch.long, device="cpu")
+        hidden_indices = torch.tensor([], dtype=torch.long, device="cpu")
+        total_len = 0
+        accept_len = 0
+
+        # Iterate through draft tree, verify each node
+        node_data = tree.get_node_data()
+        token_ids = node_data["token_ids"]
+        token_probs = node_data["cumulative_probabilities"]
+
+        cur_ind = torch.tensor([0], dtype=torch.long, device="cpu")
+        children_inds = tree.get_children_indices(cur_ind)
+        children_token_ids = token_ids[children_inds]
+
+        torch.cuda.synchronize()  # synchronize before starting the loop
+        while children_inds.size(0) > 0:
+            total_len += 1
+            # TODO: Remove unnecessary squeeze(0) and unsqueeze(0) operations
+            accept_token_id, new_p = self._verify_step(
+                global_p[cur_ind].squeeze(0),
+                token_probs[cur_ind].squeeze(0),
+                children_token_ids,
+                do_sample,
+            )
+
+            # Accept token if it is in the children
+            if accept_token_id is not None:
+                accept_len += 1
+                sampled_tokens = torch.cat([sampled_tokens, accept_token_id[None]])
+                hidden_indices = torch.cat([hidden_indices, cur_ind])
+                if accept_token_id == self.draft_model.eos_token_id:
+                    break
+
+                cur_ind = children_inds[children_token_ids == accept_token_id]
+                children_inds = tree.get_children_indices(cur_ind)
+                children_token_ids = token_ids[children_inds]
+
+            # Reject token, update global_p and break
+            else:
+                global_p[cur_ind] = new_p
+                break
+
+        # Generate bonus token, don't generate if eos token is the last token
+        if (
+            sampled_tokens.size(0) == 0
+            or sampled_tokens[-1] != self.draft_model.eos_token_id
+        ):
+            # TODO: Remove unnecessary shape modification operations
+            if not do_sample:
+                bonus_token = global_p[cur_ind].argmax()[None]
+            else:
+                bonus_token = global_p[cur_ind].multinomial(num_samples=1).squeeze(-1)
+
+            sampled_tokens = torch.cat([sampled_tokens, bonus_token])
+            hidden_indices = torch.cat([hidden_indices, cur_ind])
+
+        return sampled_tokens[None], hidden_indices, (total_len, accept_len)
 
     def _generate(
         self,
@@ -84,7 +181,7 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
             1. Perform SSM speculative sampling, returns sampled tokens in tree form.
             2. Decode the sampled tokens in parallel with the language model (LLM), generating probabilities for each token.
             3. Verify the sampled tokens by accepting or rejecting them, corresponding to the probabilities.
-            4. Update the key-value cache, input_ids, and hidden_states accordingly.
+            4. Update the key-value cache and input_ids accordingly.
 
         Args:
             input_ids (torch.LongTensor): The input token IDs.
@@ -137,12 +234,10 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
             outputs = self.target_model.prefill_forward(
                 input_ids,
                 past_key_values=past_key_values,
-                output_hidden_states=True,
                 cache_position=cache_position,
                 logits_to_keep=1,
             )
             next_token_logits = outputs.logits
-            hidden_states = outputs.hidden_states[-1]
             del outputs
 
         with nvtx.annotate("sample tokens"):
@@ -164,9 +259,7 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
             while not finished:
                 # * speculate
                 with nvtx.annotate("speculate", color="cyan"):
-                    tree = self._speculate(
-                        input_ids, hidden_states, draft_past_key_values
-                    )
+                    tree = self._speculate(input_ids, draft_past_key_values)
 
                 # * tree decoding
                 with nvtx.annotate("tree_decoding", color="orange"):
@@ -176,10 +269,9 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                         past_key_values,
                         position_offset=input_ids.shape[1] - 1,
                         cache_position=cache_position,
-                        device=hidden_states.device,
+                        device=input_ids.device,
                     )
                     next_token_logits = outputs.logits
-                    hidden_states = outputs.hidden_states[-1]
                     del outputs
 
                 # * verify
@@ -193,9 +285,6 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                     sampled_tokens = sampled_tokens.to(
                         input_ids.device, non_blocking=True
                     )
-                    hidden_indices = hidden_indices.to(
-                        hidden_states.device, non_blocking=True
-                    )
 
                 with nvtx.annotate("reorder kv"):
                     past_key_values.reorder_cache_with_offset(
@@ -205,10 +294,9 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
                         dim=2,
                     )
 
-                # * update input_ids, hidden_states, and cache_position
+                # * update input_ids and cache_position
                 with nvtx.annotate("update data"):
                     input_ids = torch.cat([input_ids, sampled_tokens], dim=-1)
-                    hidden_states = hidden_states[:, hidden_indices].clone()
                     cache_position += sampled_tokens.shape[1]
 
                 # * check stopping criteria
@@ -218,8 +306,5 @@ class EagleSDGeneratorBase(ClassicSDGeneratorBase):
         return input_ids
 
 
-class EagleSDGenerator(SDProfilingMixin, EagleSDGeneratorBase):
-    def forward(self, *args, **kwargs):
-        return self.target_model(*args, **kwargs)
-
+class ClassicSDGenerator(SDProfilingMixin, ClassicSDGeneratorBase):
     pass
