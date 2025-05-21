@@ -40,3 +40,9 @@ CUDA_VISIBLE_DEVICES=0 python result.py
       - speedup: 1.77x
 
 ## Performance
+Eagle SD + FlashInfer
+- On RTX 2080 Ti
+  - max-new-tokens: 256
+    - Throughput: 69.006 toks/s
+  - max-new-tokens: 1024
+    - Throughput: 187.82 toks/s

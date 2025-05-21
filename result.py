@@ -11,6 +11,7 @@ import random
 import numpy as np
 from run.eagle_sd import EagleSDBuilder
 from run.flashinfer import FlashinferBuilder
+from run.eagle_sd_fi import EagleSDFIBuilder
 from run.naive import NaiveBuilder
 from hqq_lora.utils import get_quantized_model, apply_lora, prepare_model
 
@@ -101,10 +102,11 @@ def main():
     device = "cuda:0"
 
     ### === TODO: Load your model (you may change this part) ===
-    builder = FlashinferBuilder()
+    builder = EagleSDFIBuilder()
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
+    print(model)
     tokenizer.use_default_system_prompt = True
-    
+
     # apply HQQ and LoRA
     # get_quantized_model(model=model.target_model, device=device)
     # prepare_model(model.target_model, device=device)
