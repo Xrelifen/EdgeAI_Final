@@ -16,7 +16,10 @@ from ..utils.flashinfer.cache_manager import (
     getKvCacheBatchPosition,
     FlashInferCache,
 )
+from ..utils.flashinfer.monkey_patch import _bind_method_to_module
 from ..utils.flashinfer.attention_wrapper import FlashinferAttentionWrapper
+from ..utils.flashinfer.attention_wrapper import FlashinferAttentionWrapper
+from ..utils.flashinfer.attention import OriginalLlamaAttention
 
 
 class POS_ENCODING_MODE(Enum):
@@ -309,4 +312,18 @@ class EagleSDFIGeneratorBase(ClassicSDGeneratorBase):
 
 
 class EagleSDFIGenerator(SDProfilingMixin, EagleSDFIGeneratorBase):
-    pass
+    def forward(self, *args, **kwargs):
+
+        from transformers.models.llama import modeling_llama
+        from transformers.models.llama.modeling_llama import LlamaModel
+
+        modeling_llama.LlamaAttention = OriginalLlamaAttention
+        base_model: LlamaModel = getattr(
+            self.target_model, self.target_model.base_model_prefix, self.target_model
+        )
+        for decoder_layer in base_model.layers:
+            _bind_method_to_module(
+                decoder_layer.self_attn, "forward", OriginalLlamaAttention.forward
+            )
+
+        return self.target_model(*args, **kwargs)
