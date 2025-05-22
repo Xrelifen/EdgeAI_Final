@@ -8,7 +8,7 @@ def get_quantized_model(model, device):
     quant_config = BaseQuantizeConfig(nbits=4, group_size=64)
     AutoHQQHFModel.quantize_model(model, quant_config=quant_config, compute_dtype=torch.float16, device=device)
 
-def apply_lora(model, lora_model_path="./results_lora/v0/checkpoint-19644/", device='cuda'):
+def apply_lora(model, lora_model_path="./results_lora_1B/", device='cuda'):
     model.load_adapter(lora_model_path)
 
 def prepare_model(model, device):

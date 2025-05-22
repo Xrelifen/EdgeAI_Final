@@ -4,7 +4,7 @@ from hqq.core.quantize import *
 from hqq.core.peft import PeftUtils
 from datasets import load_dataset, Dataset
 from trl import SFTTrainer, SFTConfig
-from hqq_main import get_quantized_model
+from utils import get_quantized_model
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 
 def train_lora(model, tokenizer, device='cuda'):
@@ -25,7 +25,7 @@ def train_lora(model, tokenizer, device='cuda'):
     # HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
     
     config = LoraConfig(
-        r=32,
+        r=16,
         lora_alpha=32,
         lora_dropout=0.05,
         bias="none",
@@ -50,7 +50,7 @@ def train_lora(model, tokenizer, device='cuda'):
         args=SFTConfig(
             max_seq_length=256,
             packing=True,
-            output_dir=f"./results_lora/v0",
+            output_dir=f"./results_lora_1B",
             num_train_epochs=2,
             per_device_train_batch_size=1,
             gradient_accumulation_steps=1,
@@ -80,15 +80,15 @@ def train_lora(model, tokenizer, device='cuda'):
 if __name__ == "__main__":
     device = 'cuda'
 
-    model_name = "meta-llama/Llama-3.2-3B-Instruct"
+    model_name = "meta-llama/Llama-3.2-1B-Instruct"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         device_map=device,
     )
-    get_quantized_model(model=model, device=device)
+    # get_quantized_model(model=model, device=device)
     
-    model = prepare_model_for_kbit_training(model)
+    # model = prepare_model_for_kbit_training(model)
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, device_map=device)
     
