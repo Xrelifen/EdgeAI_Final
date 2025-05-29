@@ -21,8 +21,8 @@ class EagleSDFIBuilder(GeneratorPipelineBuilder):
         self.dtype = torch.float16
 
         # Model paths.
-        self.llm_path = "meta-llama/Llama-3.2-3B-Instruct"
-        self.draft_model_path = "JKroller/llama3.2-3b-eagle"
+        self.llm_path = "JKroller/llama3.2-3b-distill-to-1b"
+        self.draft_model_path = "JKroller/llama3.2-1b-eagle"
 
         # Generation parameters.
         self.do_sample = False
@@ -32,9 +32,9 @@ class EagleSDFIBuilder(GeneratorPipelineBuilder):
         self.generator_class = EagleSDFIGenerator
         self.draft_params = DraftParams(
             temperature=1,
-            max_depth=2,
-            topk_len=10,
-            max_verify_tokens=256,
+            max_depth=3,
+            topk_len=20,
+            max_verify_tokens=64,
         )
 
         # Recipe for quantization and offloading.

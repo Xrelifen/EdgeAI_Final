@@ -10,10 +10,10 @@ from datasets import load_dataset
 import random
 import numpy as np
 from run.eagle_sd import EagleSDBuilder
-from run.flashinfer import FlashinferBuilder
-from run.eagle_sd_fi import EagleSDFIBuilder
-from run.naive import NaiveBuilder
-from hqq_lora.utils import get_quantized_model, apply_lora, prepare_model
+#from run.flashinfer import FlashinferBuilder
+#from run.eagle_sd_fi import EagleSDFIBuilder
+#from run.naive import NaiveBuilder
+#from hqq_lora.utils import get_quantized_model, apply_lora, prepare_model
 
 #####################################################################
 # === SPEC NOTICE ===
@@ -102,9 +102,8 @@ def main():
     device = "cuda:0"
 
     ### === TODO: Load your model (you may change this part) ===
-    builder = EagleSDFIBuilder()
+    builder = EagleSDBuilder()
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
-    print(model)
     tokenizer.use_default_system_prompt = True
 
     # apply HQQ and LoRA
@@ -116,9 +115,12 @@ def main():
     model.eval()
 
     warmup_prompt = "Explain what AI is."
-    inputs = tokenizer(warmup_prompt, return_tensors="pt").to(device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    messages = [{"role": "user", "content": warmup_prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    ).to(device)
+    input_ids = inputs
+    attention_mask = torch.ones_like(inputs)
     # === (Optional) Set up StaticCache for manual KV cache management ===
     # from transformers import StaticCache
     # past_key_values = StaticCache(
@@ -149,9 +151,12 @@ def main():
         # past_key_values.reset()
 
     prompt = "How to learn a new language?"
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    messages = [{"role": "user", "content": prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    ).to(device)
+    input_ids = inputs
+    attention_mask = torch.ones_like(inputs)
     tputs = []
     time_record = []
     for _ in tqdm(range(10), desc="Test Inference"):

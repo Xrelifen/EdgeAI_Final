@@ -1,7 +1,3 @@
-# A6000
-# Throughput: 50.00983334067295 toks/s
-# PPL: 11.04
-
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -97,12 +93,12 @@ def main():
     device = "cuda:0"
 
     ### === TODO: Load your model (you may change this part) ===
-    model_name = "meta-llama/Llama-3.2-3B-Instruct"
+    model_name = "/home/JaaaaaA_l/checkpoints/llama3.2-3b-distill-to-1b"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         device_map=device,
-    )
+        )
     #####################################
 
     model.eval()
@@ -112,9 +108,12 @@ def main():
     # model.prefill_forward = model.forward
 
     warmup_prompt = "Explain what AI is."
-    inputs = tokenizer(warmup_prompt, return_tensors="pt").to(device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    messages = [{"role": "user", "content": warmup_prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    ).to(device)
+    input_ids = inputs
+    attention_mask = torch.ones_like(inputs)
 
     # === (Optional) Set up StaticCache for manual KV cache management ===
     # from transformers import StaticCache
@@ -141,9 +140,12 @@ def main():
         # past_key_values.reset()
 
     prompt = "How to learn a new language?"
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    messages = [{"role": "user", "content": prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    ).to(device)
+    input_ids = inputs
+    attention_mask = torch.ones_like(inputs)
     tputs = []
     time_record = []
     for _ in tqdm(range(10), desc="Test Inference"):
@@ -167,10 +169,11 @@ def main():
         end.record()
         torch.cuda.synchronize()
         elapsed_ms = start.elapsed_time(end)
-        tput = max_new_tokens / (elapsed_ms / 1000)
+        tput = generated[0][input_ids.shape[1]:].shape[0]/(elapsed_ms / 1000)
         time_record.append(elapsed_ms / 1000)
         tputs.append(tput)
 
+    
     response = tokenizer.decode(
         generated[0][input_ids.shape[1] :], skip_special_tokens=True
     )

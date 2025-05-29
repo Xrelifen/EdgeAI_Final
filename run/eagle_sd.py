@@ -16,8 +16,8 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         self.dtype = torch.float16
 
         # Model paths.
-        self.llm_path = "meta-llama/Llama-3.2-3B-Instruct"
-        self.draft_model_path = "JKroller/llama3.2-3b-eagle"
+        self.llm_path = "JKroller/llama3.2-3b-distill-to-1b"
+        self.draft_model_path = "JKroller/llama3.2-1b-eagle"
 
         # Generation parameters.
         self.do_sample = False
@@ -27,9 +27,9 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         self.generator_class = EagleSDGenerator
         self.draft_params = DraftParams(
             temperature=1,
-            max_depth=6,
-            topk_len=10,
-            max_verify_tokens=1024,
+            max_depth=3,
+            topk_len=20,
+            max_verify_tokens=64,
         )
 
         # Recipe for quantization and offloading.
@@ -38,11 +38,11 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
 
         # Additional configurations.
         self.cache_implementation = "static"
-        self.warmup_iter = 5
-        # self.compile_mode = "max-autotune"
+        self.warmup_iter = 0
+        #self.compile_mode = "max-autotune"
 
         # Profiling.
-        # self.generator_profiling = True
+        #self.generator_profiling = True
 
     def load_draft_model(self, target_model, tokenizer, draft_model_path):
         draft_model = EagleSDDraftModel.from_pretrained(
