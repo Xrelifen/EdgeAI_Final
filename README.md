@@ -48,3 +48,8 @@ pip install accelerate
 pip install torchao>=0.9.0
 
 ```
+
+## 🚀 Runs
+```bash
+python sgl.py
+```
