@@ -14,6 +14,8 @@ filelock==3.18.0
 frozenlist==1.6.0
 fsspec==2025.3.0
 gemlite==0.4.4
+# use 0.4.6 ?
+# gemlite==0.4.6
 huggingface-hub==0.31.2
 hqq==0.2.6
 idna==3.10
@@ -81,6 +83,6 @@ wheel==0.45.1
 xxhash==3.5.0
 yarl==1.20.0
 
---extra-index-url https://flashinfer.ai/whl/cu124/torch2.6/
+--extra-index-url https://flashinfer.ai/whl/cu126/torch2.6/
 flashinfer-python
 

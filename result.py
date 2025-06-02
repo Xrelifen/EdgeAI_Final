@@ -1,7 +1,13 @@
 # A6000
 # Throughput: 50.00983334067295 toks/s
 # PPL: 11.04
-
+# 4090
+# 1b + SD
+# Throughput: 171.14799480447883 toks/s
+# PPL: 11.195
+# 1b + SD + torch compile
+# Throughput: 194.41757804308327 toks/s
+# Perplexity (PPL): 11.195
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -9,9 +15,9 @@ from tqdm.auto import tqdm
 from datasets import load_dataset
 import random
 import numpy as np
-from run.eagle_sd import EagleSDBuilder
+# from run.eagle_sd import EagleSDBuilder
 #from run.flashinfer import FlashinferBuilder
-#from run.eagle_sd_fi import EagleSDFIBuilder
+from run.eagle_sd_fi import EagleSDFIBuilder
 #from run.naive import NaiveBuilder
 #from hqq_lora.utils import get_quantized_model, apply_lora, prepare_model
 
@@ -102,7 +108,8 @@ def main():
     device = "cuda:0"
 
     ### === TODO: Load your model (you may change this part) ===
-    builder = EagleSDBuilder()
+    # builder = EagleSDBuilder()
+    builder = EagleSDFIBuilder()
     model, tokenizer, past_kv, draft_past_kv = builder.build_generator()
     tokenizer.use_default_system_prompt = True
 
