@@ -39,7 +39,7 @@ class EagleSDBuilder(GeneratorPipelineBuilder):
         # Additional configurations.
         self.cache_implementation = "static"
         self.warmup_iter = 0
-        #self.compile_mode = "max-autotune"
+        self.compile_mode = "max-autotune"
 
         # Profiling.
         #self.generator_profiling = True
