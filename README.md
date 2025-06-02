@@ -1,6 +1,6 @@
 # 💻 Environment Setup for `sglang`
 
-This guide outlines the steps to set up the environment for using [`sglang`](https://github.com/ThunderLLM/sglang) with all necessary dependencies, including CUDA 12.2 support.  
+This guide outlines the steps to set up the environment for using [`sglang`](https://github.com/sgl-project/sglang) with all necessary dependencies, including CUDA 12.2 support.  
 **Note:** This setup is tested on an environment using an **NVIDIA T4 GPU**.
 
 ---
