@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, TorchAoConfig
+from torchao.quantization import Int8DynamicActivationInt8WeightConfig, Int8WeightOnlyConfig
 from tqdm.auto import tqdm
 from datasets import load_dataset
 import random
@@ -16,28 +17,27 @@ import sglang as sgl
 #####################################################################
 def evaluate_ppl(model, tokenizer, device="cuda:0"):
     test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-
     test_enc = tokenizer("\n\n".join(test_dataset["text"]), return_tensors="pt")
     model.seqlen = 2048
-    test_enc = test_enc.input_ids.to(device)
+    input_ids = test_enc.input_ids.to(device)
 
-    nsamples = test_enc.numel() // model.seqlen
+    nsamples = input_ids.numel() // model.seqlen
     nlls = []
-    for i in tqdm(range(nsamples), desc="Evaluating…"):
-        batch = test_enc[:, (i * model.seqlen):((i + 1) * model.seqlen)]
 
+    for i in tqdm(range(nsamples), desc="Evaluating PPL…"):
+        batch = input_ids[:, (i * model.seqlen):((i + 1) * model.seqlen)]
         with torch.no_grad():
-            lm_logits = model(batch).logits
+            outputs = model(batch)
+            lm_logits = outputs.logits
 
         shift_logits = lm_logits[:, :-1, :].contiguous().float()
         shift_labels = batch[:, 1:]
-
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(
             shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.reshape(-1)
+            shift_labels.view(-1)
         )
-        neg_log_likelihood = loss.float() * model.seqlen
+        neg_log_likelihood = loss * model.seqlen
         nlls.append(neg_log_likelihood)
 
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
@@ -67,9 +67,6 @@ def main():
         page_size = 32,
         disable_cuda_graph_padding = True,
         mem_fraction_static  = 0.8,
-        show_time_cost       = True,
-        enable_metrics       = True,
-        log_level            = "info"
     )
     sampling_params =  {
             "max_new_tokens": 256,
@@ -101,7 +98,6 @@ def main():
     #     dtype=torch.float16
     # )
     ####################################################################
-    
     for i in tqdm(range(5), desc="Warm Up..."):
         #  === Default: use model.generate() for end-to-end warm-up === 
         # _ = model.generate(
@@ -174,7 +170,6 @@ def main():
     # ### Your final throughput result ###
     print(f'Throughput: {org_tput} toks/s')
     
-    
     if hasattr(model, "shutdown"):
         model.shutdown()          
     elif hasattr(model, "close"):
@@ -185,14 +180,18 @@ def main():
     torch.cuda.empty_cache()
 
 
-    ppl_model_name = "JKroller/llama3.2-3b-distill-to-1b-int8"
+    ppl_model_name = "JKroller/llama3.2-3b-distill-to-1b"
     ppl_tokenizer = AutoTokenizer.from_pretrained(ppl_model_name)
+    quantization_config = TorchAoConfig("int8_dynamic_activation_int8_weight")
     ppl_model = AutoModelForCausalLM.from_pretrained(
-        ppl_model_name,
-        torch_dtype=torch.float16,
-        device_map=device,
+        model_name,
+        quantization_config=quantization_config,    
+        torch_dtype="auto",
+        device_map="auto",               
+        trust_remote_code=True           
     )
-    ppl_model.eval()
+    if hasattr(ppl_model, "eval"):
+        ppl_model.eval()
 
     ppl = evaluate_ppl(ppl_model, ppl_tokenizer, device)
     print(f"Perplexity (PPL): {ppl:.2f}")
