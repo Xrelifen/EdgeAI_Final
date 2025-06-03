@@ -53,3 +53,32 @@ pip install torchao>=0.9.0
 ```bash
 python sgl.py
 ```
+
+## Result
+- Baseline
+  - Throughput: 29.8
+  - PPL: 11.04
+- LoRA Llama3.2 3B
+  - Throughput: 30.3
+  - PPL: 9.03
+- LoRA Llama3.2 3B distil Llama3.2 1B model
+  - Throughput: 54.3
+  - PPL: 11.20
+- LoRA Llama3.2 3B distil Llama3.2 1B model + int8 Quant (HQQ)
+  - Throughput: 52.1
+  - PPL: 11.20
+- SGLang + LoRA Llama3.2 3B
+  - Throughput: 35.9
+  - PPL: 9.03
+- SGLang + LoRA Llama3.2 3B distil Llama3.2 1B model
+  - Throughput: 90.9
+  - PPL: 11.20
+- SGLang + LoRA 1B model + int8 Quant (torchao)
+  - Throughput: 112.8
+  - PPL: 11.33
+
+
+
+
+
+
