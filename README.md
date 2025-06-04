@@ -74,7 +74,7 @@ python sgl.py
   - Throughput: 90.9
   - PPL: 11.20
 - SGLang + LoRA 1B model + int8 Quant (torchao)
-  - Throughput: 112.8
+  - Throughput: 115.0
   - PPL: 11.33
 
 
