@@ -60,17 +60,17 @@ def main(args):
 
     # model_name = "../dist/models/Llama-3.2-3B-Instruct"
     # model_name = "meta-llama/Llama-3.1-8B-Instruct"
-    model_name = "JKroller/llama3.2-3b-distill-to-1b"
+    model_name = args.model_name
     # model_name = "AMead10/Llama-3.2-3B-Instruct-AWQ"
     # model = pipeline(model_name, device=device)
 
     model = sgl.Engine(
         model_path=model_name,
-        torchao_config="int8dq",
+        torchao_config=args.quant_config,
         kv_cache_dtype="auto",
         attention_backend="flashinfer",
         sampling_backend="pytorch",
-        enable_torch_compile=False,
+        enable_torch_compile=True,
         mem_fraction_static=0.8,
     )
     sampling_params = {
@@ -202,6 +202,10 @@ def main(args):
         ppl_model.eval()
 
     ppl = evaluate_ppl(ppl_model, ppl_tokenizer, device)
+    with open("log.txt", "a") as f:
+        f.write(f"Throughput: {org_tput} toks/s\n")
+        f.write(f"Perplexity (PPL): {ppl:.2f}\n")
+        
     print(f"Perplexity (PPL): {ppl:.2f}")
 
     import csv
@@ -215,8 +219,13 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name or path")
-    parser.add_argument("--quant_config", type=str, default="int8wo", help="Quantization configuration")
-    parser.add_argument("--mem_fraction_static", type=float, default=0.8, help="Memory fraction for static cache")
+    parser.add_argument("--model_name", type=str, default="JKroller/llama3.2-3b-distill-to-1b", help="Model name or path")
+    parser.add_argument("--quant_config", type=str, default=None, help="Quantization configuration")
     args = parser.parse_args()
-    main(args)
+    with open("log.txt", "a") as f:
+        f.write(f"{args.model_name}, " + f"quant: {args.quant_config}\n")
+    try:
+        main(args)
+    except Exception as e:
+        with open("log.txt", "a") as f:
+            f.write(f"Error: {str(e)}\n")

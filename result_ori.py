@@ -5,7 +5,7 @@ from tqdm.auto import tqdm
 from datasets import load_dataset
 import random
 import numpy as np
-
+import argparse
 #####################################################################
 # === SPEC NOTICE ===
 # Only "load model" and "generate" function selection can be modified.
@@ -84,7 +84,7 @@ def evaluate_ppl(model, tokenizer, device="cuda:0"):
     return ppl.item()
 
 
-def main():
+def main(model_name):
     ############## Set Up ##############
     torch.manual_seed(0)
     random.seed(0)
@@ -94,12 +94,13 @@ def main():
 
     ### === TODO: Load your model (you may change this part) ===
     # model_name = "/home/JaaaaaA_l/checkpoints/llama3.2-3b-distill-to-1b"
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+    model_name = model_name
+    offload = True if "8B" in model_name else False
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
         device_map=device,
-        offload_state_dict=True
+        offload_state_dict=offload
         )
     #####################################
 
@@ -191,6 +192,10 @@ def main():
     ppl = evaluate_ppl(model, tokenizer, device)
     print(f"Perplexity (PPL): {ppl}")
 
+    with open("log.txt", "a") as f:
+        f.write(f"Throughput: {org_tput} toks/s\n")
+        f.write(f"Perplexity (PPL): {ppl}\n")
+
     # Save results to CSV
     import csv
 
@@ -205,4 +210,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
+    args = parser.parse_args()
+    
+    with open("log.txt", "a") as f:
+        f.write(f"{args.model_name}\n")
+    try:
+        main(args.model_name)
+    except Exception as e:
+        with open("log.txt", "a") as f:
+            f.write(f"Error: {str(e)}\n")
