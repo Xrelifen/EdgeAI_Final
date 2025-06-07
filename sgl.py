@@ -12,6 +12,7 @@ import numpy as np
 import os
 
 import sglang as sgl
+import argparse
 
 
 #####################################################################
@@ -47,7 +48,7 @@ def evaluate_ppl(model, tokenizer, device="cuda:0"):
     return ppl.item()
 
 
-def main():
+def main(args):
     ############## Set Up ##############
     torch.manual_seed(0)
     random.seed(0)
@@ -58,6 +59,7 @@ def main():
     ### === TODO: Load your model (you may change this part) ===
 
     # model_name = "../dist/models/Llama-3.2-3B-Instruct"
+    # model_name = "meta-llama/Llama-3.1-8B-Instruct"
     model_name = "JKroller/llama3.2-3b-distill-to-1b"
     # model_name = "AMead10/Llama-3.2-3B-Instruct-AWQ"
     # model = pipeline(model_name, device=device)
@@ -68,7 +70,7 @@ def main():
         kv_cache_dtype="auto",
         attention_backend="flashinfer",
         sampling_backend="pytorch",
-        enable_torch_compile=True,
+        enable_torch_compile=False,
         mem_fraction_static=0.8,
     )
     sampling_params = {
@@ -185,7 +187,8 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    ppl_model_name = "JKroller/llama3.2-3b-distill-to-1b"
+    # ppl_model_name = "JKroller/llama3.2-3b-distill-to-1b"
+    ppl_model_name =  model_name
     ppl_tokenizer = AutoTokenizer.from_pretrained(ppl_model_name)
     quantization_config = TorchAoConfig("int8_dynamic_activation_int8_weight")
     ppl_model = AutoModelForCausalLM.from_pretrained(
@@ -211,4 +214,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name or path")
+    parser.add_argument("--quant_config", type=str, default="int8wo", help="Quantization configuration")
+    parser.add_argument("--mem_fraction_static", type=float, default=0.8, help="Memory fraction for static cache")
+    args = parser.parse_args()
+    main(args)
