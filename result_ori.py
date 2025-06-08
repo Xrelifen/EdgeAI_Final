@@ -201,8 +201,8 @@ def main(model_name):
 
     rounded_tput = round(org_tput, 1)
     ppl = round(ppl, 2)
-
-    with open("result.csv", mode="w", newline="") as file:
+    model_name_ = model_name[model_name.rfind("/") + 1:]
+    with open(f"result_{model_name_}.csv", mode="w+", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Id", "value"])
         writer.writerow([0, ppl])

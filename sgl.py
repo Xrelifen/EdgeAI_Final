@@ -209,8 +209,8 @@ def main(args):
     print(f"Perplexity (PPL): {ppl:.2f}")
 
     import csv
-
-    with open("result.csv", "w", newline="") as f:
+    model_name_ = model_name[model_name.rfind("/") + 1:]
+    with open(f"result_sgl_{model_name_}.csv", "w+", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Id", "value"])
         writer.writerow([0, round(ppl, 2)])
