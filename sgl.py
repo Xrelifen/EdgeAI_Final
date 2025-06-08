@@ -4,6 +4,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TorchAoConfig
 from torchao.quantization import (
     Int8DynamicActivationInt8WeightConfig,
     Int8WeightOnlyConfig,
+    GemliteUIntXWeightOnlyConfig,
+    Int4WeightOnlyConfig
 )
 from tqdm.auto import tqdm
 from datasets import load_dataset
@@ -71,7 +73,7 @@ def main(args):
         attention_backend="flashinfer",
         sampling_backend="pytorch",
         enable_torch_compile=True,
-        mem_fraction_static=0.8,
+        mem_fraction_static=0.9,
     )
     sampling_params = {
         "max_new_tokens": 256,
@@ -190,7 +192,16 @@ def main(args):
     # ppl_model_name = "JKroller/llama3.2-3b-distill-to-1b"
     ppl_model_name =  model_name
     ppl_tokenizer = AutoTokenizer.from_pretrained(ppl_model_name)
-    quantization_config = TorchAoConfig("int8_dynamic_activation_int8_weight")
+    quant_dict = { "int4wo-128": Int4WeightOnlyConfig(group_size=128, use_hqq=True),
+                   "int8dq": Int8DynamicActivationInt8WeightConfig(),
+                   "int8wo": Int8WeightOnlyConfig(),
+                   "gemlite-uintx": GemliteUIntXWeightOnlyConfig() }
+    if args.quant_config is not None:
+        quantization_config = quant_dict[args.quant_config]
+    else:
+        # Keep default to int8dq?
+        quantization_config = Int8DynamicActivationInt8WeightConfig(),
+        
     ppl_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=quantization_config,
