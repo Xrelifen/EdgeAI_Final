@@ -1,7 +1,7 @@
 # 💻 Environment Setup for `sglang`
 
 This guide outlines the steps to set up the environment for using [`sglang`](https://github.com/sgl-project/sglang) with all necessary dependencies, including CUDA 12.2 support.  
-**Note:** This setup is tested on an environment using an **NVIDIA T4 GPU**.
+**Note:** This setup is tested on an environment using an **NVIDIA RTX4060 GPU**.
 
 ---
 
@@ -9,7 +9,7 @@ This guide outlines the steps to set up the environment for using [`sglang`](htt
 
 - [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda installed
 - An environment named `sgl` (or create one via `conda create -n sgl python=3.11`)
-- NVIDIA T4 GPU with appropriate CUDA drivers installed
+- NVIDIA RTX4060 GPU with appropriate CUDA drivers installed
 
 ---
 
@@ -55,30 +55,13 @@ python sgl.py
 ```
 
 ## Result
-- Baseline
-  - Throughput: 29.8
-  - PPL: 11.04
-- LoRA Llama3.2 3B
-  - Throughput: 30.3
-  - PPL: 9.03
-- LoRA Llama3.2 3B distil Llama3.2 1B model
-  - Throughput: 54.3
-  - PPL: 11.20
-- LoRA Llama3.2 3B distil Llama3.2 1B model + int8 Quant (HQQ)
-  - Throughput: 52.1
-  - PPL: 11.20
-- SGLang + LoRA Llama3.2 3B
-  - Throughput: 35.9
-  - PPL: 9.03
-- SGLang + LoRA Llama3.2 3B distil Llama3.2 1B model
-  - Throughput: 90.9
-  - PPL: 11.20
-- SGLang + LoRA 1B model + int8 Quant (torchao)
-  - Throughput: 115.0
-  - PPL: 11.33
 
-
-
+ | Model                          | tput     | speedup  | wikitext-2 PPL | 
+ |--------------------------------|----------|----------|----------------|
+ | Llama3.1 8b offloading         | 1.23     | -------- | 7.21           |
+ | Llama3.2 1b                    | 74.89    | 60.88x   | 13.16          | 
+ | Llama3.2 1b distill            | 90.55    | 73.62x   | 11.20          |
+ | Llama3.2 1b distill 8bit quant | 125.23   | 101.81x  | 11.33          |
 
 
 
