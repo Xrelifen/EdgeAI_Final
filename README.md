@@ -54,7 +54,8 @@ pip install torchao>=0.9.0
 python sgl.py
 ```
 
-## Result
+## 📊 Result
+
 | Model                             | Framework  | Offloading | Quantization   | PPL   | Tput (toks/s) | Speedup     |
 |-----------------------------------|------------|------------|----------------|-------|---------------|-------------|
 | meta-llama/Llama-3.1-8B-Instruct  | SGLang     | ✅         | None           | 7.21  | 1.23          | 1.00x       |
@@ -64,6 +65,5 @@ python sgl.py
 | JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | None           | 11.20 | 90.55         | 73.62x      |
 | JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | torchao-int8dq | 11.33 | 125.23        | **101.81x** |
 
-
-
+## ▶️ Demo
 
