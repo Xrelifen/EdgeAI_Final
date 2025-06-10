@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from tqdm.auto import tqdm
 from datasets import load_dataset
 import random
@@ -95,13 +95,24 @@ def main(model_name):
     ### === TODO: Load your model (you may change this part) ===
     # model_name = "/home/JaaaaaA_l/checkpoints/llama3.2-3b-distill-to-1b"
     model_name = model_name
-    offload = True if "8B" in model_name else False
+    # offload = True if "8B" in model_name else False
+    bnb_config = BitsAndBytesConfig(
+        # load_in_4bit=True,
+        # bnb_4bit_quant_type="nf4",
+        # bnb_4bit_use_double_quant=True,
+        # bnb_4bit_compute_dtype=torch.float16,
+        load_in_8bit=True,
+        bnb_8bit_compute_dtype=torch.float16,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        quantization_config=bnb_config,
+        
         torch_dtype=torch.float16,
         device_map=device,
-        offload_state_dict=offload
+        # offload_state_dict=offload
         )
+    model = torch.compile(model)
     #####################################
 
     model.eval()
