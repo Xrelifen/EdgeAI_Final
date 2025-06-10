@@ -55,14 +55,14 @@ python sgl.py
 ```
 
 ## Result
-| Model                              | Framework  | Offloading | Quantization   | PPL   | Tput (toks/s) | Speedup |
-|-----------------------------------|------------|------------|----------------|-------|---------------|---------|
-| meta-llama/Llama-3.1-8B-Instruct  | SGLang     | ✅         | None           | 7.21  | 1.23          | 1.00x   |
-| meta-llama/Llama-3.1-8B-Instruct  | HuggingFace| ❌         | bnb-int8       | 7.29  | 3.90          | 3.17x   |
-| meta-llama/Llama-3.1-8B-Instruct  | HuggingFace| ❌         | bnb-int4       | 7.62  | 21.34         | 17.35x  |
-| meta-llama/Llama-3.2-1B-Instruct  | SGLang     | ❌         | None           | 13.16 | 74.89         | 60.89x  |
-| JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | None           | 11.20 | 90.55         | 73.62x  |
-| JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | torchao-int8dq | 11.33 | 125.23        | 101.00x |
+| Model                             | Framework  | Offloading | Quantization   | PPL   | Tput (toks/s) | Speedup     |
+|-----------------------------------|------------|------------|----------------|-------|---------------|-------------|
+| meta-llama/Llama-3.1-8B-Instruct  | SGLang     | ✅         | None           | 7.21  | 1.23          | 1.00x       |
+| meta-llama/Llama-3.1-8B-Instruct  | HuggingFace| ❌         | bnb-int8       | 7.29  | 3.90          | 3.17x       |
+| meta-llama/Llama-3.1-8B-Instruct  | HuggingFace| ❌         | bnb-int4       | 7.62  | 21.34         | 17.35x      |
+| meta-llama/Llama-3.2-1B-Instruct  | SGLang     | ❌         | None           | 13.16 | 74.89         | 60.89x      |
+| JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | None           | 11.20 | 90.55         | 73.62x      |
+| JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | torchao-int8dq | 11.33 | 125.23        | **101.00x** |
 
 
 
