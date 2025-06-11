@@ -66,6 +66,7 @@ python sgl.py
 | JKroller/llama3.2-3b-distill-to-1b| SGLang     | ❌         | torchao-int8dq | 11.33 | 125.23        | **101.81x** |
 
 ## ▶️ Demo
+![EAI_final_demo_video](https://github.com/user-attachments/assets/8741073d-d4a8-4c27-b460-ed1a54e782e8)
 
 ### Demo Offloading Model
 ```bash
