@@ -1,6 +1,6 @@
 # 💻 Environment Setup for `sglang`
 
-This guide outlines the steps to set up the environment for using [`sglang`](https://github.com/sgl-project/sglang) with all necessary dependencies, including CUDA 12.2 support.  
+This guide outlines the steps to set up the environment for using [`sglang`](https://github.com/sgl-project/sglang) with all necessary dependencies, including CUDA 12.2 support.
 **Note:** This setup is tested on an environment using an **NVIDIA RTX4060 GPU**.
 
 ---
@@ -67,3 +67,19 @@ python sgl.py
 
 ## ▶️ Demo
 
+### Demo Offloading Model
+```bash
+python gradio_ori.py
+```
+
+### Demo Optimized Model
+
+#### Run SGLang server
+```bash
+python -m sglang.launch_server --model-path JKroller/llama3.2-3b-distill-to-1b --port 3000 --kv-cache-dtype auto --attention-backend flashinfer --sampling-backend pytorch --enable-torch-compile --mem-fraction-static 0.7
+```
+
+#### Run Gradio
+```bash
+python gradio_sgl.py
+```
