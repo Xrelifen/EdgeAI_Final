@@ -107,7 +107,7 @@ def main(model_name):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=bnb_config,
-        
+
         torch_dtype=torch.float16,
         device_map=device,
         # offload_state_dict=offload
@@ -187,7 +187,7 @@ def main(model_name):
         time_record.append(elapsed_ms / 1000)
         tputs.append(tput)
 
-    
+
     response = tokenizer.decode(
         generated[0][input_ids.shape[1] :], skip_special_tokens=True
     )
@@ -224,7 +224,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
     args = parser.parse_args()
-    
+
     with open("log.txt", "a") as f:
         f.write(f"{args.model_name}\n")
     try:

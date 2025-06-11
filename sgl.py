@@ -201,7 +201,7 @@ def main(args):
     else:
         # Keep default to int8dq?
         quantization_config = Int8DynamicActivationInt8WeightConfig(),
-        
+
     ppl_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=quantization_config,
@@ -216,7 +216,7 @@ def main(args):
     with open("log.txt", "a") as f:
         f.write(f"Throughput: {org_tput} toks/s\n")
         f.write(f"Perplexity (PPL): {ppl:.2f}\n")
-        
+
     print(f"Perplexity (PPL): {ppl:.2f}")
 
     import csv
