@@ -73,7 +73,7 @@ def main(args):
         attention_backend="flashinfer",
         sampling_backend="pytorch",
         enable_torch_compile=True,
-        mem_fraction_static=0.9,
+        mem_fraction_static=0.8,
     )
     sampling_params = {
         "max_new_tokens": 256,

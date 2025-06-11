@@ -1,0 +1,1 @@
+python3 -m sglang.launch_server --model-path "JKroller/llama3.2-3b-distill-to-1b" --torchao-config "int8dq" --kv-cache-dtype "auto" --attention-backend "flashinfer" --sampling-backend "pytorch" --enable-torch-compile --mem-fraction-static 0.8 --host 127.0.0.1 --port 3000
